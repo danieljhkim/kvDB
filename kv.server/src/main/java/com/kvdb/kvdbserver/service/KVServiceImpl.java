@@ -37,4 +37,26 @@ public class KVServiceImpl extends KVServiceGrpc.KVServiceImplBase {
         responseObserver.onNext(response);
         responseObserver.onCompleted();
     }
+
+    @Override
+    public void delete(DeleteRequest request, StreamObserver<DeleteResponse> responseObserver) {
+        boolean success = store.delete(request.getKey());
+
+        DeleteResponse response = DeleteResponse.newBuilder()
+                .setSuccess(success)
+                .build();
+
+        responseObserver.onNext(response);
+        responseObserver.onCompleted();
+    }
+
+    @Override
+    public void ping(PingRequest request, StreamObserver<PingResponse> responseObserver) {
+        PingResponse response = PingResponse.newBuilder()
+                .setMessage("pong")
+                .build();
+
+        responseObserver.onNext(response);
+        responseObserver.onCompleted();
+    }
 }

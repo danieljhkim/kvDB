@@ -2,8 +2,22 @@
 
 A Redis-like distributed key-value store implemented in Java with clustering capabilities.
 
-This project provides a lightweight, in-memory database with disk persistence options, as well as relational-database (postgres) persistence via
-simple CLI commands. It supports a distributed architecture with a coordinator and multiple node servers, providing high availability and horizontal scaling.
+## Features
+
+This project provides a lightweight, in-memory database with periodic disk persistence via simple CLI commands.
+Supports a distributed architecture with a coordinator node and multiple data nodes using write-ahead logs (WAL) and a modulo-based sharding strategy, enabling horizontal scalability.
+
+### Failure recovery
+
+Failure of any node is managed by the coordinator node, by delegating failed node's work to another healthy node and, once the failed node is back online, it syncs the state via 2 WAL's:
+- **Primary WAL**: Logs from the failed node
+- **Secondary WAL**: Logs from the coordinator node that were kept while the node was down
+
+### Client-Server Communication
+
+- The server uses a combination of TCP sockets and gRPC for server-server communication
+- Individual nodes can be accessed directly or through the coordinator
+
 
 --- 
 
@@ -99,11 +113,6 @@ move kv.exe C:\Windows\System32\
 # connect to the cluster
 kv connect --host localhost --port 7000
 ```
-
-### Client-Server Communication
-
-- The server uses a combination of TCP sockets and gRPC for server-server communication
-- Individual nodes can be accessed directly or through the coordinator
 
 ### Basic CLI Commands
 

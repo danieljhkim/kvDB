@@ -37,6 +37,28 @@ public class HttpClusterNodeClient implements ClusterNodeClient {
     }
 
     @Override
+    public boolean sendDelete(String key) {
+        try {
+            httpClient.post(urlBase + "/delete?key=" + key, String.class);
+            return true;
+        } catch (Exception e) {
+            System.err.println("HTTP GET failed: " + e.getMessage());
+            return false;
+        }
+    }
+
+    @Override
+    public boolean ping() {
+        try {
+            String response = httpClient.get(urlBase + "/ping", String.class);
+            return "pong".equalsIgnoreCase(response);
+        } catch (Exception e) {
+            System.err.println("HTTP PING failed: " + e.getMessage());
+            return false;
+        }
+    }
+
+    @Override
     public void shutdown() {
         System.out.println("HTTP client shutdown not required");
     }

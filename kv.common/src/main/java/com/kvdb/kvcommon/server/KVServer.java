@@ -59,6 +59,7 @@ public class KVServer implements BaseServer {
             acceptConnectionLoop();
         } catch (IOException e) {
             LOGGER.log(Level.SEVERE, "Failed to start server on port " + port, e);
+        } finally {
             shutdown();
         }
     }

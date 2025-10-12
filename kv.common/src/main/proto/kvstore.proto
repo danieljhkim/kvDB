@@ -9,6 +9,8 @@ package kvstore;
 service KVService {
   rpc Get (KeyRequest) returns (ValueResponse);
   rpc Set (KeyValueRequest) returns (SetResponse);
+  rpc Delete (DeleteRequest) returns (DeleteResponse);
+  rpc Ping (PingRequest) returns (PingResponse);
 }
 
 message KeyRequest {
@@ -26,4 +28,19 @@ message ValueResponse {
 
 message SetResponse {
   bool success = 1;
+}
+
+message DeleteRequest {
+  string key = 1;
+}
+
+message DeleteResponse {
+  bool success = 1;
+}
+
+message PingRequest {
+}
+
+message PingResponse {
+  string message = 1;
 }

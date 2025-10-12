@@ -5,7 +5,7 @@ import com.kvdb.kvcommon.config.SystemConfig;
 import com.kvdb.kvcommon.annotations.Timer;
 import com.kvdb.kvdbserver.persistence.FilePersistenceManager;
 import com.kvdb.kvdbserver.persistence.PersistenceManager;
-import com.kvdb.kvdbserver.persistence.WALManager;
+import com.kvdb.kvcommon.persistence.WALManager;
 
 import java.io.IOException;
 import java.util.*;

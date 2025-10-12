@@ -44,7 +44,7 @@ public class KVStoreRepository implements BaseRepository {
     }
 
     public boolean isHealthy() {
-        return store.size() > 0;
+        return true;
     }
     public void initialize(String tableName) {
         LOGGER.info("Initializing KVStore with table name: " + tableName);

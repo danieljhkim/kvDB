@@ -35,6 +35,23 @@ public class GrpcClusterNodeClient implements ClusterNodeClient {
         SetResponse response = stub.set(request);
         return response.getSuccess();
     }
+
+    @Override
+    public boolean sendDelete(String key) {
+        DeleteRequest request = DeleteRequest.newBuilder()
+                .setKey(key)
+                .build();
+        DeleteResponse response = stub.delete(request);
+        return response.getSuccess();
+    }
+
+    @Override
+    public boolean ping() {
+        PingRequest request = PingRequest.newBuilder().build();
+        PingResponse response = stub.ping(request);
+        return "pong".equalsIgnoreCase(response.getMessage());
+    }
+
     @Override
     public void shutdown() {
         channel.shutdown();

@@ -11,7 +11,7 @@ NODE := kv.server
 # Targets
 # -----------------------------------
 
-all: java cli
+all: java run_cluster cli
 
 # -----------------
 # Build Java: uses Maven only
@@ -40,5 +40,12 @@ clean:
 	rm -f $(COORD)/Coordinator.jar
 	rm -f $(NODE)/Node.jar
 
+# -----------------
+# run the cluster
+# -----------------
+run_cluster:
+	chmod +x scripts/run_client.sh scripts/run_cluster.sh
+	./scripts/run_cluster.sh
 
-.PHONY: all java cli clean
+
+.PHONY: all java cli clean run_cluster

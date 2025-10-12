@@ -27,6 +27,6 @@ public class ClusterCommandExecutor implements CommandExecutor {
     
     @Override
     public boolean delete(String key) {
-        return false; // TODO: implement
+        return client.sendDelete(key);
     }
 }

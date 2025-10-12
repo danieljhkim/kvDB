@@ -72,23 +72,16 @@ KvDB follows a distributed architecture with the following components:
 1. Package the project using Maven:
 
 ```bash
-mvn clean package
+make java
 ````
 
-2. Make the scripts executable:
+2. Start the Cluster: Coordinator Server and Node Servers
 
 ```bash
-chmod +x scripts/run_client.sh scripts/run_cluster.sh
+make run_cluster 
 ```
 
-3. Start the Cluster: Coordinator Server and Node Servers
-
-```bash
-# bash script to start the coordinator and node servers
-./scripts/run_cluster.sh
-```
-
-4. Start the Client CLI
+3. Start the Client CLI
 
 **Option 1**: Use kv.client Java application
 
@@ -98,17 +91,7 @@ chmod +x scripts/run_client.sh scripts/run_cluster.sh
 
 **Option 2** (recommended): [Use kvcli CLI Go application](./golang/kvcli/README.md)
 ```bash
-cd kvcli
-
-go build -o kv
-
-# move the binary PATH
-
-# for unix:
-mv kv /usr/local/bin/
-
-# for windows:
-move kv.exe C:\Windows\System32\
+make cli
 
 # connect to the cluster
 kv connect --host localhost --port 7000

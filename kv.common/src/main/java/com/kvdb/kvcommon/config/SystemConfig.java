@@ -20,8 +20,16 @@ public class SystemConfig {
 
     private static SystemConfig INSTANCE;
     private final Properties properties;
+    private String resourcePath = "";
 
     private SystemConfig() {
+        this.properties = new Properties();
+        loadDefaultConfigFile();
+        loadEnvSpecificConfigFile();
+    }
+
+    private SystemConfig(String resourcePath) {
+        this.resourcePath = resourcePath;
         this.properties = new Properties();
         loadDefaultConfigFile();
         loadEnvSpecificConfigFile();
@@ -34,35 +42,40 @@ public class SystemConfig {
         return INSTANCE;
     }
 
+    public static synchronized SystemConfig getInstance(String resourcePath) {
+        if (INSTANCE == null) {
+            INSTANCE = new SystemConfig(resourcePath);
+        }
+        return INSTANCE;
+    }
+
     private void loadDefaultConfigFile() {
-        // for development
-        Path path = Paths.get(DEFAULT_CONFIG_FILE);
+        Path path = Paths.get(resourcePath, DEFAULT_CONFIG_FILE);
         if (Files.exists(path)) {
-            try (InputStream input = new FileInputStream(DEFAULT_CONFIG_FILE)) {
+            try (InputStream input = new FileInputStream(path.toFile())) {
                 properties.load(input);
-                LOGGER.info("Loaded development default configuration from filesystem: " + DEFAULT_CONFIG_FILE);
+                LOGGER.info("Loaded default configuration from filesystem: " + path);
                 return;
             } catch (IOException e) {
-                LOGGER.log(Level.WARNING, "Failed to load development configuration from filesystem", e);
+                LOGGER.log(Level.WARNING, "Failed to load default configuration from filesystem", e);
             }
         }
-        // for packaged applications
-        try (InputStream input = getClass().getClassLoader().getResourceAsStream(DEFAULT_CONFIG_FILE)) {
+        try (InputStream input = getClass().getClassLoader().getResourceAsStream(resourcePath + "/" + DEFAULT_CONFIG_FILE)) {
             if (input != null) {
                 properties.load(input);
-                LOGGER.info("Loaded package default configuration from classpath: " + DEFAULT_CONFIG_FILE);
+                LOGGER.info("Loaded default configuration from classpath: " + resourcePath + "/" + DEFAULT_CONFIG_FILE);
             } else {
-                LOGGER.warning("Default configuration file not found in classpath: " + DEFAULT_CONFIG_FILE);
+                LOGGER.warning("Default configuration file not found in classpath: " + resourcePath + "/" + DEFAULT_CONFIG_FILE);
             }
         } catch (IOException e) {
-            LOGGER.log(Level.WARNING, "Failed to load packaged configuration from classpath", e);
+            LOGGER.log(Level.WARNING, "Failed to load default configuration from classpath", e);
         }
     }
 
     private void loadEnvSpecificConfigFile() {
         String env = System.getProperty("kvdb.env");
         if (env != null && !env.isEmpty()) {
-            String envConfigFile = "resources/application-" + env + ".properties"; // FIXME: Adjust path for packaged applications
+            String envConfigFile = resourcePath + "/application-" + env + ".properties";
             Path envPath = Paths.get(envConfigFile);
 
             if (Files.exists(envPath)) {
@@ -78,35 +91,16 @@ public class SystemConfig {
         }
     }
 
-    public String getConfigFilePath() {
-        String env = System.getProperty("kvdb.env");
-        if (env != null && !env.isEmpty()) {
-            String envConfigFile = "resources/application-" + env + ".properties"; // FIXME: Adjust path for packaged applications
-            Path envPath = Paths.get(envConfigFile);
-            if (Files.exists(envPath)) {
-                return envConfigFile;
-            } else {
-                LOGGER.warning("Environment-specific config file not found: " + envConfigFile);
-            }
-        }
-        return DEFAULT_CONFIG_FILE;
-    }
     public String getProperty(String key, String defaultValue) {
-        // System property - passed to JVM using -D flag
-        // i.e. -Dkvdb.<key>=<value>
         String value = System.getProperty("kvdb." + key);
         if (value != null && !value.isEmpty()) {
             return value;
         }
-
-        // env variables set on OS or shell env level
-        // i.e. export KVDB_<key> = <value>
         String envKey = "KVDB_" + key.toUpperCase().replace('.', '_');
         value = System.getenv(envKey);
         if (value != null && !value.isEmpty()) {
             return value;
         }
-
         return properties.getProperty(key, defaultValue);
     }
 
@@ -134,5 +128,4 @@ public class SystemConfig {
     public Set<String> getAllPropertyNames() {
         return getAllPropertyNames(null);
     }
-
 }

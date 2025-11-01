@@ -61,10 +61,9 @@ public class ClusterConfig {
                 String id = (String) item.get("id");
                 String host = (String) item.get("host");
                 int port = (Integer) item.get("port");
-                int grpcPort = (Integer) item.get("grpcPort");
                 boolean useGrpc = item.getOrDefault("useGrpc", true) instanceof Boolean &&
                         (Boolean) item.getOrDefault("useGrpc", true);
-                nodes.add(new ClusterNode(id, host, port, useGrpc, grpcPort));
+                nodes.add(new ClusterNode(id, host, port, useGrpc));
             }
 
             LOGGER.info("Loaded " + nodes.size() + " cluster nodes from configuration");

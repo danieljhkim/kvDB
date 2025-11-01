@@ -1,3 +1,3 @@
 server:
-  host: localhost
-  port: 7000
+  host: kvdb-coordinator # when using docker / use localhost otherwise
+  port: 5000

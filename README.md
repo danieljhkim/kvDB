@@ -65,7 +65,6 @@ KvDB follows a distributed architecture with the following components:
 
 - Java 11 or higher
 - Maven
-- PostgreSQL (optional, for SQL persistence)
 
 ### Starting the Cluster
 
@@ -83,13 +82,7 @@ make run_cluster
 
 3. Start the Client CLI
 
-**Option 1**: Use kv.client Java application
-
-```bash
-./scripts/run_client.sh
-```
-
-**Option 2** (recommended): [Use kvcli CLI Go application](./golang/kvcli/README.md)
+**Option 1** (recommended): [Use kvcli CLI Go application](./golang/kvcli/README.md)
 ```bash
 make cli
 
@@ -105,14 +98,6 @@ kv connect --host localhost --port 7000
 - `KV GET key` - Get the value of key
 - `KV DEL key` - Delete one or more keys
 
-#### TODO'S:
-
-- `KV EXISTS key` - Check if key(s) exist
-- `KV ALL` - Get all key-value pairs (not yet)
-- `KV DROP` - Remove all keys from store and disk
-- `KV SIZE` - Get the number of keys in the store
-- `SAVE` - Save the current state to disk
-
 
 #### Other Commands
 
@@ -124,25 +109,7 @@ kv connect --host localhost --port 7000
 
 ## Configuration
 
-Configuration is done via `application.properties` file located in the `src/main/resources` directory.
-
-### Cluster Configuration
-
-The coordinator uses a YAML configuration file to define the cluster topology:
-
-```yaml
-nodes:
-  - id: node1
-    host: localhost
-    port: 7001
-    isGrpc: true
-    grpcPort: 9001
-  - id: node2
-    host: localhost
-    port: 7002
-    isGrpc: true
-    grpcPort: 9002
-```
+Storage node configuration is done via `application.properties` file located in the `kv.common/src/main/resources/<node_id>` directory.
 
 ### File-based Persistence
 
@@ -155,25 +122,22 @@ kvdb.persistence.enableAutoFlush=true
 kvdb.persistence.autoFlushInterval=2
 ```
 
-### PostgreSQL Persistence
+### Cluster Configuration
 
-SQL commands leverage PostgreSQL for persistent storage.
+The coordinator uses a YAML configuration file to define the cluster topology, located in the `kv.coordinator/src/main/resources/cluster-config.yaml` file:
 
-```properties
-kvdb.database.default.url=jdbc:postgresql://localhost:5432/kvdb
-kvdb.database.default.driver=org.postgresql.Driver
-kvdb.database.default.username=yourusername
-kvdb.database.default.password=yourpassword
-kvdb.database.default.table=kv_store
-```
+```yaml
+nodes:
+  - id: node1
+    host: 127.0.0.1
+    port: 8081
+    useGrpc: true
 
-### Server Configuration
+  - id: node2
+    host: 127.0.0.1
+    port: 8082
+    useGrpc: true
 
-The server can be configured to run on a specific host and port.
-
-```properties
-kvdb.server.port=6379
-kvdb.server.host=localhost
 ```
 
 --- 

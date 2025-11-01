@@ -119,10 +119,11 @@ public class ClusterManager {
         String serverJarPath = coordinatorDir + "/kv.server/target/kv.server-1.0-SNAPSHOT.jar"; //TODO:: Adjust path dynamically
         try {
             String command = String.format(
-                    "java -jar %s %d %s",
+                    "java -jar %s %d %s %s",
                     serverJarPath,
                     node.getPort(),
-                    node.isGrpc ? "grpc" : "http"
+                    node.isGrpc ? "grpc" : "http",
+                    node.getId()
             );
             ProcessBuilder processBuilder = new ProcessBuilder(command.split(" "));
             processBuilder.inheritIO();

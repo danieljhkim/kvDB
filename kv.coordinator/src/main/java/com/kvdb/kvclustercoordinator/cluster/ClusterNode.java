@@ -21,17 +21,17 @@ public class ClusterNode {
     private volatile boolean canAccess = true; // during recovery, we need to lock access to this node
     private final ReentrantLock accessLock = new ReentrantLock();
 
-    public ClusterNode(String id, String host, int port, boolean useGrpc, int grpcPort) {
+    public ClusterNode(String id, String host, int port, boolean useGrpc) {
         this.id = id;
         this.host = host;
         this.port = port;
         this.isGrpc = useGrpc;
-        this.client = useGrpc ? new GrpcClusterNodeClient(host, grpcPort) : new HttpClusterNodeClient(host, port);
+        this.client = useGrpc ? new GrpcClusterNodeClient(host, port) : new HttpClusterNodeClient(host, port);
         initWALManager("./wal/" + id + ".log");
     }
 
     public ClusterNode(String id, String host, int port) {
-        this(id, host, port, false, 0);
+        this(id, host, port, false);
     }
 
     public boolean sendSet(String key, String value) {

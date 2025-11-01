@@ -41,11 +41,20 @@ clean:
 	rm -f $(NODE)/Node.jar
 
 # -----------------
-# run the cluster
+# cluster commands
 # -----------------
 run_cluster:
-	chmod +x scripts/run_client.sh scripts/run_cluster.sh
-	./scripts/run_cluster.sh
+	chmod +x scripts/run_client.sh scripts/run_cluster.sh scripts/cluster-server.sh
+	./scripts/cluster-server.sh start
 
+stop_cluster:
+    ./scripts/cluster-server.sh stop
+    ./scripts/kill_ports.sh 8081 8082
+
+logs_cluster:
+    ./scripts/cluster-server.sh logs
+
+status_cluster:
+    ./scripts/cluster-server.sh status
 
 .PHONY: all java cli clean run_cluster

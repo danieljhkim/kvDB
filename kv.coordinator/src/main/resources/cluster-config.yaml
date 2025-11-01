@@ -3,10 +3,8 @@ nodes:
   host: 127.0.0.1
   port: 8081
   useGrpc: true
-  grpcPort: 9082
 
 - id: node2
   host: 127.0.0.1
   port: 8082
   useGrpc: true
-  grpcPort: 9082

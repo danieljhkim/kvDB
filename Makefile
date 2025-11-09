@@ -58,7 +58,6 @@ run_cluster:
 	./scripts/cluster-server.sh start
 
 stop_cluster:
-	./scripts/cluster-server.sh stop
 	./scripts/kill_ports.sh 8081 8082 7000
 
 logs_cluster:
@@ -67,4 +66,4 @@ logs_cluster:
 status_cluster:
 	./scripts/cluster-server.sh status
 
-.PHONY: all java cli clean run_cluster
+.PHONY: all java cli clean run_cluster stop_cluster

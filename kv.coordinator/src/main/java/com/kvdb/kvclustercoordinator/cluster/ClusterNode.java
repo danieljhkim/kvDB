@@ -4,6 +4,7 @@ import lombok.Getter;
 import lombok.Setter;
 
 import java.util.Map;
+import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Logger;
 
@@ -22,6 +23,7 @@ public class ClusterNode {
     private WALManager walManager; // for when a node is down
     private volatile boolean canAccess = true; // during recovery, we need to lock access to this node
     private final ReentrantLock accessLock = new ReentrantLock();
+    private final Condition accessCondition = accessLock.newCondition();
 
     public ClusterNode(String id, String host, int port, boolean useGrpc) {
         this.id = id;
@@ -37,14 +39,8 @@ public class ClusterNode {
     }
 
     public boolean sendSet(String key, String value) {
-        while (!canAccess) {
-            // temporary solution for recovery phase
-            try {
-                Thread.sleep(10);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return false;
-            }
+        if (!waitForAccess()) {
+            return false;
         }
         return client.sendSet(key, value);
     }
@@ -54,14 +50,8 @@ public class ClusterNode {
     }
 
     public boolean sendDelete(String key) {
-        while (!canAccess) {
-            // temporary solution for recovery phase
-            try {
-                Thread.sleep(10);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return false;
-            }
+        if (!waitForAccess()) {
+            return false;
         }
         return client.sendSet(key, "");
     }
@@ -111,6 +101,24 @@ public class ClusterNode {
         accessLock.lock();
         try {
             this.canAccess = enabled;
+            if (enabled) {
+                accessCondition.signalAll();
+            }
+        } finally {
+            accessLock.unlock();
+        }
+    }
+
+    private boolean waitForAccess() {
+        accessLock.lock();
+        try {
+            while (!canAccess) {
+                accessCondition.await();
+            }
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
         } finally {
             accessLock.unlock();
         }

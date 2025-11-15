@@ -101,13 +101,11 @@ show_logs() {
 
 case "${1:-}" in
   start)   start_server ;;
-  stop)    stop_server ;;
-  restart) stop_server || true; start_server ;;
   status)  status_server ;;
   logs)    show_logs ;;
   *)
     cat <<USAGE
-Usage: $0 {start|stop|restart|status|logs}
+Usage: $0 {start|status|logs}
 
 Paths:
   PROJECT_DIR        = $PROJECT_DIR

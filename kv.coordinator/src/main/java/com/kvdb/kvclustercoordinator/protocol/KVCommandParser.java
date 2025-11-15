@@ -37,7 +37,8 @@ public class KVCommandParser {
 
     private String handleGet(String[] parts, CommandExecutor executor) {
         if (parts.length != 2) return "ERR: Usage: GET key";
-        return executor.get(parts[1]);
+        String value = executor.get(parts[1]);
+        return value != null ? value : "(nil)";
     }
 
     private String handleDelete(String[] parts, CommandExecutor executor) {
@@ -52,7 +53,11 @@ public class KVCommandParser {
 
     private String handleShutdown(String[] parts, CommandExecutor executor) {
         if (parts.length != 2) return "ERR: Usage: SHUTDOWN node_id";
-        return executor.shutdown();
+        try {
+            return executor.shutdown();
+        } catch (UnsupportedOperationException e) {
+            return "ERR: SHUTDOWN operation not supported";
+        }
     }
 
     private String handlePing() {

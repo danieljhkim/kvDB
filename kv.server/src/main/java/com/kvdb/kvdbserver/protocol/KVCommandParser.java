@@ -57,7 +57,8 @@ public class KVCommandParser extends CommandParser {
 
     private String handleGet(String[] parts) {
         if (parts.length != 2) return "ERR: Usage: GET key";
-        return executor.get(parts[1]);
+        String value = executor.get(parts[1]);
+        return value != null ? value : NIL_RESPONSE;
     }
 
     private String handleDelete(String[] parts) {
@@ -71,13 +72,20 @@ public class KVCommandParser extends CommandParser {
     }
 
     private String handleDrop() {
-        executor.truncate();
-        return "OK";
+        try {
+            int count = executor.truncate();
+            return count > 0 ? "OK" : "ERR: No keys to delete";
+        } catch (UnsupportedOperationException e) {
+            return "ERR: DROP operation not supported";
+        }
     }
 
     private String handleShutdown() {
-        executor.shutdown();
-        return "OK";
+        try {
+            return executor.shutdown();
+        } catch (UnsupportedOperationException e) {
+            return "ERR: SHUTDOWN operation not supported";
+        }
     }
 
     private String handlePing() {

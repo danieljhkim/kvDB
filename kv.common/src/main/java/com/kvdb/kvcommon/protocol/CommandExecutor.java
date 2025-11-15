@@ -28,25 +28,37 @@ public interface CommandExecutor {
     }
     
     /**
-     * Remove all entries
+     * Remove all entries. Returns the number of entries removed.
+     * Default implementation throws UnsupportedOperationException.
+     * @return Number of entries removed, or -1 to signal 'not supported'
+     * @throws UnsupportedOperationException if the operation is not supported
      */
     default int truncate() {
-        return 0; // Default implementation
+        throw new UnsupportedOperationException("truncate() is not supported by this executor");
     }
     
     /**
-     * Shutdown the executor
+     * Shutdown the executor and release resources.
+     * Default implementation throws UnsupportedOperationException.
+     * @return Status message
+     * @throws UnsupportedOperationException if the operation is not supported
      */
     default String shutdown() {
-        // Default implementation does nothing
-        return "Shutdown completed.";
+        throw new UnsupportedOperationException("shutdown() is not supported by this executor");
     }
     
     /**
-     * Check if the executor is healthy
+     * Check if the executor is healthy and operational.
+     * Default implementation performs a basic ping by checking if get(null) doesn't throw an exception.
+     * @return true if healthy, false otherwise
      */
     default boolean isHealthy() {
-        return true;
+        try {
+            get(null);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
     
     /**

@@ -2,10 +2,24 @@ package com.kvdb.kvcommon.protocol;
 
 public abstract class CommandParser {
 
-    static final String OK_RESPONSE = "OK";
-    static final String ERROR_RESPONSE = "ERROR";
-    static final String NIL_RESPONSE = "(nil)";
+    public static final String OK_RESPONSE = "OK";
+    public static final String ERROR_RESPONSE = "ERROR";
+    public static final String NIL_RESPONSE = "(nil)";
     protected CommandExecutor executor;
+    
+    /**
+     * Format an error message with consistent prefix
+     */
+    public static String formatError(String message) {
+        return "ERR: " + message;
+    }
+    
+    /**
+     * Format a success message with OK prefix
+     */
+    public static String formatOk(String message) {
+        return OK_RESPONSE + (message.isEmpty() ? "" : ": " + message);
+    }
 
     public CommandParser(CommandExecutor executor) {
         this.executor = executor;

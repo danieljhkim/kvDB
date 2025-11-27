@@ -31,10 +31,7 @@ public class ClusterManager {
     public void initializeClusterNodes() {
         this.clusterNodes.clear();
         try {
-            for (ClusterNode node : clusterConfig.getNodes()) {
-                startClusterNodesLocal(node);
-                clusterNodes.add(node);
-            }
+            clusterNodes.addAll(clusterConfig.getNodes());
             LOGGER.info("Initialized " + clusterNodes.size() + " cluster nodes from configuration");
             this.initialized = true;
         } catch (Exception e) {
@@ -119,27 +116,6 @@ public class ClusterManager {
         } finally {
             recoveredNode.setCanAccess(true);
             syncLock.unlock();
-        }
-    }
-
-    private void startClusterNodesLocal(ClusterNode node) { // only for local nodes
-        // TODO: implement remote start node
-        String coordinatorDir = System.getProperty("user.dir");
-        String serverJarPath = coordinatorDir + "/kv.server/target/kv.server-1.0-SNAPSHOT.jar"; //TODO:: Adjust path dynamically
-        try {
-            String logFilePath = coordinatorDir + "/logs/" + node.getId() + ".log";
-            ProcessBuilder processBuilder = new ProcessBuilder(
-                    "java", "-jar", serverJarPath,
-                    String.valueOf(node.getPort()),
-                    node.isGrpc ? "grpc" : "http",
-                    node.getId()
-            );
-            processBuilder.redirectOutput(new java.io.File(logFilePath));
-            processBuilder.redirectErrorStream(true); // Redirect error stream to the same log file
-            processBuilder.start();
-            LOGGER.info("Started node: " + node.getId() + " on port: " + node.getPort());
-        } catch (Exception e) {
-            LOGGER.log(Level.SEVERE, "Failed to start node: " + node.getId(), e);
         }
     }
 

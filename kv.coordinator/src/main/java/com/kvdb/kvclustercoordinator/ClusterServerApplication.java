@@ -23,11 +23,9 @@ public class ClusterServerApplication {
     private static final String DEFAULT_CONFIG_PATH = "cluster-config.yaml";
 
     public static void main(String[] args) {
-        // System.setProperty("io.grpc.internal.DnsNameResolverProvider.enable_jndi", "false");
-        int port = Integer.parseInt(CONFIG.getProperty("kvdb.server.port", "7000"));
+        int port = Integer.parseInt(CONFIG.getProperty("kvdb.server.port"));
         String configFilePath = DEFAULT_CONFIG_PATH;
 
-        // Parse command-line arguments for port and config file path
         if (args.length > 0) {
             try {
                 port = Integer.parseInt(args[0]);

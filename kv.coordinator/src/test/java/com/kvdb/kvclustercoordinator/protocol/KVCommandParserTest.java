@@ -108,7 +108,7 @@ class KVCommandParserTest {
 
     @Test
     void testShutdownWithNodeId() {
-        String result = parser.executeCommand(new String[]{"SHUTDOWN", "node1"}, executor);
+        String result = parser.executeCommand(new String[]{"SHUTDOWN", "node-1"}, executor);
         // Should throw UnsupportedOperationException and return error
         assertTrue(result.contains("ERR"));
     }

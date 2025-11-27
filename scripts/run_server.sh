@@ -2,11 +2,8 @@
 
 # run_server.sh - Script to start a single KV Node Server
 
-# Get the directory where the script is located
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-
 PROJECT_DIR="$( cd "$SCRIPT_DIR/.." && pwd )/kv.server"
-
 CLIENT_JAR="$PROJECT_DIR/target/kv.server-1.0-SNAPSHOT.jar"
 
 # Check if jar exists
@@ -18,4 +15,6 @@ fi
 
 # Start server in foreground
 echo "Starting KV Server..."
-java -jar "$CLIENT_JAR" "8082" "grpc" "node2"
+
+nohup java -jar "$CLIENT_JAR" \
+  > "$LOG_DIR/node.log" 2>&1 &

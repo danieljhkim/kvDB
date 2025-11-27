@@ -73,7 +73,7 @@ KvDB follows a distributed architecture with the following components:
 1. Package the project using Maven:
 
 ```bash
-make java
+make build
 ````
 
 2. Start the Cluster: Coordinator Server and Node Servers
@@ -89,7 +89,7 @@ make run_cluster
 make build_cli
 
 # connect to the cluster
-kv connect --host localhost --port 7000
+make run_cli
 ```
 
 ### Basic CLI Commands
@@ -112,7 +112,6 @@ kv connect --host localhost --port 7000
 ## Configuration
 
 Storage node configuration is done via `application.properties` file located in the `kv.common/src/main/resources/<node_id>` directory for locally running.
-If running the storage nodes remotely, the configuration files should be placed in `kv.server/src/main/resources/<node_id>` directory.
 
 ### File-based Persistence
 

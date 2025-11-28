@@ -33,10 +33,11 @@ public class KvServerApplication {
 
     private static void startGrpcServer() throws Exception {
         int port = getPort();
-        KVGrpcServer server = new KVGrpcServer.Builder()
-                .setPort(port)
-                .addService(new KVServiceImpl(new KVStoreRepository()))
-                .build();
+        KVGrpcServer server =
+                new KVGrpcServer.Builder()
+                        .setPort(port)
+                        .addService(new KVServiceImpl(new KVStoreRepository()))
+                        .build();
         addShutdownHook(server::shutdown);
         LOGGER.info("Starting gRPC server on port " + port);
         server.start();
@@ -44,20 +45,25 @@ public class KvServerApplication {
 
     private static void startHttpServer() throws Exception {
         int port = getPort();
-        KVServer server = new KVServer(port, 10);
+        KVServer server = new KVServer(port);
         addShutdownHook(server::shutdown);
         LOGGER.info("Starting HTTP server on port " + port);
         server.start();
     }
 
     private static int getPort() {
-        return Integer.parseInt(CONFIG.getProperty("kvdb.server.port", String.valueOf(KvServerApplication.DEFAULT_PORT)));
+        return Integer.parseInt(
+                CONFIG.getProperty(
+                        "kvdb.server.port", String.valueOf(KvServerApplication.DEFAULT_PORT)));
     }
 
     private static void addShutdownHook(Runnable shutdownTask) {
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            LOGGER.info("Shutting down server...");
-            shutdownTask.run();
-        }));
+        Runtime.getRuntime()
+                .addShutdownHook(
+                        new Thread(
+                                () -> {
+                                    LOGGER.info("Shutting down server...");
+                                    shutdownTask.run();
+                                }));
     }
 }

@@ -5,9 +5,7 @@ import com.kvdb.kvcommon.protocol.CommandExecutor;
 import java.util.HashMap;
 import java.util.Map;
 
-/**
- * Fake CommandExecutor for testing purposes
- */
+/** Fake CommandExecutor for testing purposes */
 public class FakeCommandExecutor implements CommandExecutor {
 
     private final Map<String, String> store = new HashMap<>();

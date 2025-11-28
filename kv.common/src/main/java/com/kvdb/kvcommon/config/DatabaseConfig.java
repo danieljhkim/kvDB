@@ -47,12 +47,22 @@ public class DatabaseConfig {
         return INSTANCE;
     }
 
+    public static void shutdown() {
+        if (INSTANCE != null) {
+            for (String dbName : INSTANCE.dataSources.keySet()) {
+                INSTANCE.closeDataSource(dbName);
+            }
+            INSTANCE = null;
+        }
+    }
+
     private Set<String> findAvailableDatabases() {
         Set<String> databases = new HashSet<>();
         for (String propName : systemConfig.getAllPropertyNames()) {
             if (propName.startsWith(DB_PREFIX) && propName.contains(".url")) {
-                String dbName = propName.substring(DB_PREFIX.length(),
-                        propName.length() - 4); // remove ".url"
+                String dbName =
+                        propName.substring(
+                                DB_PREFIX.length(), propName.length() - 4); // remove ".url"
                 databases.add(dbName);
                 LOGGER.info("Found database configuration for: " + dbName);
             }
@@ -72,20 +82,24 @@ public class DatabaseConfig {
             config.setPassword(systemConfig.getProperty(prefix + "password"));
             config.setDriverClassName(systemConfig.getProperty(prefix + "driver"));
 
-            config.setMaximumPoolSize(Integer.parseInt(
-                    systemConfig.getProperty(prefix + "pool.maxSize", "10")));
-            config.setMinimumIdle(Integer.parseInt(
-                    systemConfig.getProperty(prefix + "pool.minIdle", "5")));
-            config.setIdleTimeout(Long.parseLong(
-                    systemConfig.getProperty(prefix + "pool.idleTimeout", "30000")));
-            config.setConnectionTimeout(Long.parseLong(
-                    systemConfig.getProperty(prefix + "pool.connectionTimeout", "30000")));
+            config.setMaximumPoolSize(
+                    Integer.parseInt(systemConfig.getProperty(prefix + "pool.maxSize", "10")));
+            config.setMinimumIdle(
+                    Integer.parseInt(systemConfig.getProperty(prefix + "pool.minIdle", "5")));
+            config.setIdleTimeout(
+                    Long.parseLong(systemConfig.getProperty(prefix + "pool.idleTimeout", "30000")));
+            config.setConnectionTimeout(
+                    Long.parseLong(
+                            systemConfig.getProperty(prefix + "pool.connectionTimeout", "30000")));
 
             HikariDataSource dataSource = new HikariDataSource(config);
             dataSources.put(dbName, dataSource);
             LOGGER.info("Database connection pool initialized for: " + dbName);
         } catch (Exception e) {
-            LOGGER.log(Level.SEVERE, "Failed to initialize database connection pool for: " + dbName, e);
+            LOGGER.log(
+                    Level.SEVERE,
+                    "Failed to initialize database connection pool for: " + dbName,
+                    e);
             throw new RuntimeException("Database configuration error for " + dbName, e);
         }
     }
@@ -110,7 +124,10 @@ public class DatabaseConfig {
         try {
             return dataSources.get(dbName).getConnection();
         } catch (SQLException e) {
-            LOGGER.log(Level.WARNING, "Failed to get connection for " + dbName + ", attempting to reinitialize", e);
+            LOGGER.log(
+                    Level.WARNING,
+                    "Failed to get connection for " + dbName + ", attempting to reinitialize",
+                    e);
             reinitializeDataSource(dbName);
             return dataSources.get(dbName).getConnection();
         }
@@ -150,14 +167,5 @@ public class DatabaseConfig {
 
     public Set<String> getAvailableDatabases() {
         return availableDatabases;
-    }
-
-    public static void shutdown() {
-        if (INSTANCE != null) {
-            for (String dbName : INSTANCE.dataSources.keySet()) {
-                INSTANCE.closeDataSource(dbName);
-            }
-            INSTANCE = null;
-        }
     }
 }

@@ -57,15 +57,27 @@ public class SystemConfig {
                 LOGGER.info("Loaded default configuration from filesystem: " + path);
                 return;
             } catch (IOException e) {
-                LOGGER.log(Level.WARNING, "Failed to load default configuration from filesystem", e);
+                LOGGER.log(
+                        Level.WARNING, "Failed to load default configuration from filesystem", e);
             }
         }
-        try (InputStream input = getClass().getClassLoader().getResourceAsStream(resourcePath + "/" + DEFAULT_CONFIG_FILE)) {
+        try (InputStream input =
+                getClass()
+                        .getClassLoader()
+                        .getResourceAsStream(resourcePath + "/" + DEFAULT_CONFIG_FILE)) {
             if (input != null) {
                 properties.load(input);
-                LOGGER.info("Loaded default configuration from classpath: " + resourcePath + "/" + DEFAULT_CONFIG_FILE);
+                LOGGER.info(
+                        "Loaded default configuration from classpath: "
+                                + resourcePath
+                                + "/"
+                                + DEFAULT_CONFIG_FILE);
             } else {
-                LOGGER.warning("Default configuration file not found in classpath: " + resourcePath + "/" + DEFAULT_CONFIG_FILE);
+                LOGGER.warning(
+                        "Default configuration file not found in classpath: "
+                                + resourcePath
+                                + "/"
+                                + DEFAULT_CONFIG_FILE);
             }
         } catch (IOException e) {
             LOGGER.log(Level.WARNING, "Failed to load default configuration from classpath", e);
@@ -83,10 +95,15 @@ public class SystemConfig {
                     properties.load(input);
                     LOGGER.info("Loaded environment-specific configuration from: " + envConfigFile);
                 } catch (IOException e) {
-                    LOGGER.log(Level.WARNING, "Failed to load environment-specific configuration file: " + envConfigFile, e);
+                    LOGGER.log(
+                            Level.WARNING,
+                            "Failed to load environment-specific configuration file: "
+                                    + envConfigFile,
+                            e);
                 }
             } else {
-                LOGGER.warning("Environment-specific configuration file not found: " + envConfigFile);
+                LOGGER.warning(
+                        "Environment-specific configuration file not found: " + envConfigFile);
             }
         }
     }

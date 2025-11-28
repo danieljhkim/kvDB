@@ -4,35 +4,59 @@ import com.kvdb.kvclustercoordinator.cluster.ClusterNode;
 import com.kvdb.kvcommon.exception.NoHealthyNodesAvailable;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class BasicShardingStrategy implements ShardingStrategy {
 
-    int shardIdx = 0;
+    /**
+     * Used for round-robin selection. AtomicInteger makes this strategy safe to use from multiple
+     * threads concurrently.
+     */
+    private final AtomicInteger nextIndex = new AtomicInteger(0);
 
     @Override
     public ClusterNode getShardWithKey(String key, List<ClusterNode> nodes) {
-        // modulo-based sharding
-        int shardIndex = Math.abs(key.hashCode()) % nodes.size();
+        if (nodes == null || nodes.isEmpty()) {
+            throw new NoHealthyNodesAvailable("No nodes available for sharding");
+        }
+
+        int size = nodes.size();
+        int hash = key != null ? key.hashCode() : 0;
+
+        // floorMod handles negative hashes correctly.
+        int shardIndex = Math.floorMod(hash, size);
         return nodes.get(shardIndex);
     }
 
     @Override
     public ClusterNode getShard(List<ClusterNode> nodes) {
-        // simple round-robin selection
-        shardIdx = (shardIdx + 1) % nodes.size();
-        return nodes.get(shardIdx);
+        if (nodes == null || nodes.isEmpty()) {
+            throw new NoHealthyNodesAvailable("No nodes available for round-robin");
+        }
+
+        int size = nodes.size();
+        int idx = Math.floorMod(nextIndex.getAndIncrement(), size);
+        return nodes.get(idx);
     }
 
     @Override
     public ClusterNode getNextHealthyShard(List<ClusterNode> nodes) {
-        // Round-robin selection of next healthy node
-        int limit = nodes.size();
-        while (!nodes.get(shardIdx).isRunning() && limit-- > 0) {
-            shardIdx = (shardIdx + 1) % nodes.size();
+        if (nodes == null || nodes.isEmpty()) {
+            throw new NoHealthyNodesAvailable("No nodes available for healthy selection");
         }
-        if (limit <= 0) {
-            throw new NoHealthyNodesAvailable("Oopsies, no healthy nodes :(");
+
+        int size = nodes.size();
+        int start = nextIndex.getAndIncrement(); // starting point for this selection
+
+        // Try each node at most once
+        for (int i = 0; i < size; i++) {
+            int idx = Math.floorMod(start + i, size);
+            ClusterNode candidate = nodes.get(idx);
+            if (candidate.isRunning()) {
+                return candidate;
+            }
         }
-        return nodes.get(shardIdx);
+
+        throw new NoHealthyNodesAvailable("No healthy nodes available");
     }
 }

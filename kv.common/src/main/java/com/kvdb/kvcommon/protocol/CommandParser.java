@@ -15,13 +15,22 @@ public abstract class CommandParser {
         this(null);
     }
 
+    /** Format an error message with consistent prefix */
+    public static String formatError(String message) {
+        return "ERR: " + message;
+    }
 
-    public void setCommandExecutor(CommandExecutor executor) {
-        this.executor = executor;
+    /** Format a success message with OK prefix */
+    public static String formatOk(String message) {
+        return OK_RESPONSE + (message.isEmpty() ? "" : ": " + message);
     }
 
     public CommandExecutor getCommandExecutor() {
         return executor;
+    }
+
+    public void setCommandExecutor(CommandExecutor executor) {
+        this.executor = executor;
     }
 
     public abstract String getHelpText();
@@ -31,19 +40,5 @@ public abstract class CommandParser {
     public String process(String[] parts, CommandExecutor executor) {
         if (parts.length == 0) return formatError("Empty command");
         return executeCommand(parts, executor);
-    }
-
-    /**
-     * Format an error message with consistent prefix
-     */
-    public static String formatError(String message) {
-        return "ERR: " + message;
-    }
-
-    /**
-     * Format a success message with OK prefix
-     */
-    public static String formatOk(String message) {
-        return OK_RESPONSE + (message.isEmpty() ? "" : ": " + message);
     }
 }

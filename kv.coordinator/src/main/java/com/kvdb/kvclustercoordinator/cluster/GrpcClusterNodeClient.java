@@ -1,6 +1,7 @@
 package com.kvdb.kvclustercoordinator.cluster;
 
 import com.kvdb.proto.kvstore.*;
+
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 
@@ -30,19 +31,14 @@ public class GrpcClusterNodeClient implements ClusterNodeClient {
 
     @Override
     public boolean sendSet(String key, String value) {
-        KeyValueRequest request = KeyValueRequest.newBuilder()
-                .setKey(key)
-                .setValue(value)
-                .build();
+        KeyValueRequest request = KeyValueRequest.newBuilder().setKey(key).setValue(value).build();
         SetResponse response = stub.set(request);
         return response.getSuccess();
     }
 
     @Override
     public boolean sendDelete(String key) {
-        DeleteRequest request = DeleteRequest.newBuilder()
-                .setKey(key)
-                .build();
+        DeleteRequest request = DeleteRequest.newBuilder().setKey(key).build();
         DeleteResponse response = stub.delete(request);
         return response.getSuccess();
     }
@@ -60,6 +56,5 @@ public class GrpcClusterNodeClient implements ClusterNodeClient {
         ShutdownResponse response = stub.shutdown(request);
         channel.shutdown();
         return response.getMessage();
-
     }
 }

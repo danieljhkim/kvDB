@@ -8,9 +8,7 @@ public interface BaseServer {
      */
     void start() throws Exception;
 
-    /**
-     * Stops the server.
-     */
+    /** Stops the server. */
     void shutdown();
 
     /**

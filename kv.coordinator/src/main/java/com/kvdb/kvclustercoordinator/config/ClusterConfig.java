@@ -1,5 +1,9 @@
 package com.kvdb.kvclustercoordinator.config;
 
+import com.kvdb.kvclustercoordinator.cluster.ClusterNode;
+
+import org.yaml.snakeyaml.Yaml;
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -7,9 +11,6 @@ import java.io.InputStream;
 import java.util.*;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-
-import com.kvdb.kvclustercoordinator.cluster.ClusterNode;
-import org.yaml.snakeyaml.Yaml;
 
 /**
  * Configuration class for cluster nodes.

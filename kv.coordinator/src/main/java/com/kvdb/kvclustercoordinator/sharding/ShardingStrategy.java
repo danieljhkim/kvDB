@@ -13,6 +13,8 @@ public interface ShardingStrategy {
      * @return the shard
      */
     ClusterNode getShardWithKey(String key, List<ClusterNode> nodes);
+
     ClusterNode getShard(List<ClusterNode> nodes);
+
     ClusterNode getNextHealthyShard(List<ClusterNode> nodes) throws NoHealthyNodesAvailable;
 }

@@ -17,16 +17,12 @@ public enum AppStatus {
         return description;
     }
 
-    /**
-     * Returns true if the app is in a fully operational (GREEN) state.
-     */
+    /** Returns true if the app is in a fully operational (GREEN) state. */
     public boolean isHealthy() {
         return this == GREEN;
     }
 
-    /**
-     * Returns true if the all the nodes are down (RED) state.
-     */
+    /** Returns true if the all the nodes are down (RED) state. */
     public boolean isCritical() {
 
         return this == RED;

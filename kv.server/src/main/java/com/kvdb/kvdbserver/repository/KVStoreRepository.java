@@ -8,12 +8,11 @@ import java.util.logging.Logger;
 
 public class KVStoreRepository implements BaseRepository {
 
-    private final static Logger LOGGER = Logger.getLogger(KVStoreRepository.class.getName());
+    private static final Logger LOGGER = Logger.getLogger(KVStoreRepository.class.getName());
 
     private final KVStore store = KVStore.getInstance();
 
-    public KVStoreRepository() {
-    }
+    public KVStoreRepository() {}
 
     public String get(String key) {
         return store.get(key);
@@ -46,6 +45,7 @@ public class KVStoreRepository implements BaseRepository {
     public boolean isHealthy() {
         return true;
     }
+
     public void initialize(String tableName) {
         LOGGER.info("Initializing KVStore with table name: " + tableName);
     }

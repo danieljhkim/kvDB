@@ -1,43 +1,66 @@
 package com.kvdb.kvdbserver.storage;
 
 import com.fasterxml.jackson.core.type.TypeReference;
-import com.kvdb.kvcommon.config.SystemConfig;
 import com.kvdb.kvcommon.annotations.Timer;
+import com.kvdb.kvcommon.config.SystemConfig;
+import com.kvdb.kvcommon.persistence.WALManager;
 import com.kvdb.kvdbserver.persistence.FilePersistenceManager;
 import com.kvdb.kvdbserver.persistence.PersistenceManager;
-import com.kvdb.kvcommon.persistence.WALManager;
 
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 public class KVStore implements KVStorageBase {
 
     private static final Logger LOGGER = Logger.getLogger(KVStore.class.getName());
-    private static final SystemConfig config = SystemConfig.getInstance();
+    private static final SystemConfig CONFIG = SystemConfig.getInstance();
+
     private static final String OK_RESPONSE = "OK";
     private static final String NIL_RESPONSE = "(nil)";
+
+    private static final int FLUSH_INTERVAL =
+            Integer.parseInt(CONFIG.getProperty("kvdb.persistence.autoFlushInterval", "1000"));
+    private static final boolean ENABLE_AUTO_FLUSH =
+            Boolean.parseBoolean(CONFIG.getProperty("kvdb.persistence.enableAutoFlush", "true"));
+    private static final String TABLE_NAME =
+            CONFIG.getProperty("kvdb.persistence.table.name", "default");
+
+    /** Singleton instance. */
     private static final KVStore INSTANCE = new KVStore();
-    private static final int FLUSH_INTERVAL = Integer.parseInt(config.getProperty("kvdb.persistence.autoFlushInterval", "1000"));
-    private static final boolean ENABLE_AUTO_FLUSH = Boolean.parseBoolean(config.getProperty("kvdb.persistence.enableAutoFlush", "true"));
-    private static final String tableName = config.getProperty("kvdb.persistence.table.name", "default");
-    private static int curFlushInterval = 0;
+
+    /** Counts the number of write ops since last flush. */
+    private final AtomicInteger curFlushInterval = new AtomicInteger(0);
+
+    /** Guard to ensure only one flush/saveToDisk runs at a time. */
+    private final ReentrantLock flushLock = new ReentrantLock();
+
     private final Map<String, String> store = new ConcurrentHashMap<>();
     private final PersistenceManager<Map<String, String>> persistenceManager;
-    private final WALManager walManager = new WALManager(config.getProperty("kvdb.persistence.wal.filepath", "data/wal.log"));
+    private final WALManager walManager =
+            new WALManager(CONFIG.getProperty("kvdb.persistence.wal.filepath", "data/wal.log"));
 
     private KVStore() {
         TypeReference<Map<String, String>> typeRef = new TypeReference<>() {};
-        String persistenceFilePath = config.getProperty("kvdb.persistence.filepath");
+        String persistenceFilePath = CONFIG.getProperty("kvdb.persistence.filepath");
+
         this.persistenceManager = new FilePersistenceManager<>(persistenceFilePath, typeRef);
+
         loadFromDisk();
         recover();
-        System.out.println(FLUSH_INTERVAL);
+
+        LOGGER.info(
+                "KVStore initialized. Auto-flush interval: "
+                        + FLUSH_INTERVAL
+                        + ", auto-flush enabled: "
+                        + ENABLE_AUTO_FLUSH);
     }
 
-    public static synchronized KVStore getInstance() {
+    public static KVStore getInstance() {
         return INSTANCE;
     }
 
@@ -61,7 +84,6 @@ public class KVStore implements KVStorageBase {
         LOGGER.info("Saving data to disk");
         try {
             persistenceManager.save(store);
-            curFlushInterval = 0;
         } catch (IOException e) {
             LOGGER.log(Level.SEVERE, "Failed to save data to disk", e);
         }
@@ -70,6 +92,7 @@ public class KVStore implements KVStorageBase {
     public boolean set(String key, String value) {
         Objects.requireNonNull(key, "Key cannot be null");
         Objects.requireNonNull(value, "Value cannot be null");
+
         walManager.log("SET", key, value);
         store.put(key, value);
         flush();
@@ -84,9 +107,11 @@ public class KVStore implements KVStorageBase {
 
     public boolean del(String key) {
         Objects.requireNonNull(key, "Key cannot be null");
+
         walManager.log("DEL", key, null);
+        boolean removed = (store.remove(key) != null);
         flush();
-        return store.remove(key) != null;
+        return removed;
     }
 
     public int size() {
@@ -99,6 +124,7 @@ public class KVStore implements KVStorageBase {
         store.clear();
         walManager.clear();
         saveToDisk();
+        curFlushInterval.set(0);
         return sizeBeforeClear;
     }
 
@@ -117,31 +143,65 @@ public class KVStore implements KVStorageBase {
 
     public Map<String, String> getMultiple(List<String> keys) {
         Objects.requireNonNull(keys, "Keys cannot be null");
-        Map<String, String> result = new HashMap<>();
+        Map<String, String> result = new HashMap<>(keys.size());
         for (String key : keys) {
-            if (store.containsKey(key)) {
-                result.put(key, store.get(key));
+            String value = store.get(key);
+            if (value != null) {
+                result.put(key, value);
             }
         }
         return result;
     }
 
+    /**
+     * Incremental auto-flush mechanism: every write increments a counter. Once it reaches
+     * FLUSH_INTERVAL, we persist the current state and clear the WAL.
+     */
     public void flush() {
-        curFlushInterval++;
-        if (ENABLE_AUTO_FLUSH && curFlushInterval >= FLUSH_INTERVAL) {
-            LOGGER.info("Auto-flushing data to disk");
-            saveToDisk();
-            walManager.clear();
+        if (!ENABLE_AUTO_FLUSH) {
+            return;
+        }
+
+        int count = curFlushInterval.incrementAndGet();
+        if (count < FLUSH_INTERVAL) {
+            return;
+        }
+
+        if (!flushLock.tryLock()) {
+            // Another thread is already flushing
+            return;
+        }
+        try {
+            // Re-check under the lock
+            if (curFlushInterval.get() >= FLUSH_INTERVAL) {
+                LOGGER.info("Auto-flushing data to disk");
+                saveToDisk();
+                walManager.clear();
+                curFlushInterval.set(0);
+            }
+        } finally {
+            flushLock.unlock();
         }
     }
 
     @Override
     public void shutdown() {
+        LOGGER.info("Shutting down KVStore");
+        // Final flush
         saveToDisk();
+        walManager.clear();
+
         try {
             persistenceManager.close();
         } catch (IOException e) {
             LOGGER.log(Level.WARNING, "Error closing persistence manager", e);
+        }
+
+        // If WALManager has a close(), call it here
+        try {
+            walManager.close();
+        } catch (Exception e) {
+            LOGGER.log(Level.WARNING, "Error closing WAL manager", e);
         }
     }
 
@@ -150,23 +210,32 @@ public class KVStore implements KVStorageBase {
         // TODO: implement multi-table support if needed
     }
 
+    /**
+     * Replays WAL entries into the in-memory store. Called after loading the base snapshot from
+     * disk.
+     */
     public void recover() {
         List<String[]> ops = walManager.replay();
         for (String[] op : ops) {
+            if (op.length < 2) {
+                continue;
+            }
             String operation = op[0];
             String key = op[1];
             String value = op.length > 2 ? op[2] : null;
 
             switch (operation) {
-                case "SET": store.put(key, value); break;
-                case "DEL": store.remove(key); break;
-                default: System.err.println("Unknown op: " + operation);
+                case "SET" -> store.put(key, value);
+                case "DEL" -> store.remove(key);
+                default -> LOGGER.warning("Unknown WAL op: " + operation);
             }
+        }
+        if (!ops.isEmpty()) {
+            LOGGER.info("Replayed " + ops.size() + " WAL operations during recovery");
         }
     }
 
     public String getTableName() {
-        return tableName;
+        return TABLE_NAME;
     }
-
 }

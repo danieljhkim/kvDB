@@ -11,14 +11,11 @@ import java.util.concurrent.TimeUnit;
 /**
  * Example Usage:
  *
- * KVGrpcServer server = new KVGrpcServer.Builder()
- *     .setPort(8080) // Set the desired port
- *     .addService(new KVServiceImpl(new KVStoreRepository())) // Add gRPC service
- *     .build();
+ * <p>KVGrpcServer server = new KVGrpcServer.Builder() .setPort(8080) // Set the desired port
+ * .addService(new KVServiceImpl(new KVStoreRepository())) // Add gRPC service .build();
  *
- * server.start();
+ * <p>server.start();
  */
-
 public class KVGrpcServer implements BaseServer {
 
     private final int port;
@@ -60,8 +57,8 @@ public class KVGrpcServer implements BaseServer {
     }
 
     public static class Builder {
-        private int port = 9001; // FIXME: Default port
         private final List<BindableService> services = new ArrayList<>();
+        private int port = 9001; // FIXME: Default port
 
         public Builder setPort(int port) {
             this.port = port;

@@ -1,6 +1,5 @@
 package com.kvdb.kvclustercoordinator.protocol;
 
-
 import com.kvdb.kvcommon.protocol.CommandExecutor;
 import com.kvdb.kvcommon.protocol.CommandParser;
 
@@ -15,7 +14,6 @@ public class KVCommandParser extends CommandParser {
         PING - Check connection
         SHUTDOWN [node_id]- Shut down the node
         HELP/INFO - Display this help message""";
-
 
     @Override
     public String executeCommand(String[] parts, CommandExecutor executor) {

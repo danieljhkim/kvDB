@@ -1,8 +1,6 @@
 package com.kvdb.kvcommon.exception;
 
-/**
- * Base exception class for system-level issues in the cluster.
- */
+/** Base exception class for system-level issues in the cluster. */
 public abstract class ServerException extends RuntimeException {
 
     /**

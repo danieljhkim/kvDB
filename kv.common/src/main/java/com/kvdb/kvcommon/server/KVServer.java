@@ -2,6 +2,8 @@ package com.kvdb.kvcommon.server;
 
 import com.kvdb.kvcommon.handler.ClientHandlerFactory;
 
+import lombok.Getter;
+
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -14,36 +16,26 @@ import java.util.logging.Logger;
 public class KVServer implements BaseServer {
 
     private static final Logger LOGGER = Logger.getLogger(KVServer.class.getName());
-    private static final int DEFAULT_THREAD_POOL_SIZE = 10;
 
-    private final int port;
-    private final int threadPoolSize;
+    @Getter private final int port;
     private ExecutorService threadPool;
     private ServerSocket serverSocket;
-    private volatile boolean running = false;
+    @Getter private volatile boolean running = false;
     private ClientHandlerFactory handlerFactory;
 
-    public KVServer(int port, int threadPoolSize) {
+    public KVServer(int port) {
         if (port <= 0 || port > 65535) {
             throw new IllegalArgumentException("Port must be between 1 and 65535");
         }
-        if (threadPoolSize <= 0) {
-            throw new IllegalArgumentException("Thread pool size must be positive");
-        }
         this.port = port;
-        this.threadPoolSize = threadPoolSize;
     }
 
-    public KVServer(int port, int threadPoolSize, ClientHandlerFactory handlerFactory) {
+    public KVServer(int port, ClientHandlerFactory handlerFactory) {
         this.handlerFactory = handlerFactory;
         if (port <= 0 || port > 65535) {
             throw new IllegalArgumentException("Port must be between 1 and 65535");
         }
-        if (threadPoolSize <= 0) {
-            throw new IllegalArgumentException("Thread pool size must be positive");
-        }
         this.port = port;
-        this.threadPoolSize = threadPoolSize;
     }
 
     public void start() {
@@ -51,12 +43,12 @@ public class KVServer implements BaseServer {
             LOGGER.warning("Server is already running");
             return;
         }
-        threadPool = Executors.newFixedThreadPool(threadPoolSize);
+        threadPool = Executors.newVirtualThreadPerTaskExecutor();
         try {
             serverSocket = new ServerSocket(port);
             running = true;
             LOGGER.info("Server started on port " + port);
-            acceptConnectionLoop();
+            acceptConnectionLoop(serverSocket);
         } catch (IOException e) {
             LOGGER.log(Level.SEVERE, "Failed to start server on port " + port, e);
         } finally {
@@ -64,7 +56,7 @@ public class KVServer implements BaseServer {
         }
     }
 
-    public void acceptConnectionLoop() {
+    public void acceptConnectionLoop(ServerSocket serverSocket) {
         while (running) {
             try {
                 Socket clientSocket = serverSocket.accept();
@@ -102,13 +94,5 @@ public class KVServer implements BaseServer {
             }
         }
         LOGGER.info("Server shutdown complete");
-    }
-
-    public boolean isRunning() {
-        return running;
-    }
-
-    public int getPort() {
-        return port;
     }
 }

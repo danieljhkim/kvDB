@@ -3,10 +3,8 @@ package com.kvdb.kvdbserver.persistence;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import java.io.*;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.io.IOException;
+import java.nio.file.*;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.logging.Level;
@@ -24,10 +22,14 @@ public class FilePersistenceManager<T> implements PersistenceManager<T> {
     public FilePersistenceManager(String fileName, TypeReference<T> typeReference) {
         this.filePath = Paths.get(fileName);
         this.typeReference = typeReference;
+
         try {
-            Files.createDirectories(filePath.getParent());
+            Path parent = filePath.getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
         } catch (IOException e) {
-            LOGGER.log(Level.WARNING, "Failed to create directory for persistence", e);
+            LOGGER.log(Level.WARNING, "Failed to create directory for persistence: " + filePath, e);
         }
     }
 
@@ -36,17 +38,26 @@ public class FilePersistenceManager<T> implements PersistenceManager<T> {
         lock.writeLock().lock();
         try {
             if (data == null) {
-                LOGGER.log(Level.WARNING, "Data to save is null");
+                LOGGER.log(Level.WARNING, "Data to save is null; skipping persistence");
                 return;
             }
-            if (!Files.exists(filePath.getParent())) {
-                Files.createDirectories(filePath.getParent());
+
+            Path parent = filePath.getParent();
+            if (parent != null && !Files.exists(parent)) {
+                Files.createDirectories(parent);
             }
-        } catch (IOException e) {
-            LOGGER.log(Level.SEVERE, "Failed to create directory for persistence", e);
-        }
-        try {
-            objectMapper.writeValue(filePath.toFile(), data);
+
+            // Write to a temp file then move atomically to avoid partial writes
+            Path tmpDir = (parent != null ? parent : Paths.get("."));
+            Path tempFile = Files.createTempFile(tmpDir, "kvdb-", ".tmp");
+
+            objectMapper.writeValue(tempFile.toFile(), data);
+
+            Files.move(
+                    tempFile,
+                    filePath,
+                    StandardCopyOption.REPLACE_EXISTING,
+                    StandardCopyOption.ATOMIC_MOVE);
         } finally {
             lock.writeLock().unlock();
         }
@@ -57,24 +68,23 @@ public class FilePersistenceManager<T> implements PersistenceManager<T> {
         lock.readLock().lock();
         try {
             if (!Files.exists(filePath)) {
-                LOGGER.log(Level.WARNING, "File does not exist: " + filePath);
+                LOGGER.log(Level.INFO, "Persistence file does not exist: {0}", filePath);
                 return null;
             }
+
             T out = objectMapper.readValue(filePath.toFile(), typeReference);
             if (out == null) {
-                LOGGER.log(Level.WARNING, "Loaded data is null");
+                LOGGER.log(Level.WARNING, "Loaded data is null from file: {0}", filePath);
             }
             return out;
-        } catch (IOException e) {
-            LOGGER.log(Level.SEVERE, "Failed to read data", e);
-            return null;
         } finally {
             lock.readLock().unlock();
         }
     }
 
     @Override
-    public void close() throws IOException {
-        System.out.println("Resource closed.");
+    public void close() {
+        // No long-lived resources to close; kept for interface symmetry and future extensibility.
+        LOGGER.fine("FilePersistenceManager closed for file: " + filePath);
     }
 }

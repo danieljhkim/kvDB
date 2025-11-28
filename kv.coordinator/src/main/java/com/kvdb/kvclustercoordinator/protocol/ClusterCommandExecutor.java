@@ -2,8 +2,8 @@ package com.kvdb.kvclustercoordinator.protocol;
 
 import com.kvdb.kvclustercoordinator.cluster.ClusterNodeClient;
 import com.kvdb.kvcommon.protocol.CommandExecutor;
-import lombok.Setter;
 
+import lombok.Setter;
 
 /**
  * Adapter that wraps client (grpc or http) calls to a cluster node.

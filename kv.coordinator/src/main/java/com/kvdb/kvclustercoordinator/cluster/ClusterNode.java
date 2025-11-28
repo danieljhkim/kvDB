@@ -1,37 +1,48 @@
 package com.kvdb.kvclustercoordinator.cluster;
+
 import com.kvdb.kvcommon.persistence.WALManager;
+
 import lombok.Getter;
-import lombok.Setter;
 
 import java.util.Map;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Logger;
 
-@Setter
 @Getter
 public class ClusterNode {
 
-    Logger LOGGER = Logger.getLogger(ClusterNode.class.getName());
+    private static final Logger LOGGER = Logger.getLogger(ClusterNode.class.getName());
+
     private final String id;
     private final ClusterNodeClient client;
     private final String host;
     private final int port;
-    public boolean isGrpc;
-    private boolean isRunning = false;
-    private String walFileName;
-    private WALManager walManager; // for when a node is down
-    private volatile boolean canAccess = true; // during recovery, we need to lock access to this node
+    private final boolean grpc;
+
+    /** WAL filename used for delegated writes when this node is down. */
+    private final String walFileName;
+    private final WALManager walManager;
     private final ReentrantLock accessLock = new ReentrantLock();
     private final Condition accessCondition = accessLock.newCondition();
+    /**
+     * Set to false during recovery / WAL replay so we don't serve new requests while state
+     * is being reconciled.
+     */
+    private volatile boolean canAccess = true;
 
     public ClusterNode(String id, String host, int port, boolean useGrpc) {
         this.id = id;
         this.host = host;
         this.port = port;
-        this.isGrpc = useGrpc;
-        this.client = useGrpc ? new GrpcClusterNodeClient(host, port) : new HttpClusterNodeClient(host, port);
-        initWALManager("data/" + id + ".wal");
+        this.grpc = useGrpc;
+        this.client = useGrpc
+                ? new GrpcClusterNodeClient(host, port)
+                : new HttpClusterNodeClient(host, port);
+
+        String walPath = "data/" + id + ".wal";
+        this.walManager = new WALManager(walPath);
+        this.walFileName = walPath;
     }
 
     public ClusterNode(String id, String host, int port) {
@@ -46,6 +57,9 @@ public class ClusterNode {
     }
 
     public String sendGet(String key) {
+        if (!waitForAccess()) {
+            return null; // or some NIL sentinel, depending on your protocol
+        }
         return client.sendGet(key);
     }
 
@@ -53,50 +67,59 @@ public class ClusterNode {
         if (!waitForAccess()) {
             return false;
         }
-        return client.sendSet(key, "");
+        return client.sendDelete(key);
     }
 
+    /**
+     * Actively ping the node to check if it's running.
+     * This does NOT cache state; it always calls through to the client.
+     */
     public boolean isRunning() {
         try {
-            isRunning = this.client.ping();
+            boolean healthy = this.client.ping();
+            if (!healthy) {
+                LOGGER.warning("Ping to node " + id + " returned unhealthy");
+            }
+            return healthy;
         } catch (Exception e) {
             LOGGER.severe("Ping to node " + id + " failed: " + e.getMessage());
-            isRunning = false;
+            return false;
         }
-        return isRunning;
     }
 
     public void shutdown() {
-        if (client != null) {
+        try {
             client.shutdown();
+        } catch (Exception e) {
+            LOGGER.warning("Error shutting down client for node " + id + ": " + e.getMessage());
         }
         clearWal();
+        try {
+            walManager.close();
+        } catch (Exception e) {
+            LOGGER.warning("Error closing WAL manager for node " + id + ": " + e.getMessage());
+        }
     }
 
     public void logWal(String operation, String key, String value) {
-        if (walManager != null) {
-            walManager.log(operation, key, value);
-        }
+        walManager.log(operation, key, value);
     }
 
     public void clearWal() {
-        if (walManager != null) {
-            walManager.clear();
-        }
+        walManager.clear();
     }
 
+    /**
+     * Return the latest WAL operations per key (for recovery / sync).
+     */
     public Map<String, String[]> replayWal() {
-        if (walManager != null) {
-            return walManager.replayAsMap();
-        }
-        return Map.of();
+        return walManager.replayAsMap();
     }
 
-    private void initWALManager(String walDir) {
-        this.walManager = new WALManager(walDir);
-        this.walFileName = walDir;
-    }
-
+    /**
+     * Enable or disable access to this node.
+     * When disabled, calls to sendSet/sendGet/sendDelete will block (unless interrupted).
+     */
     public void setCanAccess(boolean enabled) {
         accessLock.lock();
         try {
@@ -109,6 +132,9 @@ public class ClusterNode {
         }
     }
 
+    /**
+     * Block until this node is accessible again, or return false if interrupted.
+     */
     private boolean waitForAccess() {
         accessLock.lock();
         try {
@@ -118,6 +144,7 @@ public class ClusterNode {
             return true;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            LOGGER.warning("Thread interrupted while waiting for access to node " + id);
             return false;
         } finally {
             accessLock.unlock();

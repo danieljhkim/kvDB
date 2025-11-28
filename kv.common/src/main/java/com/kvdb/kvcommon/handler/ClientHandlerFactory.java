@@ -3,11 +3,11 @@ package com.kvdb.kvcommon.handler;
 import java.net.Socket;
 
 /**
- * Factory interface for creating ClientHandler instances.
- * Implementations can provide different types of handlers based on requirements.
+ * Factory interface for creating ClientHandler instances. Implementations can provide different
+ * types of handlers based on requirements.
  */
 public interface ClientHandlerFactory {
-    
+
     /**
      * Creates a new Runnable client handler for the given client socket.
      *

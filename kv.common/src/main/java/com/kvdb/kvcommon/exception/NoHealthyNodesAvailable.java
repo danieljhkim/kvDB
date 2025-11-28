@@ -1,8 +1,6 @@
 package com.kvdb.kvcommon.exception;
 
-/**
- * Exception thrown when no healthy nodes are available in the cluster for processing requests.
- */
+/** Exception thrown when no healthy nodes are available in the cluster for processing requests. */
 public class NoHealthyNodesAvailable extends CodeRedException {
 
     private static final String DEFAULT_MESSAGE = "No healthy nodes available in the cluster";

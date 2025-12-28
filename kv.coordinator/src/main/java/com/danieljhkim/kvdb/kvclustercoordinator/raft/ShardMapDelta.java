@@ -49,4 +49,3 @@ public record ShardMapDelta(
         return new ShardMapDelta(snapshot.getMapVersion(), List.of(), List.of(), snapshot);
     }
 }
-

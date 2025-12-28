@@ -9,30 +9,30 @@ import java.io.IOException;
 import java.util.logging.Logger;
 
 public class NodeServer {
-    private static final Logger LOGGER = Logger.getLogger(NodeServer.class.getName());
+	private static final Logger LOGGER = Logger.getLogger(NodeServer.class.getName());
 
-    private final Server server;
-    private final int port;
+	private final Server server;
+	private final int port;
 
-    public NodeServer(int port) {
-        this.port = port;
+	public NodeServer(int port) {
+		this.port = port;
 
-        KVServiceImpl kvservice = new KVServiceImpl(new KVStoreRepository());
-        this.server = NettyServerBuilder
-                .forPort(port)
-                .addService(kvservice)
-                .build();
-    }
+		KVServiceImpl kvservice = new KVServiceImpl(new KVStoreRepository());
+		this.server = NettyServerBuilder
+				.forPort(port)
+				.addService(kvservice)
+				.build();
+	}
 
-    public void start() throws IOException, InterruptedException {
-        server.start();
-        server.awaitTermination();
-    }
+	public void start() throws IOException, InterruptedException {
+		server.start();
+		server.awaitTermination();
+	}
 
-    public void shutdown() throws InterruptedException {
-        if (server != null) {
-            server.shutdown().awaitTermination(3, java.util.concurrent.TimeUnit.SECONDS);
-            LOGGER.info("NodeServer stopped");
-        }
-    }
+	public void shutdown() throws InterruptedException {
+		if (server != null) {
+			server.shutdown().awaitTermination(3, java.util.concurrent.TimeUnit.SECONDS);
+			LOGGER.info("NodeServer stopped");
+		}
+	}
 }

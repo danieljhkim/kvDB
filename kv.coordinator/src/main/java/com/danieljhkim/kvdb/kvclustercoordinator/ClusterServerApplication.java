@@ -1,15 +1,18 @@
 package com.danieljhkim.kvdb.kvclustercoordinator;
 
+import com.danieljhkim.kvdb.kvclustercoordinator.health.NodeHealthChecker;
+import com.danieljhkim.kvdb.kvclustercoordinator.scheduler.HealthCheckScheduler;
+import com.danieljhkim.kvdb.kvclustercoordinator.server.CoordinatorServer;
+import com.danieljhkim.kvdb.kvcommon.config.SystemConfig;
+
 import java.io.IOException;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-import com.danieljhkim.kvdb.kvclustercoordinator.server.CoordinatorServer;
-import com.danieljhkim.kvdb.kvcommon.config.SystemConfig;
-
 /**
  * Main application class for the Coordinator node.
- * Starts the gRPC server with the Coordinator service.
+ * Starts the gRPC server with the Coordinator service and health check
+ * scheduler.
  */
 public class ClusterServerApplication {
 
@@ -37,9 +40,14 @@ public class ClusterServerApplication {
         }
         CoordinatorServer coordServer = new CoordinatorServer(port);
 
+        // Initialize health check scheduler
+        NodeHealthChecker healthChecker = new NodeHealthChecker(coordServer.getRaftStateMachine());
+        HealthCheckScheduler healthCheckScheduler = new HealthCheckScheduler(healthChecker, CONFIG);
+
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            LOGGER.info("Shutting down coodServer gRPC server...");
+            LOGGER.info("Shutting down Coordinator server...");
             try {
+                healthCheckScheduler.shutdown();
                 coordServer.shutdown();
             } catch (InterruptedException e) {
                 LOGGER.log(Level.SEVERE, "Error during shutdown", e);
@@ -47,8 +55,11 @@ public class ClusterServerApplication {
             }
         }));
 
+        // Start health check scheduler
+        healthCheckScheduler.start();
+
         int finalPort = port;
-        LOGGER.info(() -> "IndexNode gRPC server started on port " + finalPort);
+        LOGGER.info(() -> "Coordinator gRPC server started on port " + finalPort);
         coordServer.start();
     }
 }

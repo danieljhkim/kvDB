@@ -10,41 +10,49 @@ import java.io.IOException;
 import java.util.logging.Logger;
 
 public class CoordinatorServer {
-    private static final Logger LOGGER = Logger.getLogger(CoordinatorServer.class.getName());
+	private static final Logger LOGGER = Logger.getLogger(CoordinatorServer.class.getName());
 
-    private final Server server;
-    private final StubRaftStateMachine raftStateMachine;
-    private final WatcherManager watcherManager;
+	private final Server server;
+	private final StubRaftStateMachine raftStateMachine;
+	private final WatcherManager watcherManager;
 
-    public CoordinatorServer(int port) {
-        // Initialize Raft state machine
-        this.raftStateMachine = new StubRaftStateMachine();
+	public CoordinatorServer(int port) {
+		// Initialize Raft state machine
+		this.raftStateMachine = new StubRaftStateMachine();
 
-        // Initialize watcher manager and register it with Raft for delta events
-        this.watcherManager = new WatcherManager();
-        this.raftStateMachine.addWatcher(watcherManager);
+		// Initialize watcher manager and register it with Raft for delta events
+		this.watcherManager = new WatcherManager();
+		this.raftStateMachine.addWatcher(watcherManager);
 
-        // Create the coordinator service
-        CoordinatorServiceImpl coordinatorService =
-                new CoordinatorServiceImpl(raftStateMachine, watcherManager);
+		// Create the coordinator service
+		CoordinatorServiceImpl coordinatorService = new CoordinatorServiceImpl(raftStateMachine, watcherManager);
 
-        this.server = NettyServerBuilder
-                .forPort(port)
-                .addService(coordinatorService)
-                .build();
+		this.server = NettyServerBuilder
+				.forPort(port)
+				.addService(coordinatorService)
+				.build();
+	}
 
-    }
+	public void start() throws IOException, InterruptedException {
+		watcherManager.start();
+		server.start();
+		server.awaitTermination();
+	}
 
-    public void start() throws IOException, InterruptedException {
-        watcherManager.start();
-        server.start();
-        server.awaitTermination();
-    }
+	public void shutdown() throws InterruptedException {
+		LOGGER.info("Shutting down CoordinatorServer...");
 
-    public void shutdown() throws InterruptedException {
-        if (server != null) {
-            server.shutdown().awaitTermination(3, java.util.concurrent.TimeUnit.SECONDS);
-            LOGGER.info("IndexNodeServer stopped");
-        }
-    }
+		// Shutdown gRPC server
+		if (server != null) {
+			server.shutdown().awaitTermination(3, java.util.concurrent.TimeUnit.SECONDS);
+			LOGGER.info("CoordinatorServer stopped");
+		}
+	}
+
+	/**
+	 * Gets the Raft state machine for external access (e.g., for health checks).
+	 */
+	public StubRaftStateMachine getRaftStateMachine() {
+		return raftStateMachine;
+	}
 }

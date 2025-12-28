@@ -7,6 +7,7 @@ import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import com.danieljhkim.kvdb.kvgateway.cache.ShardRoutingFailureTracker;
 import com.danieljhkim.kvdb.kvgateway.cache.NodeFailureTracker;
 import com.danieljhkim.kvdb.kvgateway.cache.ShardMapCache;
 import com.danieljhkim.kvdb.kvgateway.client.NodeConnectionPool;
@@ -28,6 +29,7 @@ public class RequestExecutor {
 	private final ShardMapCache shardMapCache;
 	private final NodeConnectionPool nodePool;
 	private final NodeFailureTracker failureTracker;
+	private final ShardRoutingFailureTracker shardRoutingFailureTracker;
 	private final RetryPolicy retryPolicy;
 	private final int defaultTimeoutMs;
 
@@ -36,18 +38,22 @@ public class RequestExecutor {
 			NodeConnectionPool nodePool,
 			NodeFailureTracker failureTracker,
 			RetryPolicy retryPolicy) {
-		this(shardMapCache, nodePool, failureTracker, retryPolicy, 5000);
+		this(shardMapCache, nodePool, failureTracker, new ShardRoutingFailureTracker(), retryPolicy, 5000);
 	}
 
 	public RequestExecutor(
 			ShardMapCache shardMapCache,
 			NodeConnectionPool nodePool,
 			NodeFailureTracker failureTracker,
+			ShardRoutingFailureTracker shardRoutingFailureTracker,
 			RetryPolicy retryPolicy,
 			int defaultTimeoutMs) {
 		this.shardMapCache = shardMapCache;
 		this.nodePool = nodePool;
 		this.failureTracker = failureTracker;
+		this.shardRoutingFailureTracker = shardRoutingFailureTracker != null
+				? shardRoutingFailureTracker
+				: new ShardRoutingFailureTracker();
 		this.retryPolicy = retryPolicy;
 		this.defaultTimeoutMs = defaultTimeoutMs;
 	}
@@ -123,6 +129,12 @@ public class RequestExecutor {
 		String lastNodeAddress = null;
 
 		for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+			// If we recently saw a NOT_LEADER for this shard, schedule a refresh to
+			// converge faster (still gated by ShardMapCache unless forced).
+			if (isWrite && shardRoutingFailureTracker.isRecentlyNotLeader(shardId)) {
+				shardMapCache.scheduleRefreshIfStale();
+			}
+
 			// Get candidate nodes
 			List<NodeRecord> candidates = nodeSupplier.get();
 			if (candidates == null || candidates.isEmpty()) {
@@ -170,13 +182,53 @@ public class RequestExecutor {
 
 				// Handle specific error codes
 				if (code == Status.Code.FAILED_PRECONDITION) {
-					// Likely stale routing - refresh cache
-					LOGGER.info("FAILED_PRECONDITION received, scheduling shard map refresh");
-					shardMapCache.scheduleRefreshIfStale();
+					GrpcRoutingHints.RoutingHints hints = GrpcRoutingHints.from(e);
+
+					// NOT_LEADER: leader hint present -> retry hinted leader once
+					if (hints.leaderHint().isPresent()) {
+						String hintedLeaderAddress = hints.leaderHint().get();
+						String hintedShardId = hints.shardId().orElse(shardId);
+						shardRoutingFailureTracker.recordNotLeader(hintedShardId);
+
+						if (!failureTracker.isRecentlyFailed(hintedLeaderAddress)) {
+							try {
+								KVServiceGrpc.KVServiceBlockingStub hintedStub = nodePool.getStub(hintedLeaderAddress);
+								T hintedResponse = operation.apply(
+										hintedStub.withDeadlineAfter(defaultTimeoutMs, TimeUnit.MILLISECONDS));
+								failureTracker.clearFailure(hintedLeaderAddress);
+								shardRoutingFailureTracker.clear(hintedShardId);
+								return ExecutionResult.success(hintedResponse, hintedLeaderAddress);
+							} catch (StatusRuntimeException hintedEx) {
+								// fall through to regular retry loop
+								LOGGER.log(Level.WARNING,
+										"Leader-hint retry failed (node={0}, code={1}): {2}",
+										new Object[] {
+												hintedLeaderAddress,
+												hintedEx.getStatus().getCode(),
+												hintedEx.getStatus().getDescription()
+										});
+								failureTracker.recordFailure(hintedLeaderAddress);
+								lastException = hintedEx;
+							}
+						}
+
+						// Hint retry didn't work or was skipped -> schedule refresh (gated)
+						shardMapCache.scheduleRefreshIfStale();
+
+					} else if (hints.newNodeHint().isPresent()) {
+						// SHARD_MOVED signal -> force refresh
+						LOGGER.info("SHARD_MOVED hint received, forcing shard map refresh");
+						shardMapCache.forceRefreshAsync();
+					} else {
+						// Generic stale routing - schedule refresh (gated)
+						LOGGER.info("FAILED_PRECONDITION received, scheduling shard map refresh");
+						shardMapCache.scheduleRefreshIfStale();
+					}
 				}
 
 				// Check if we should retry
-				if (!retryPolicy.isRetryable(code)) {
+				boolean retryable = retryPolicy.isRetryable(code) || code == Status.Code.FAILED_PRECONDITION;
+				if (!retryable) {
 					LOGGER.fine("Error code " + code + " is not retryable");
 					break;
 				}

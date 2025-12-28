@@ -68,31 +68,47 @@ public class NodeHealthChecker {
 		NodeRecord.NodeStatus newStatus;
 
 		if (isHealthy) {
-			if (currentStatus == NodeRecord.NodeStatus.DEAD) {
-				// Node recovered from DEAD
-				newStatus = NodeRecord.NodeStatus.ALIVE;
-				LOGGER.info("Node " + node.nodeId() + " recovered, marking as ALIVE");
-			} else if (currentStatus == NodeRecord.NodeStatus.SUSPECT) {
-				// Node recovered from SUSPECT
-				newStatus = NodeRecord.NodeStatus.ALIVE;
-				LOGGER.info("Node " + node.nodeId() + " recovered, marking as ALIVE");
-			} else {
+			if (null == currentStatus) {
 				// Node is already ALIVE, no change needed
 				return;
-			}
+			} else
+				switch (currentStatus) {
+					case DEAD -> {
+						// Node recovered from DEAD
+						newStatus = NodeRecord.NodeStatus.ALIVE;
+						LOGGER.info(() -> "Node " + node.nodeId() + " recovered, marking as ALIVE");
+					}
+					case SUSPECT -> {
+						// Node recovered from SUSPECT
+						newStatus = NodeRecord.NodeStatus.ALIVE;
+						LOGGER.info(() -> "Node " + node.nodeId() + " recovered, marking as ALIVE");
+					}
+					default -> {
+						// Node is already ALIVE, no change needed
+						return;
+					}
+				}
 		} else {
-			if (currentStatus == NodeRecord.NodeStatus.ALIVE) {
-				// Node became unhealthy, mark as SUSPECT first
-				newStatus = NodeRecord.NodeStatus.SUSPECT;
-				LOGGER.warning("Node " + node.nodeId() + " is unhealthy, marking as SUSPECT");
-			} else if (currentStatus == NodeRecord.NodeStatus.SUSPECT) {
-				// Node still unhealthy after being SUSPECT, mark as DEAD
-				newStatus = NodeRecord.NodeStatus.DEAD;
-				LOGGER.warning("Node " + node.nodeId() + " is still unhealthy, marking as DEAD");
-			} else {
+			if (null == currentStatus) {
 				// Node is already DEAD, no change needed
 				return;
-			}
+			} else
+				switch (currentStatus) {
+					case ALIVE -> {
+						// Node became unhealthy, mark as SUSPECT first
+						newStatus = NodeRecord.NodeStatus.SUSPECT;
+						LOGGER.warning(() -> "Node " + node.nodeId() + " is unhealthy, marking as SUSPECT");
+					}
+					case SUSPECT -> {
+						// Node still unhealthy after being SUSPECT, mark as DEAD
+						newStatus = NodeRecord.NodeStatus.DEAD;
+						LOGGER.warning(() -> "Node " + node.nodeId() + " is still unhealthy, marking as DEAD");
+					}
+					default -> {
+						// Node is already DEAD, no change needed
+						return;
+					}
+				}
 		}
 
 		// Update node status via Raft command

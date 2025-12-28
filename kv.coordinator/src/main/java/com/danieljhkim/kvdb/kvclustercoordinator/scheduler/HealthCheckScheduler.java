@@ -25,7 +25,7 @@ public class HealthCheckScheduler {
 	public HealthCheckScheduler(NodeHealthChecker healthChecker, SystemConfig config) {
 		this.healthChecker = healthChecker;
 		this.refreshIntervalSeconds = Integer.parseInt(
-				config.getProperty("kvdb.server.healthCheckInterval", "30"));
+				config.getProperty("kvdb.server.healthCheckInterval", "10"));
 		this.enabled = true; // Always enabled for now
 		this.clusterHealthScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
 			Thread t = new Thread(r, "node-health-checker");

@@ -3,6 +3,7 @@ package com.danieljhkim.kvdb.kvgateway.server;
 import com.danieljhkim.kvdb.kvcommon.grpc.GlobalExceptionInterceptor;
 import com.danieljhkim.kvdb.kvgateway.cache.NodeFailureTracker;
 import com.danieljhkim.kvdb.kvgateway.cache.ShardMapCache;
+import com.danieljhkim.kvdb.kvgateway.cache.ShardRoutingFailureTracker;
 import com.danieljhkim.kvdb.kvgateway.client.CoordinatorClient;
 import com.danieljhkim.kvdb.kvgateway.client.NodeConnectionPool;
 import com.danieljhkim.kvdb.kvgateway.client.WatchShardMapClient;
@@ -40,6 +41,7 @@ public class GatewayServer {
 	private final NodeConnectionPool nodePool;
 	private final WatchShardMapClient watchShardMapClient;
 	private final NodeFailureTracker failureTracker;
+	private final ShardRoutingFailureTracker shardRoutingFailureTracker;
 	private final RequestExecutor requestExecutor;
 	/**
 	 * -- GETTER --
@@ -58,9 +60,10 @@ public class GatewayServer {
 
 		// Initialize retry infrastructure
 		this.failureTracker = new NodeFailureTracker();
+		this.shardRoutingFailureTracker = new ShardRoutingFailureTracker();
 		RetryPolicy retryPolicy = RetryPolicy.defaults();
 		this.requestExecutor = new RequestExecutor(
-				shardMapCache, nodePool, failureTracker, retryPolicy);
+				shardMapCache, nodePool, failureTracker, shardRoutingFailureTracker, retryPolicy, 5000);
 
 		// Create streaming client for real-time shard map updates
 		// The ShardMapCache implements Consumer<ShardMapDelta> to receive updates

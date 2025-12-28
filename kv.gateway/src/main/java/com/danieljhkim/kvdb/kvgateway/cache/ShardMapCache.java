@@ -175,6 +175,16 @@ public class ShardMapCache implements Consumer<ShardMapDelta> {
 	}
 
 	/**
+	 * Forces an asynchronous refresh of the shard map, bypassing refresh interval
+	 * gating. This is intended for strong stale-routing signals (e.g.,
+	 * SHARD_MOVED).
+	 */
+	public void forceRefreshAsync() {
+		LOGGER.info("Forcing shard map refresh (bypassing refresh gating)");
+		scheduleRefresh();
+	}
+
+	/**
 	 * Resolves a key to a shard ID using hash-based sharding.
 	 *
 	 * @param key

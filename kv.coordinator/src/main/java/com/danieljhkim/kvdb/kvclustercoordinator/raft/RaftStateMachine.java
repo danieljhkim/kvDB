@@ -1,9 +1,9 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.raft;
 
-import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
-
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
+
+import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
 
 /**
  * Interface for the Raft-replicated state machine that manages cluster

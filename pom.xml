@@ -14,6 +14,7 @@
         <module>kv.node</module>
         <module>kv.client</module>
         <module>kv.proto</module>
+        <module>kv.gateway</module>
     </modules>
 
     <properties>

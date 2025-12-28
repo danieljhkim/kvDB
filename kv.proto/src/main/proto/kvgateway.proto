@@ -1,0 +1,183 @@
+syntax = "proto3";
+
+package kvdb.gateway;
+
+option java_package = "com.danieljhkim.kvdb.proto.gateway";
+option java_multiple_files = true;
+
+// ============================
+// Core KV Gateway Service (Data Plane)
+// ============================
+service KvGateway {
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc Put(PutRequest) returns (PutResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+}
+
+// ============================
+// Common Types
+// ============================
+
+message RequestContext {
+  // Required for all writes; strongly recommended for reads.
+  // If client retries, reuse the same request_id.
+  string request_id = 1;
+
+  // Optional: tenant/account for multi-tenant throttling & authZ.
+  string tenant_id = 2;
+
+  // Optional: caller identity for audit.
+  string principal = 3;
+
+  // Optional: tracing correlation (W3C traceparent or similar).
+  string traceparent = 4;
+}
+
+enum Consistency {
+  CONSISTENCY_UNSPECIFIED = 0;
+  // Linearizable read via leader / quorum.
+  STRONG = 1;
+  // Read from any replica, may be stale.
+  EVENTUAL = 2;
+}
+
+enum ReadMode {
+  READ_MODE_UNSPECIFIED = 0;
+  // Default.
+  READ_YOUR_WRITES = 1;
+  // Favor latency even if stale.
+  LOW_LATENCY = 2;
+}
+
+message ReadOptions {
+  Consistency consistency = 1;
+  ReadMode read_mode = 2;
+
+  // Optional: bound staleness (if supported).
+  // e.g., "do not return data older than this". If unsupported, ignore or fail.
+  uint32 max_staleness_ms = 3;
+}
+
+enum WriteDurability {
+  DURABILITY_UNSPECIFIED = 0;
+  // ACK after local WAL/fsync on leader (or chosen replica).
+  WAL_SYNC = 1;
+  // ACK after replication to quorum + WAL_SYNC on quorum (stronger).
+  QUORUM_SYNC = 2;
+  // ACK after enqueuing to WAL buffer (fast, weaker).
+  WAL_ASYNC = 3;
+}
+
+message WriteOptions {
+  WriteDurability durability = 1;
+
+  // If true, treat "Put" with the same (request_id, key) as idempotent.
+  // Gateway will de-dupe within retention window.
+  bool require_idempotency = 2;
+
+  // Optional: TTL in milliseconds; 0 means no TTL.
+  uint64 ttl_ms = 3;
+
+  // Optional: require expected version (optimistic concurrency).
+  // If set, write only succeeds if current version matches.
+  uint64 if_version_equals = 4;
+
+  // Optional: require key does not exist (create-only).
+  bool if_not_exists = 5;
+}
+
+message KeyValue {
+  bytes key = 1;
+  bytes value = 2;
+  uint64 version = 3;        // monotonic per key (or per shard) as supported
+  uint64 create_time_ms = 4;
+  uint64 update_time_ms = 5;
+  uint64 expire_time_ms = 6; // 0 if no TTL
+}
+
+message Status {
+  // Stable, programmatic error code independent of message text.
+  // This complements gRPC status codes for finer-grained app handling.
+  enum Code {
+    CODE_UNSPECIFIED = 0;
+
+    OK = 1;
+
+    INVALID_ARGUMENT = 2;
+    NOT_FOUND = 3;
+    ALREADY_EXISTS = 4;
+    VERSION_MISMATCH = 5;      // optimistic concurrency conflict
+    PRECONDITION_FAILED = 6;   // generic guard failed
+
+    RATE_LIMITED = 7;
+    PAYLOAD_TOO_LARGE = 8;
+
+    UNAVAILABLE = 9;           // retryable
+    TIMEOUT = 10;              // retryable depending on idempotency
+    INTERNAL = 11;             // may be retryable with backoff
+    NOT_LEADER = 12;           // client/gateway should reroute
+    SHARD_MOVED = 13;          // metadata stale
+  }
+
+  Code code = 1;
+  string message = 2;
+
+  // Optional metadata for routing/diagnostics.
+  string leader_hint = 3;     // e.g. "10.0.0.12:9090"
+  string shard_id = 4;        // e.g. "shard-17"
+  uint64 retry_after_ms = 5;  // for throttling/backpressure
+}
+
+// ============================
+// Get
+// ============================
+
+message GetRequest {
+  RequestContext ctx = 1;
+  bytes key = 2;
+  ReadOptions options = 3;
+
+  // If true, return only metadata (existence/version) without value bytes.
+  bool head_only = 4;
+}
+
+message GetResponse {
+  Status status = 1;
+
+  // Present if found.
+  KeyValue kv = 2;
+}
+
+// ============================
+// Put
+// ============================
+
+message PutRequest {
+  RequestContext ctx = 1;
+  bytes key = 2;
+  bytes value = 3;
+  WriteOptions options = 4;
+}
+
+message PutResponse {
+  Status status = 1;
+
+  // New version if write succeeded or was de-duped.
+  uint64 version = 2;
+}
+
+// ============================
+// Delete
+// ============================
+
+message DeleteRequest {
+  RequestContext ctx = 1;
+  bytes key = 2;
+  WriteOptions options = 3;
+}
+
+message DeleteResponse {
+  Status status = 1;
+  uint64 version = 2; // tombstone/version if supported
+}
+

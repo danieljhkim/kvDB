@@ -6,6 +6,7 @@ MVN := mvn
 GOCLI := golang/kvcli
 COORD := kv.coordinator
 NODE := kv.node
+GATEWAY := kv.gateway
 
 # -----------------------------------
 # Targets
@@ -53,6 +54,13 @@ run-cluster:
 stop:
 	./scripts/run_cluster.sh stop
 
+# -----------------
+# Gateway commands
+# -----------------
+run-gateway:
+	@echo "Starting Gateway..."
+	java -jar $(GATEWAY)/target/kv-gateway.jar
+
 logs:
 	@echo "Tailing logs... Ctrl + C to exit."
 	tail -f logs/*
@@ -71,4 +79,4 @@ lint:
 	mvn spotless:check
 
 
-.PHONY: all build clean run_cluster stop_cluster logs cluster_status wipe_data build_cli run_cli
+.PHONY: all build clean run_cluster stop_cluster logs cluster_status wipe_data build_cli run_cli run_gateway

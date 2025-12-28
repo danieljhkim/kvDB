@@ -1,0 +1,253 @@
+syntax = "proto3";
+
+package kvdb.coordinator;
+
+option java_package = "com.danieljhkim.kvdb.proto.coordinator";
+option java_multiple_files = true;
+
+// ============================
+// Coordinator Service (Control Plane)
+// ============================
+service Coordinator {
+  // ---- Read APIs ----
+  
+  // Get full shard map if version is newer than provided
+  rpc GetShardMap(GetShardMapRequest) returns (GetShardMapResponse);
+  
+  // Stream shard map deltas (recommended for gateways)
+  rpc WatchShardMap(WatchShardMapRequest) returns (stream ShardMapDelta);
+  
+  // Resolve shard for a given key (optional helper)
+  rpc ResolveShard(ResolveShardRequest) returns (ResolveShardResponse);
+  
+  // Node queries
+  rpc GetNode(GetNodeRequest) returns (GetNodeResponse);
+  rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
+  
+  // ---- Non-Raft Operational RPCs ----
+  
+  // Heartbeat from storage nodes (high-frequency, not replicated)
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  
+  // Report shard leader changes (triggers Raft command internally)
+  rpc ReportShardLeader(ReportShardLeaderRequest) returns (ReportShardLeaderResponse);
+  
+  // ---- Admin APIs (Raft-replicated writes) ----
+  
+  // Register a new storage node or update an existing one
+  rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse);
+  
+  // Initialize shards (cluster bootstrap, called once)
+  rpc InitShards(InitShardsRequest) returns (InitShardsResponse);
+  
+  // Update node status (ALIVE, SUSPECT, DEAD)
+  rpc SetNodeStatus(SetNodeStatusRequest) returns (SetNodeStatusResponse);
+  
+  // Change shard replica set (for rebalancing)
+  rpc SetShardReplicas(SetShardReplicasRequest) returns (SetShardReplicasResponse);
+  
+  // Update shard leader hint
+  rpc SetShardLeader(SetShardLeaderRequest) returns (SetShardLeaderResponse);
+}
+
+// ============================
+// Shard Map Types
+// ============================
+
+message ClusterState {
+  uint64 map_version = 1;
+  map<string, NodeRecord> nodes = 2;
+  map<string, ShardRecord> shards = 3;
+  PartitioningConfig partitioning = 4;
+}
+
+message NodeRecord {
+  string node_id = 1;
+  string address = 2;  // RPC address
+  string zone = 3;     // optional
+  string rack = 4;     // optional
+  NodeStatus status = 5;
+  int64 last_heartbeat_ms = 6;
+  map<string, string> capacity_hints = 7;  // optional
+}
+
+enum NodeStatus {
+  NODE_STATUS_UNSPECIFIED = 0;
+  ALIVE = 1;
+  SUSPECT = 2;
+  DEAD = 3;
+}
+
+message ShardRecord {
+  string shard_id = 1;
+  uint64 epoch = 2;
+  repeated string replicas = 3;  // node_ids
+  string leader = 4;              // current leader hint (node_id)
+  ShardConfigState config_state = 5;
+  KeyRange key_range = 6;        // or hash_range
+}
+
+enum ShardConfigState {
+  CONFIG_STATE_UNSPECIFIED = 0;
+  STABLE = 1;
+  MOVING = 2;
+}
+
+message KeyRange {
+  bytes start_key = 1;  // inclusive
+  bytes end_key = 2;    // exclusive
+}
+
+message PartitioningConfig {
+  int32 num_shards = 1;
+  int32 replication_factor = 2;
+}
+
+// ============================
+// GetShardMap
+// ============================
+
+message GetShardMapRequest {
+  uint64 if_version_gt = 1;  // return map only if newer
+}
+
+message GetShardMapResponse {
+  ClusterState state = 1;
+  bool not_modified = 2;  // true if version not newer
+}
+
+// ============================
+// WatchShardMap
+// ============================
+
+message WatchShardMapRequest {
+  uint64 from_version = 1;  // start from this version
+}
+
+message ShardMapDelta {
+  uint64 new_map_version = 1;
+  repeated string changed_shards = 2;  // shard_ids
+  repeated string changed_nodes = 3;    // node_ids
+  ClusterState full_state = 4;          // optional: full state if needed
+}
+
+// ============================
+// ResolveShard
+// ============================
+
+message ResolveShardRequest {
+  bytes key = 1;
+}
+
+message ResolveShardResponse {
+  string shard_id = 1;
+  ShardRecord shard = 2;
+}
+
+// ============================
+// Node Operations
+// ============================
+
+message GetNodeRequest {
+  string node_id = 1;
+}
+
+message GetNodeResponse {
+  NodeRecord node = 1;
+}
+
+message ListNodesRequest {
+  // empty for now
+}
+
+message ListNodesResponse {
+  repeated NodeRecord nodes = 1;
+}
+
+// ============================
+// Operational RPCs (Non-Raft)
+// ============================
+
+message HeartbeatRequest {
+  string node_id = 1;
+  int64 now_ms = 2;
+  map<string, string> metrics = 3;  // optional
+}
+
+message HeartbeatResponse {
+  bool accepted = 1;
+}
+
+message ReportShardLeaderRequest {
+  string shard_id = 1;
+  uint64 epoch = 2;
+  string leader_node_id = 3;
+}
+
+message ReportShardLeaderResponse {
+  bool accepted = 1;
+}
+
+// ============================
+// Admin APIs (Raft-replicated)
+// ============================
+
+message RegisterNodeRequest {
+  string node_id = 1;
+  string address = 2;
+  string zone = 3;     // optional
+}
+
+message RegisterNodeResponse {
+  bool success = 1;
+  string message = 2;
+  uint64 map_version = 3;
+}
+
+message InitShardsRequest {
+  int32 num_shards = 1;
+  int32 replication_factor = 2;
+}
+
+message InitShardsResponse {
+  bool success = 1;
+  string message = 2;
+  uint64 map_version = 3;
+  repeated string shard_ids = 4;  // list of created shard IDs
+}
+
+message SetNodeStatusRequest {
+  string node_id = 1;
+  NodeStatus status = 2;
+}
+
+message SetNodeStatusResponse {
+  bool success = 1;
+  string message = 2;
+  uint64 map_version = 3;
+}
+
+message SetShardReplicasRequest {
+  string shard_id = 1;
+  repeated string replicas = 2;  // new replica node IDs
+}
+
+message SetShardReplicasResponse {
+  bool success = 1;
+  string message = 2;
+  uint64 map_version = 3;
+  uint64 new_epoch = 4;  // the new epoch after the change
+}
+
+message SetShardLeaderRequest {
+  string shard_id = 1;
+  uint64 epoch = 2;           // must match current epoch
+  string leader_node_id = 3;
+}
+
+message SetShardLeaderResponse {
+  bool success = 1;
+  string message = 2;
+  uint64 map_version = 3;
+}
+

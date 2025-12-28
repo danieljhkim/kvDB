@@ -10,6 +10,7 @@ BASE_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/.."
 
 COORDINATOR_JAR="$BASE_DIR/kv.coordinator/target/kv-coordinator.jar"
 NODE_JAR="$BASE_DIR/kv.node/target/kv-node.jar"
+GATEWAY_JAR="$BASE_DIR/kv.gateway/target/kv-gateway.jar"
 
 LOG_DIR="$BASE_DIR/logs"
 DATA_DIR="$BASE_DIR/data"
@@ -22,6 +23,10 @@ N_NODES=${N_NODES:-2}
 
 # Base ports
 COORDINATOR_PORT=${COORDINATOR_PORT:-7000}
+GATEWAY_PORT=${GATEWAY_PORT:-8080}
+
+# Start gateway (optional)
+START_GATEWAY=${START_GATEWAY:-false}
 
 
 ############################################
@@ -54,10 +59,24 @@ start_nodes() {
   done
 }
 
+start_gateway() {
+  if [ "$START_GATEWAY" = "true" ]; then
+    echo "Starting Gateway..."
+    export GATEWAY_PORT
+
+    nohup java -jar "$GATEWAY_JAR" \
+      > "$LOG_DIR/gateway.log" 2>&1 &
+    GATEWAY_PID=$!
+
+    echo "Gateway started (PID: $GATEWAY_PID, port: $GATEWAY_PORT)"
+  fi
+}
+
 stop_cluster() {
   echo "Stopping all cluster processes..."
   pkill -f "kv-coordinator.jar" || true
   pkill -f "kv-node.jar" || true
+  pkill -f "kv-gateway.jar" || true
   echo "Cluster stopped."
 }
 
@@ -129,9 +148,18 @@ sleep 1
 start_nodes
 sleep 1
 
+start_gateway
+if [ "$START_GATEWAY" = "true" ]; then
+  sleep 1
+fi
+
 echo ""
 echo "================================================="
 echo "Cluster is running!"
+echo "Coordinator : localhost:${COORDINATOR_PORT}"
+if [ "$START_GATEWAY" = "true" ]; then
+  echo "Gateway     : localhost:${GATEWAY_PORT}"
+fi
 echo "Logs  : $LOG_DIR"
 echo "Data  : $DATA_DIR"
 echo "Stop  : ./run_cluster.sh stop"

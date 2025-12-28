@@ -1,8 +1,5 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.raft;
 
-import com.danieljhkim.kvdb.kvclustercoordinator.state.ClusterState;
-import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
-
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -10,6 +7,9 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+
+import com.danieljhkim.kvdb.kvclustercoordinator.state.ClusterState;
+import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
 
 /**
  * Stub implementation of {@link RaftStateMachine} for single-node operation.

@@ -1,11 +1,11 @@
 package com.danieljhkim.kvdb.kvclustercoordinator;
 
-import com.danieljhkim.kvdb.kvclustercoordinator.server.CoordinatorServer;
-import com.danieljhkim.kvdb.kvcommon.config.SystemConfig;
-
 import java.io.IOException;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+
+import com.danieljhkim.kvdb.kvclustercoordinator.server.CoordinatorServer;
+import com.danieljhkim.kvdb.kvcommon.config.SystemConfig;
 
 /**
  * Main application class for the Coordinator node.

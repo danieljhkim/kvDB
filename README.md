@@ -79,17 +79,17 @@ make build
 2. Start the Cluster: Coordinator Server and Node Servers
 
 ```bash
-make run_cluster 
+make run-cluster 
 ```
 
 3. Start the Client CLI
 
 **Option 1** (recommended): [Use kvcli CLI Go application](./golang/kvcli/README.md)
 ```bash
-make build_cli
+make build-cli
 
 # connect to the cluster
-make run_cli
+make run-cli
 ```
 
 ### Basic CLI Commands

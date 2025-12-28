@@ -5,7 +5,7 @@
 MVN := mvn
 GOCLI := golang/kvcli
 COORD := kv.coordinator
-NODE := kv.server
+NODE := kv.node
 
 # -----------------------------------
 # Targets
@@ -23,14 +23,14 @@ build:
 # -----------------
 # Build Go CLI
 # -----------------
-build_cli:
+build-cli:
 	@echo "Building Go CLI..."
 	cd $(GOCLI) && go build -o kv
 
 # -----------------
 # run Go CLI
 # -----------------
-run_cli:
+run-cli:
 	@echo "running kv CLI..."
 	kv connect --host localhost --port 7000
 
@@ -46,22 +46,29 @@ clean:
 # -----------------
 # cluster commands
 # -----------------
-run_cluster:
+run-cluster:
 	chmod +x scripts/run_cluster.sh
 	./scripts/run_cluster.sh
 
-stop_cluster:
+stop:
 	./scripts/run_cluster.sh stop
 
 logs:
 	@echo "Tailing logs... Ctrl + C to exit."
 	tail -f logs/*
 
-cluster_status:
+cluster-status:
 	./scripts/run_cluster.sh status
 
-wipe_data:
+wipe-data:
 	rm -rf data/*
 	@echo "Data directory wiped."
+
+format:
+	mvn spotless:apply
+
+lint:
+	mvn spotless:check
+
 
 .PHONY: all build clean run_cluster stop_cluster logs cluster_status wipe_data build_cli run_cli

@@ -15,8 +15,8 @@ services:
 
   node1:
     build:
-      context: ./kv.server
-    container_name: kvdb-server
+      context: ./kv.node
+    container_name: kvdb-node
     ports:
       - "5001:5001"
     networks:

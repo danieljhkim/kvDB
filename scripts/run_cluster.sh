@@ -8,8 +8,8 @@ set -e
 
 BASE_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/.."
 
-COORDINATOR_JAR="$BASE_DIR/kv.coordinator/target/kv.coordinator-1.0-SNAPSHOT.jar"
-NODE_JAR="$BASE_DIR/kv.server/target/kv.server-1.0-SNAPSHOT.jar"
+COORDINATOR_JAR="$BASE_DIR/kv.coordinator/target/kv-coordinator.jar"
+NODE_JAR="$BASE_DIR/kv.node/target/kv-node.jar"
 
 LOG_DIR="$BASE_DIR/logs"
 DATA_DIR="$BASE_DIR/data"
@@ -56,8 +56,8 @@ start_nodes() {
 
 stop_cluster() {
   echo "Stopping all cluster processes..."
-  pkill -f "kv.coordinator-1.0-SNAPSHOT.jar" || true
-  pkill -f "kv.server-1.0-SNAPSHOT.jar" || true
+  pkill -f "kv-coordinator.jar" || true
+  pkill -f "kv-node.jar" || true
   echo "Cluster stopped."
 }
 

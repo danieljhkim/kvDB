@@ -9,43 +9,44 @@ import lombok.Setter;
 @Setter
 public class ClusterCommandExecutor implements CommandExecutor {
 
-    private ClusterNodeClient client;
+	private ClusterNodeClient client;
 
-    public ClusterCommandExecutor(ClusterNodeClient client) {
-        this.client = client;
-    }
+	public ClusterCommandExecutor(ClusterNodeClient client) {
+		this.client = client;
+	}
 
-    public ClusterCommandExecutor() {}
+	public ClusterCommandExecutor() {
+	}
 
-    @Override
-    public String get(String key) {
-        if (client == null) {
-            throw new IllegalStateException("ClusterNodeClient is not set");
-        }
-        return client.sendGet(key);
-    }
+	@Override
+	public String get(String key) {
+		if (client == null) {
+			throw new IllegalStateException("ClusterNodeClient is not set");
+		}
+		return client.sendGet(key);
+	}
 
-    @Override
-    public boolean put(String key, String value) {
-        if (client == null) {
-            throw new IllegalStateException("ClusterNodeClient is not set");
-        }
-        return client.sendSet(key, value);
-    }
+	@Override
+	public boolean put(String key, String value) {
+		if (client == null) {
+			throw new IllegalStateException("ClusterNodeClient is not set");
+		}
+		return client.sendSet(key, value);
+	}
 
-    @Override
-    public boolean delete(String key) {
-        if (client == null) {
-            throw new IllegalStateException("ClusterNodeClient is not set");
-        }
-        return client.sendDelete(key);
-    }
+	@Override
+	public boolean delete(String key) {
+		if (client == null) {
+			throw new IllegalStateException("ClusterNodeClient is not set");
+		}
+		return client.sendDelete(key);
+	}
 
-    @Override
-    public String shutdown() {
-        if (client == null) {
-            throw new IllegalStateException("ClusterNodeClient is not set");
-        }
-        return client.shutdown();
-    }
+	@Override
+	public String shutdown() {
+		if (client == null) {
+			throw new IllegalStateException("ClusterNodeClient is not set");
+		}
+		return client.shutdown();
+	}
 }

@@ -4,7 +4,7 @@
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_DIR="$( cd "$SCRIPT_DIR/.." && pwd )/kv.server"
-CLIENT_JAR="$PROJECT_DIR/target/kv.server-1.0-SNAPSHOT.jar"
+CLIENT_JAR="$PROJECT_DIR/target/kv-node.jar"
 
 # Check if jar exists
 if [ ! -f "$CLIENT_JAR" ]; then

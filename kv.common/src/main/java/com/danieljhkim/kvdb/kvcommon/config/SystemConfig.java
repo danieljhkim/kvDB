@@ -15,134 +15,133 @@ import java.util.logging.Logger;
 
 public class SystemConfig {
 
-    private static final Logger LOGGER = Logger.getLogger(SystemConfig.class.getName());
-    private static final String DEFAULT_CONFIG_FILE = "application.properties";
+	private static final Logger LOGGER = Logger.getLogger(SystemConfig.class.getName());
+	private static final String DEFAULT_CONFIG_FILE = "application.properties";
 
-    private static SystemConfig INSTANCE;
-    private final Properties properties;
-    private String resourcePath = "";
+	private static SystemConfig INSTANCE;
+	private final Properties properties;
+	private String resourcePath = "";
 
-    private SystemConfig() {
-        this.properties = new Properties();
-        loadDefaultConfigFile();
-        loadEnvSpecificConfigFile();
-    }
+	private SystemConfig() {
+		this.properties = new Properties();
+		loadDefaultConfigFile();
+		loadEnvSpecificConfigFile();
+	}
 
-    private SystemConfig(String resourcePath) {
-        this.resourcePath = resourcePath;
-        this.properties = new Properties();
-        loadDefaultConfigFile();
-        loadEnvSpecificConfigFile();
-    }
+	private SystemConfig(String resourcePath) {
+		this.resourcePath = resourcePath;
+		this.properties = new Properties();
+		loadDefaultConfigFile();
+		loadEnvSpecificConfigFile();
+	}
 
-    public static synchronized SystemConfig getInstance() {
-        if (INSTANCE == null) {
-            INSTANCE = new SystemConfig();
-        }
-        return INSTANCE;
-    }
+	public static synchronized SystemConfig getInstance() {
+		if (INSTANCE == null) {
+			INSTANCE = new SystemConfig();
+		}
+		return INSTANCE;
+	}
 
-    public static synchronized SystemConfig getInstance(String resourcePath) {
-        if (INSTANCE == null) {
-            INSTANCE = new SystemConfig(resourcePath);
-        }
-        return INSTANCE;
-    }
+	public static synchronized SystemConfig getInstance(String resourcePath) {
+		if (INSTANCE == null) {
+			INSTANCE = new SystemConfig(resourcePath);
+		}
+		return INSTANCE;
+	}
 
-    private void loadDefaultConfigFile() {
-        Path path = Paths.get(resourcePath, DEFAULT_CONFIG_FILE);
-        if (Files.exists(path)) {
-            try (InputStream input = new FileInputStream(path.toFile())) {
-                properties.load(input);
-                LOGGER.info("Loaded default configuration from filesystem: " + path);
-                return;
-            } catch (IOException e) {
-                LOGGER.log(
-                        Level.WARNING, "Failed to load default configuration from filesystem", e);
-            }
-        }
-        try (InputStream input =
-                getClass()
-                        .getClassLoader()
-                        .getResourceAsStream(resourcePath + "/" + DEFAULT_CONFIG_FILE)) {
-            if (input != null) {
-                properties.load(input);
-                LOGGER.info(
-                        "Loaded default configuration from classpath: "
-                                + resourcePath
-                                + "/"
-                                + DEFAULT_CONFIG_FILE);
-            } else {
-                LOGGER.warning(
-                        "Default configuration file not found in classpath: "
-                                + resourcePath
-                                + "/"
-                                + DEFAULT_CONFIG_FILE);
-            }
-        } catch (IOException e) {
-            LOGGER.log(Level.WARNING, "Failed to load default configuration from classpath", e);
-        }
-    }
+	private void loadDefaultConfigFile() {
+		Path path = Paths.get(resourcePath, DEFAULT_CONFIG_FILE);
+		if (Files.exists(path)) {
+			try (InputStream input = new FileInputStream(path.toFile())) {
+				properties.load(input);
+				LOGGER.info("Loaded default configuration from filesystem: " + path);
+				return;
+			} catch (IOException e) {
+				LOGGER.log(
+						Level.WARNING, "Failed to load default configuration from filesystem", e);
+			}
+		}
+		try (InputStream input = getClass()
+				.getClassLoader()
+				.getResourceAsStream(resourcePath + "/" + DEFAULT_CONFIG_FILE)) {
+			if (input != null) {
+				properties.load(input);
+				LOGGER.info(
+						"Loaded default configuration from classpath: "
+								+ resourcePath
+								+ "/"
+								+ DEFAULT_CONFIG_FILE);
+			} else {
+				LOGGER.warning(
+						"Default configuration file not found in classpath: "
+								+ resourcePath
+								+ "/"
+								+ DEFAULT_CONFIG_FILE);
+			}
+		} catch (IOException e) {
+			LOGGER.log(Level.WARNING, "Failed to load default configuration from classpath", e);
+		}
+	}
 
-    private void loadEnvSpecificConfigFile() {
-        String env = System.getProperty("kvdb.env");
-        if (env != null && !env.isEmpty()) {
-            String envConfigFile = resourcePath + "/application-" + env + ".properties";
-            Path envPath = Paths.get(envConfigFile);
+	private void loadEnvSpecificConfigFile() {
+		String env = System.getProperty("kvdb.env");
+		if (env != null && !env.isEmpty()) {
+			String envConfigFile = resourcePath + "/application-" + env + ".properties";
+			Path envPath = Paths.get(envConfigFile);
 
-            if (Files.exists(envPath)) {
-                try (InputStream input = new FileInputStream(envConfigFile)) {
-                    properties.load(input);
-                    LOGGER.info("Loaded environment-specific configuration from: " + envConfigFile);
-                } catch (IOException e) {
-                    LOGGER.log(
-                            Level.WARNING,
-                            "Failed to load environment-specific configuration file: "
-                                    + envConfigFile,
-                            e);
-                }
-            } else {
-                LOGGER.warning(
-                        "Environment-specific configuration file not found: " + envConfigFile);
-            }
-        }
-    }
+			if (Files.exists(envPath)) {
+				try (InputStream input = new FileInputStream(envConfigFile)) {
+					properties.load(input);
+					LOGGER.info("Loaded environment-specific configuration from: " + envConfigFile);
+				} catch (IOException e) {
+					LOGGER.log(
+							Level.WARNING,
+							"Failed to load environment-specific configuration file: "
+									+ envConfigFile,
+							e);
+				}
+			} else {
+				LOGGER.warning(
+						"Environment-specific configuration file not found: " + envConfigFile);
+			}
+		}
+	}
 
-    public String getProperty(String key, String defaultValue) {
-        String value = System.getProperty("kvdb." + key);
-        if (value != null && !value.isEmpty()) {
-            return value;
-        }
-        String envKey = "KVDB_" + key.toUpperCase().replace('.', '_');
-        value = System.getenv(envKey);
-        if (value != null && !value.isEmpty()) {
-            return value;
-        }
-        return properties.getProperty(key, defaultValue);
-    }
+	public String getProperty(String key, String defaultValue) {
+		String value = System.getProperty("kvdb." + key);
+		if (value != null && !value.isEmpty()) {
+			return value;
+		}
+		String envKey = "KVDB_" + key.toUpperCase().replace('.', '_');
+		value = System.getenv(envKey);
+		if (value != null && !value.isEmpty()) {
+			return value;
+		}
+		return properties.getProperty(key, defaultValue);
+	}
 
-    public String getProperty(String key) {
-        return getProperty(key, null);
-    }
+	public String getProperty(String key) {
+		return getProperty(key, null);
+	}
 
-    public Set<String> getAllPropertyNames(String prefix) {
-        Set<String> propertyNames = new HashSet<>();
-        for (Object key : properties.keySet()) {
-            propertyNames.add(key.toString());
-        }
-        if (prefix == null || prefix.isEmpty()) {
-            return propertyNames;
-        }
-        Set<String> filteredProperties = new HashSet<>();
-        for (String propName : propertyNames) {
-            if (propName.startsWith(prefix)) {
-                filteredProperties.add(propName);
-            }
-        }
-        return Collections.unmodifiableSet(filteredProperties);
-    }
+	public Set<String> getAllPropertyNames(String prefix) {
+		Set<String> propertyNames = new HashSet<>();
+		for (Object key : properties.keySet()) {
+			propertyNames.add(key.toString());
+		}
+		if (prefix == null || prefix.isEmpty()) {
+			return propertyNames;
+		}
+		Set<String> filteredProperties = new HashSet<>();
+		for (String propName : propertyNames) {
+			if (propName.startsWith(prefix)) {
+				filteredProperties.add(propName);
+			}
+		}
+		return Collections.unmodifiableSet(filteredProperties);
+	}
 
-    public Set<String> getAllPropertyNames() {
-        return getAllPropertyNames(null);
-    }
+	public Set<String> getAllPropertyNames() {
+		return getAllPropertyNames(null);
+	}
 }

@@ -4,9 +4,9 @@ import com.danieljhkim.kvdb.kvgateway.cache.ShardMapCache;
 import com.danieljhkim.kvdb.kvgateway.client.CoordinatorClient;
 import com.danieljhkim.kvdb.kvgateway.client.NodeConnectionPool;
 import com.danieljhkim.kvdb.kvgateway.service.KvGatewayServiceImpl;
-
 import io.grpc.Server;
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
+import lombok.Getter;
 
 import java.io.IOException;
 import java.util.concurrent.TimeUnit;
@@ -21,10 +21,20 @@ public class GatewayServer {
 
 	private static final Logger LOGGER = Logger.getLogger(GatewayServer.class.getName());
 
+	/**
+	 * -- GETTER --
+	 * Gets the port the server is running on.
+	 */
+	@Getter
 	private final int port;
 	private final Server grpcServer;
 	private final CoordinatorClient coordinatorClient;
 	private final NodeConnectionPool nodePool;
+	/**
+	 * -- GETTER --
+	 * Gets the shard map cache for external access (e.g., for refresh triggers).
+	 */
+	@Getter
 	private final ShardMapCache shardMapCache;
 
 	public GatewayServer(int port, String coordinatorHost, int coordinatorPort) {
@@ -101,17 +111,4 @@ public class GatewayServer {
 		LOGGER.info("GatewayServer shutdown complete");
 	}
 
-	/**
-	 * Gets the shard map cache for external access (e.g., for refresh triggers).
-	 */
-	public ShardMapCache getShardMapCache() {
-		return shardMapCache;
-	}
-
-	/**
-	 * Gets the port the server is running on.
-	 */
-	public int getPort() {
-		return port;
-	}
 }

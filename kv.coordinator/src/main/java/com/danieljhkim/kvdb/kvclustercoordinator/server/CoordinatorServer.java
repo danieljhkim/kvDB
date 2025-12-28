@@ -5,6 +5,7 @@ import com.danieljhkim.kvdb.kvclustercoordinator.service.CoordinatorServiceImpl;
 import com.danieljhkim.kvdb.kvclustercoordinator.service.WatcherManager;
 import io.grpc.Server;
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
+import lombok.Getter;
 
 import java.io.IOException;
 import java.util.logging.Logger;
@@ -13,6 +14,11 @@ public class CoordinatorServer {
 	private static final Logger LOGGER = Logger.getLogger(CoordinatorServer.class.getName());
 
 	private final Server server;
+	/**
+	 * -- GETTER --
+	 * Gets the Raft state machine for external access (e.g., for health checks).
+	 */
+	@Getter
 	private final StubRaftStateMachine raftStateMachine;
 	private final WatcherManager watcherManager;
 
@@ -49,10 +55,4 @@ public class CoordinatorServer {
 		}
 	}
 
-	/**
-	 * Gets the Raft state machine for external access (e.g., for health checks).
-	 */
-	public StubRaftStateMachine getRaftStateMachine() {
-		return raftStateMachine;
-	}
 }

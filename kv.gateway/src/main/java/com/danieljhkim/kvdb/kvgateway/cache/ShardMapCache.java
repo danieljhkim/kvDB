@@ -5,6 +5,7 @@ import com.danieljhkim.kvdb.proto.coordinator.ClusterState;
 import com.danieljhkim.kvdb.proto.coordinator.NodeRecord;
 import com.danieljhkim.kvdb.proto.coordinator.NodeStatus;
 import com.danieljhkim.kvdb.proto.coordinator.ShardRecord;
+import lombok.Getter;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -21,6 +22,13 @@ public class ShardMapCache {
 
 	private final CoordinatorClient coordinatorClient;
 	private final AtomicReference<ClusterState> cachedState = new AtomicReference<>();
+	/**
+	 * -- GETTER --
+	 * Gets the last refresh timestamp.
+	 *
+	 * @return The last refresh time in milliseconds
+	 */
+	@Getter
 	private volatile long lastRefreshTime = 0;
 
 	public ShardMapCache(CoordinatorClient coordinatorClient) {
@@ -166,15 +174,6 @@ public class ShardMapCache {
 	public long getMapVersion() {
 		ClusterState state = cachedState.get();
 		return state != null ? state.getMapVersion() : 0;
-	}
-
-	/**
-	 * Gets the last refresh timestamp.
-	 *
-	 * @return The last refresh time in milliseconds
-	 */
-	public long getLastRefreshTime() {
-		return lastRefreshTime;
 	}
 
 	/**

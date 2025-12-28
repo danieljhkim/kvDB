@@ -1,8 +1,11 @@
 package com.danieljhkim.kvdb.kvnode.server;
 
+import com.danieljhkim.kvdb.kvcommon.grpc.GlobalExceptionInterceptor;
 import com.danieljhkim.kvdb.kvnode.repository.KVStoreRepository;
 import com.danieljhkim.kvdb.kvnode.service.KVServiceImpl;
 import io.grpc.Server;
+import io.grpc.ServerInterceptors;
+import io.grpc.ServerServiceDefinition;
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
 
 import java.io.IOException;
@@ -18,9 +21,12 @@ public class NodeServer {
 		this.port = port;
 
 		KVServiceImpl kvservice = new KVServiceImpl(new KVStoreRepository());
+		ServerServiceDefinition interceptedService = ServerInterceptors.intercept(kvservice,
+				new GlobalExceptionInterceptor());
+
 		this.server = NettyServerBuilder
 				.forPort(port)
-				.addService(kvservice)
+				.addService(interceptedService)
 				.build();
 	}
 

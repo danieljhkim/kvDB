@@ -1,24 +1,26 @@
 package com.danieljhkim.kvdb.kvgateway.cache;
 
 import com.danieljhkim.kvdb.kvgateway.client.CoordinatorClient;
-import com.danieljhkim.kvdb.proto.coordinator.ClusterState;
-import com.danieljhkim.kvdb.proto.coordinator.NodeRecord;
-import com.danieljhkim.kvdb.proto.coordinator.NodeStatus;
-import com.danieljhkim.kvdb.proto.coordinator.ShardRecord;
+import com.danieljhkim.kvdb.proto.coordinator.*;
 import lombok.Getter;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.logging.Logger;
 
 /**
  * Caches the cluster shard map from the coordinator.
  * Provides thread-safe access and shard resolution for keys.
+ * Supports both polling (refresh) and streaming (delta updates).
  */
-public class ShardMapCache {
+public class ShardMapCache implements Consumer<ShardMapDelta> {
 
 	private static final Logger LOGGER = Logger.getLogger(ShardMapCache.class.getName());
+
+	/** Minimum interval between refresh attempts to avoid thrashing */
+	private static final long MIN_REFRESH_INTERVAL_MS = 5000;
 
 	private final CoordinatorClient coordinatorClient;
 	private final AtomicReference<ClusterState> cachedState = new AtomicReference<>();
@@ -31,12 +33,21 @@ public class ShardMapCache {
 	@Getter
 	private volatile long lastRefreshTime = 0;
 
+	/**
+	 * -- GETTER --
+	 * Gets the last delta update timestamp.
+	 *
+	 * @return The last delta update time in milliseconds
+	 */
+	@Getter
+	private volatile long lastDeltaUpdateTime = 0;
+
 	public ShardMapCache(CoordinatorClient coordinatorClient) {
 		this.coordinatorClient = coordinatorClient;
 	}
 
 	/**
-	 * Refreshes the shard map from the coordinator.
+	 * Refreshes the shard map from the coordinator via polling.
 	 *
 	 * @return true if the map was updated, false otherwise
 	 */
@@ -55,6 +66,112 @@ public class ShardMapCache {
 			}
 		}
 		return false;
+	}
+
+	/**
+	 * Consumer interface implementation for receiving delta updates.
+	 * Called by WatchShardMapClient when deltas are received.
+	 */
+	@Override
+	public void accept(ShardMapDelta delta) {
+		updateFromDelta(delta);
+	}
+
+	/**
+	 * Updates the cache from a streaming delta update.
+	 * Handles both full state updates and incremental deltas.
+	 *
+	 * @param delta
+	 *            The delta received from the coordinator
+	 * @return true if the cache was updated, false otherwise
+	 */
+	public boolean updateFromDelta(ShardMapDelta delta) {
+		if (delta == null) {
+			return false;
+		}
+
+		long newVersion = delta.getNewMapVersion();
+
+		// Version 0 is a heartbeat, ignore
+		if (newVersion == 0) {
+			LOGGER.fine("Ignoring heartbeat delta");
+			return false;
+		}
+
+		ClusterState oldState = cachedState.get();
+		long currentVersion = oldState != null ? oldState.getMapVersion() : 0;
+
+		// Only apply if newer
+		if (newVersion <= currentVersion) {
+			LOGGER.fine("Ignoring stale delta (version=" + newVersion + ", current=" + currentVersion + ")");
+			return false;
+		}
+
+		// Check if this is a full state update
+		if (delta.hasFullState() && delta.getFullState().getMapVersion() > 0) {
+			ClusterState fullState = delta.getFullState();
+			cachedState.set(fullState);
+			lastDeltaUpdateTime = System.currentTimeMillis();
+			LOGGER.info("Shard map updated from delta (full state) to version " + fullState.getMapVersion()
+					+ " with " + fullState.getShardsCount() + " shards and "
+					+ fullState.getNodesCount() + " nodes");
+			return true;
+		}
+
+		// Incremental delta - we need to merge changes
+		// For now, if we receive an incremental delta without full state,
+		// trigger a full refresh to ensure consistency
+		if (!delta.getChangedShardsList().isEmpty() || !delta.getChangedNodesList().isEmpty()) {
+			LOGGER.info("Received incremental delta for version " + newVersion
+					+ " (changedShards=" + delta.getChangedShardsCount()
+					+ ", changedNodes=" + delta.getChangedNodesCount()
+					+ "). Triggering full refresh for consistency.");
+
+			// Schedule async refresh to avoid blocking the stream handler
+			// For now, do a synchronous refresh
+			boolean refreshed = refresh();
+			if (refreshed) {
+				lastDeltaUpdateTime = System.currentTimeMillis();
+			}
+			return refreshed;
+		}
+
+		return false;
+	}
+
+	/**
+	 * Schedules an asynchronous refresh of the shard map.
+	 * Useful when we detect staleness but don't want to block.
+	 */
+	public void scheduleRefresh() {
+		Thread.startVirtualThread(() -> {
+			try {
+				refresh();
+			} catch (Exception e) {
+				LOGGER.warning("Async refresh failed: " + e.getMessage());
+			}
+		});
+	}
+
+	/**
+	 * Schedules a refresh only if enough time has passed since the last refresh.
+	 * This prevents thrashing when multiple errors occur in quick succession.
+	 */
+	public void scheduleRefreshIfStale() {
+		long now = System.currentTimeMillis();
+		long timeSinceLastRefresh = now - lastRefreshTime;
+		long timeSinceLastDelta = now - lastDeltaUpdateTime;
+
+		// Only refresh if we haven't refreshed recently
+		if (timeSinceLastRefresh > MIN_REFRESH_INTERVAL_MS
+				&& timeSinceLastDelta > MIN_REFRESH_INTERVAL_MS) {
+			LOGGER.fine("Scheduling refresh (timeSinceLastRefresh="
+					+ timeSinceLastRefresh + "ms, timeSinceLastDelta=" + timeSinceLastDelta + "ms)");
+			scheduleRefresh();
+		} else {
+			LOGGER.fine("Skipping refresh (too recent: timeSinceLastRefresh="
+					+ timeSinceLastRefresh + "ms, timeSinceLastDelta=" + timeSinceLastDelta + "ms)");
+		}
 	}
 
 	/**

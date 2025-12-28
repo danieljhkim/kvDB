@@ -1,8 +1,20 @@
 package com.danieljhkim.kvdb.kvgateway.service;
 
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+
+import com.danieljhkim.kvdb.kvcommon.exception.InvalidRequestException;
+import com.danieljhkim.kvdb.kvcommon.exception.KeyNotFoundException;
+import com.danieljhkim.kvdb.kvcommon.exception.KvException;
+import com.danieljhkim.kvdb.kvcommon.exception.NodeOperationException;
+import com.danieljhkim.kvdb.kvcommon.exception.NodeUnavailableException;
+import com.danieljhkim.kvdb.kvcommon.exception.ShardMapUnavailableException;
 import com.danieljhkim.kvdb.kvgateway.cache.ShardMapCache;
-import com.danieljhkim.kvdb.kvgateway.client.NodeConnectionPool;
+import com.danieljhkim.kvdb.kvgateway.retry.RequestExecutor;
+import com.danieljhkim.kvdb.kvgateway.retry.RequestExecutor.ExecutionResult;
 import com.danieljhkim.kvdb.proto.coordinator.NodeRecord;
+import com.danieljhkim.kvdb.proto.coordinator.NodeStatus;
 import com.danieljhkim.kvdb.proto.gateway.Consistency;
 import com.danieljhkim.kvdb.proto.gateway.DeleteRequest;
 import com.danieljhkim.kvdb.proto.gateway.DeleteResponse;
@@ -13,35 +25,26 @@ import com.danieljhkim.kvdb.proto.gateway.KvGatewayGrpc;
 import com.danieljhkim.kvdb.proto.gateway.PutRequest;
 import com.danieljhkim.kvdb.proto.gateway.PutResponse;
 import com.danieljhkim.kvdb.proto.gateway.Status;
-import com.kvdb.proto.kvstore.KVServiceGrpc;
 import com.kvdb.proto.kvstore.KeyRequest;
 import com.kvdb.proto.kvstore.KeyValueRequest;
 import com.kvdb.proto.kvstore.SetResponse;
 import com.kvdb.proto.kvstore.ValueResponse;
 
-import io.grpc.StatusRuntimeException;
 import io.grpc.stub.StreamObserver;
-
-import java.nio.charset.StandardCharsets;
-import java.util.concurrent.TimeUnit;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
 /**
  * gRPC service implementation for the KvGateway.
- * Handles Get, Put, Delete operations by routing to appropriate storage nodes.
+ * Handles Get, Put, Delete operations by routing to appropriate storage nodes
+ * with retry logic and cache invalidation.
  */
 public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
 
-	private static final Logger LOGGER = Logger.getLogger(KvGatewayServiceImpl.class.getName());
-	private static final int DEFAULT_TIMEOUT_MS = 5000;
-
 	private final ShardMapCache shardMapCache;
-	private final NodeConnectionPool nodePool;
+	private final RequestExecutor requestExecutor;
 
-	public KvGatewayServiceImpl(ShardMapCache shardMapCache, NodeConnectionPool nodePool) {
+	public KvGatewayServiceImpl(ShardMapCache shardMapCache, RequestExecutor requestExecutor) {
 		this.shardMapCache = shardMapCache;
-		this.nodePool = nodePool;
+		this.requestExecutor = requestExecutor;
 	}
 
 	@Override
@@ -49,93 +52,52 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
 		try {
 			// Validate request
 			if (request.getKey().isEmpty()) {
-				responseObserver.onNext(GetResponse.newBuilder()
-						.setStatus(Status.newBuilder()
-								.setCode(Status.Code.INVALID_ARGUMENT)
-								.setMessage("Key cannot be empty")
-								.build())
-						.build());
-				responseObserver.onCompleted();
-				return;
+				throw new InvalidRequestException("Key cannot be empty");
 			}
 
 			byte[] keyBytes = request.getKey().toByteArray();
 			String keyStr = new String(keyBytes, StandardCharsets.UTF_8);
 
-			// Resolve shard and get target node
-			String shardId = shardMapCache.resolveShardId(keyBytes);
-			NodeRecord targetNode = selectNodeForRead(shardId, request.getOptions().getConsistency());
+			// Resolve shard
+			final String shardId = resolveShardId(keyBytes);
+			Consistency consistency = request.getOptions().getConsistency();
 
-			if (targetNode == null) {
-				responseObserver.onNext(GetResponse.newBuilder()
-						.setStatus(Status.newBuilder()
-								.setCode(Status.Code.UNAVAILABLE)
-								.setMessage("No available node for shard: " + shardId)
-								.setShardId(shardId)
-								.build())
-						.build());
-				responseObserver.onCompleted();
-				return;
-			}
-
-			// Forward to storage node
-			KVServiceGrpc.KVServiceBlockingStub stub = nodePool.getStub(targetNode.getAddress());
+			// Build the node request
 			KeyRequest nodeRequest = KeyRequest.newBuilder()
 					.setKey(keyStr)
 					.build();
 
-			ValueResponse nodeResponse = stub
-					.withDeadlineAfter(DEFAULT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-					.get(nodeRequest);
+			// Execute with retry
+			ExecutionResult<ValueResponse> result = requestExecutor.executeWithRetry(
+					shardId,
+					false,
+					stub -> stub.get(nodeRequest),
+					() -> getNodesForRead(shardId, consistency));
 
-			// Map response
-			if (nodeResponse.getValue().isEmpty()) {
-				responseObserver.onNext(GetResponse.newBuilder()
-						.setStatus(Status.newBuilder()
-								.setCode(Status.Code.NOT_FOUND)
-								.setMessage("Key not found: " + keyStr)
-								.setShardId(shardId)
-								.build())
-						.build());
-			} else {
-				responseObserver.onNext(GetResponse.newBuilder()
-						.setStatus(Status.newBuilder()
-								.setCode(Status.Code.OK)
-								.setShardId(shardId)
-								.build())
-						.setKv(KeyValue.newBuilder()
-								.setKey(request.getKey())
-								.setValue(com.google.protobuf.ByteString.copyFromUtf8(nodeResponse.getValue()))
-								.build())
-						.build());
+			// Handle result
+			if (!result.isSuccess()) {
+				throw new NodeUnavailableException(
+						result.getErrorMessage(), shardId, result.getErrorCode());
 			}
+
+			ValueResponse nodeResponse = result.getResponse();
+			if (nodeResponse.getValue().isEmpty()) {
+				throw new KeyNotFoundException(keyStr, shardId);
+			}
+
+			// Success response
+			responseObserver.onNext(GetResponse.newBuilder()
+					.setStatus(okStatus(shardId))
+					.setKv(KeyValue.newBuilder()
+							.setKey(request.getKey())
+							.setValue(com.google.protobuf.ByteString.copyFromUtf8(nodeResponse.getValue()))
+							.build())
+					.build());
 			responseObserver.onCompleted();
 
-		} catch (IllegalStateException e) {
-			LOGGER.log(Level.WARNING, "Shard map not available", e);
+		} catch (KvException e) {
 			responseObserver.onNext(GetResponse.newBuilder()
-					.setStatus(Status.newBuilder()
-							.setCode(Status.Code.UNAVAILABLE)
-							.setMessage("Shard map not available: " + e.getMessage())
-							.build())
-					.build());
-			responseObserver.onCompleted();
-		} catch (StatusRuntimeException e) {
-			LOGGER.log(Level.WARNING, "Node communication error during GET", e);
-			responseObserver.onNext(GetResponse.newBuilder()
-					.setStatus(Status.newBuilder()
-							.setCode(Status.Code.UNAVAILABLE)
-							.setMessage("Node communication error: " + e.getStatus().getDescription())
-							.build())
-					.build());
-			responseObserver.onCompleted();
-		} catch (Exception e) {
-			LOGGER.log(Level.SEVERE, "Unexpected error during GET", e);
-			responseObserver.onNext(GetResponse.newBuilder()
-					.setStatus(Status.newBuilder()
-							.setCode(Status.Code.INTERNAL)
-							.setMessage("Internal error: " + e.getMessage())
-							.build())
+					.setStatus(exceptionToStatus(e))
 					.build());
 			responseObserver.onCompleted();
 		}
@@ -146,97 +108,50 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
 		try {
 			// Validate request
 			if (request.getKey().isEmpty()) {
-				responseObserver.onNext(PutResponse.newBuilder()
-						.setStatus(Status.newBuilder()
-								.setCode(Status.Code.INVALID_ARGUMENT)
-								.setMessage("Key cannot be empty")
-								.build())
-						.build());
-				responseObserver.onCompleted();
-				return;
+				throw new InvalidRequestException("Key cannot be empty");
 			}
 
 			byte[] keyBytes = request.getKey().toByteArray();
 			String keyStr = new String(keyBytes, StandardCharsets.UTF_8);
 			String valueStr = request.getValue().toStringUtf8();
 
-			// Resolve shard and get leader (writes always go to leader)
-			String shardId = shardMapCache.resolveShardId(keyBytes);
-			NodeRecord leader = shardMapCache.getLeader(shardId);
+			// Resolve shard
+			final String shardId = resolveShardId(keyBytes);
 
-			if (leader == null) {
-				// Fallback: try any replica
-				leader = shardMapCache.getHealthyReplica(shardId);
-			}
-
-			if (leader == null) {
-				responseObserver.onNext(PutResponse.newBuilder()
-						.setStatus(Status.newBuilder()
-								.setCode(Status.Code.UNAVAILABLE)
-								.setMessage("No available node for shard: " + shardId)
-								.setShardId(shardId)
-								.build())
-						.build());
-				responseObserver.onCompleted();
-				return;
-			}
-
-			// Forward to storage node
-			KVServiceGrpc.KVServiceBlockingStub stub = nodePool.getStub(leader.getAddress());
+			// Build the node request
 			KeyValueRequest nodeRequest = KeyValueRequest.newBuilder()
 					.setKey(keyStr)
 					.setValue(valueStr)
 					.build();
 
-			SetResponse nodeResponse = stub
-					.withDeadlineAfter(DEFAULT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-					.set(nodeRequest);
+			// Execute with retry
+			ExecutionResult<SetResponse> result = requestExecutor.executeWithRetry(
+					shardId,
+					true,
+					stub -> stub.set(nodeRequest),
+					() -> getNodesForWrite(shardId));
 
-			// Map response
-			if (nodeResponse.getSuccess()) {
-				responseObserver.onNext(PutResponse.newBuilder()
-						.setStatus(Status.newBuilder()
-								.setCode(Status.Code.OK)
-								.setShardId(shardId)
-								.build())
-						.setVersion(1) // Storage nodes don't track versions yet
-						.build());
-			} else {
-				responseObserver.onNext(PutResponse.newBuilder()
-						.setStatus(Status.newBuilder()
-								.setCode(Status.Code.INTERNAL)
-								.setMessage("Put operation failed on storage node")
-								.setShardId(shardId)
-								.build())
-						.build());
+			// Handle result
+			if (!result.isSuccess()) {
+				throw new NodeUnavailableException(
+						result.getErrorMessage(), shardId, result.getErrorCode());
 			}
+
+			SetResponse nodeResponse = result.getResponse();
+			if (!nodeResponse.getSuccess()) {
+				throw new NodeOperationException("Put operation failed on storage node", shardId);
+			}
+
+			// Success response
+			responseObserver.onNext(PutResponse.newBuilder()
+					.setStatus(okStatus(shardId))
+					.setVersion(1)
+					.build());
 			responseObserver.onCompleted();
 
-		} catch (IllegalStateException e) {
-			LOGGER.log(Level.WARNING, "Shard map not available", e);
+		} catch (KvException e) {
 			responseObserver.onNext(PutResponse.newBuilder()
-					.setStatus(Status.newBuilder()
-							.setCode(Status.Code.UNAVAILABLE)
-							.setMessage("Shard map not available: " + e.getMessage())
-							.build())
-					.build());
-			responseObserver.onCompleted();
-		} catch (StatusRuntimeException e) {
-			LOGGER.log(Level.WARNING, "Node communication error during PUT", e);
-			responseObserver.onNext(PutResponse.newBuilder()
-					.setStatus(Status.newBuilder()
-							.setCode(Status.Code.UNAVAILABLE)
-							.setMessage("Node communication error: " + e.getStatus().getDescription())
-							.build())
-					.build());
-			responseObserver.onCompleted();
-		} catch (Exception e) {
-			LOGGER.log(Level.SEVERE, "Unexpected error during PUT", e);
-			responseObserver.onNext(PutResponse.newBuilder()
-					.setStatus(Status.newBuilder()
-							.setCode(Status.Code.INTERNAL)
-							.setMessage("Internal error: " + e.getMessage())
-							.build())
+					.setStatus(exceptionToStatus(e))
 					.build());
 			responseObserver.onCompleted();
 		}
@@ -247,126 +162,164 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
 		try {
 			// Validate request
 			if (request.getKey().isEmpty()) {
-				responseObserver.onNext(DeleteResponse.newBuilder()
-						.setStatus(Status.newBuilder()
-								.setCode(Status.Code.INVALID_ARGUMENT)
-								.setMessage("Key cannot be empty")
-								.build())
-						.build());
-				responseObserver.onCompleted();
-				return;
+				throw new InvalidRequestException("Key cannot be empty");
 			}
 
 			byte[] keyBytes = request.getKey().toByteArray();
 			String keyStr = new String(keyBytes, StandardCharsets.UTF_8);
 
-			// Resolve shard and get leader (writes always go to leader)
-			String shardId = shardMapCache.resolveShardId(keyBytes);
-			NodeRecord leader = shardMapCache.getLeader(shardId);
+			// Resolve shard
+			final String shardId = resolveShardId(keyBytes);
 
-			if (leader == null) {
-				// Fallback: try any replica
-				leader = shardMapCache.getHealthyReplica(shardId);
-			}
-
-			if (leader == null) {
-				responseObserver.onNext(DeleteResponse.newBuilder()
-						.setStatus(Status.newBuilder()
-								.setCode(Status.Code.UNAVAILABLE)
-								.setMessage("No available node for shard: " + shardId)
-								.setShardId(shardId)
-								.build())
-						.build());
-				responseObserver.onCompleted();
-				return;
-			}
-
-			// Forward to storage node
-			KVServiceGrpc.KVServiceBlockingStub stub = nodePool.getStub(leader.getAddress());
+			// Build the node request
 			com.kvdb.proto.kvstore.DeleteRequest nodeRequest = com.kvdb.proto.kvstore.DeleteRequest.newBuilder()
 					.setKey(keyStr)
 					.build();
 
-			com.kvdb.proto.kvstore.DeleteResponse nodeResponse = stub
-					.withDeadlineAfter(DEFAULT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-					.delete(nodeRequest);
+			// Execute with retry
+			ExecutionResult<com.kvdb.proto.kvstore.DeleteResponse> result = requestExecutor.executeWithRetry(
+					shardId,
+					true,
+					stub -> stub.delete(nodeRequest),
+					() -> getNodesForWrite(shardId));
 
-			// Map response
-			if (nodeResponse.getSuccess()) {
-				responseObserver.onNext(DeleteResponse.newBuilder()
-						.setStatus(Status.newBuilder()
-								.setCode(Status.Code.OK)
-								.setShardId(shardId)
-								.build())
-						.setVersion(1)
-						.build());
-			} else {
-				responseObserver.onNext(DeleteResponse.newBuilder()
-						.setStatus(Status.newBuilder()
-								.setCode(Status.Code.NOT_FOUND)
-								.setMessage("Key not found or delete failed")
-								.setShardId(shardId)
-								.build())
-						.build());
+			// Handle result
+			if (!result.isSuccess()) {
+				throw new NodeUnavailableException(
+						result.getErrorMessage(), shardId, result.getErrorCode());
 			}
+
+			com.kvdb.proto.kvstore.DeleteResponse nodeResponse = result.getResponse();
+			if (!nodeResponse.getSuccess()) {
+				throw new KeyNotFoundException(keyStr, shardId);
+			}
+
+			// Success response
+			responseObserver.onNext(DeleteResponse.newBuilder()
+					.setStatus(okStatus(shardId))
+					.setVersion(1)
+					.build());
 			responseObserver.onCompleted();
 
-		} catch (IllegalStateException e) {
-			LOGGER.log(Level.WARNING, "Shard map not available", e);
+		} catch (KvException e) {
 			responseObserver.onNext(DeleteResponse.newBuilder()
-					.setStatus(Status.newBuilder()
-							.setCode(Status.Code.UNAVAILABLE)
-							.setMessage("Shard map not available: " + e.getMessage())
-							.build())
-					.build());
-			responseObserver.onCompleted();
-		} catch (StatusRuntimeException e) {
-			LOGGER.log(Level.WARNING, "Node communication error during DELETE", e);
-			responseObserver.onNext(DeleteResponse.newBuilder()
-					.setStatus(Status.newBuilder()
-							.setCode(Status.Code.UNAVAILABLE)
-							.setMessage("Node communication error: " + e.getStatus().getDescription())
-							.build())
-					.build());
-			responseObserver.onCompleted();
-		} catch (Exception e) {
-			LOGGER.log(Level.SEVERE, "Unexpected error during DELETE", e);
-			responseObserver.onNext(DeleteResponse.newBuilder()
-					.setStatus(Status.newBuilder()
-							.setCode(Status.Code.INTERNAL)
-							.setMessage("Internal error: " + e.getMessage())
-							.build())
+					.setStatus(exceptionToStatus(e))
 					.build());
 			responseObserver.onCompleted();
 		}
 	}
 
+	// ========== Helper Methods ==========
+
 	/**
-	 * Selects the appropriate node for a read operation based on consistency level.
-	 *
-	 * @param shardId
-	 *            The shard ID
-	 * @param consistency
-	 *            The consistency level
-	 * @return The target node, or null if none available
+	 * Resolves shard ID, converting IllegalStateException to
+	 * ShardMapUnavailableException.
 	 */
-	private NodeRecord selectNodeForRead(String shardId, Consistency consistency) {
-		if (consistency == Consistency.STRONG) {
-			// Strong consistency: always go to leader
-			NodeRecord leader = shardMapCache.getLeader(shardId);
-			if (leader != null) {
-				return leader;
-			}
-			// Fallback to any healthy replica if leader unknown
-			return shardMapCache.getHealthyReplica(shardId);
-		} else {
-			// Eventual consistency: prefer any healthy replica
-			NodeRecord replica = shardMapCache.getHealthyReplica(shardId);
-			if (replica != null) {
-				return replica;
-			}
-			// Fallback to leader
-			return shardMapCache.getLeader(shardId);
+	private String resolveShardId(byte[] keyBytes) {
+		try {
+			return shardMapCache.resolveShardId(keyBytes);
+		} catch (IllegalStateException e) {
+			throw new ShardMapUnavailableException("Shard map not available: " + e.getMessage(), e);
 		}
+	}
+
+	/**
+	 * Creates an OK status with optional shard ID.
+	 */
+	private Status okStatus(String shardId) {
+		Status.Builder builder = Status.newBuilder().setCode(Status.Code.OK);
+		if (shardId != null) {
+			builder.setShardId(shardId);
+		}
+		return builder.build();
+	}
+
+	/**
+	 * Converts a KvException to a gateway Status proto.
+	 */
+	private Status exceptionToStatus(KvException e) {
+		Status.Builder builder = Status.newBuilder()
+				.setCode(mapGrpcCodeToStatusCode(e.getGrpcStatusCode()))
+				.setMessage(e.getMessage());
+
+		if (e.getShardId() != null) {
+			builder.setShardId(e.getShardId());
+		}
+
+		return builder.build();
+	}
+
+	/**
+	 * Maps gRPC status codes to gateway Status.Code.
+	 */
+	private Status.Code mapGrpcCodeToStatusCode(io.grpc.Status.Code grpcCode) {
+		if (grpcCode == null) {
+			return Status.Code.INTERNAL;
+		}
+		return switch (grpcCode) {
+			case OK -> Status.Code.OK;
+			case NOT_FOUND -> Status.Code.NOT_FOUND;
+			case INVALID_ARGUMENT -> Status.Code.INVALID_ARGUMENT;
+			case ALREADY_EXISTS -> Status.Code.ALREADY_EXISTS;
+			case FAILED_PRECONDITION -> Status.Code.PRECONDITION_FAILED;
+			case RESOURCE_EXHAUSTED -> Status.Code.RATE_LIMITED;
+			case UNAVAILABLE -> Status.Code.UNAVAILABLE;
+			case DEADLINE_EXCEEDED -> Status.Code.TIMEOUT;
+			case CANCELLED -> Status.Code.UNAVAILABLE;
+			default -> Status.Code.INTERNAL;
+		};
+	}
+
+	/**
+	 * Gets candidate nodes for a read operation.
+	 */
+	private List<NodeRecord> getNodesForRead(String shardId, Consistency consistency) {
+		List<NodeRecord> candidates = new ArrayList<>();
+
+		if (consistency == Consistency.STRONG) {
+			NodeRecord leader = shardMapCache.getLeader(shardId);
+			if (leader != null && leader.getStatus() == NodeStatus.ALIVE) {
+				candidates.add(leader);
+			}
+			for (NodeRecord replica : shardMapCache.getReplicas(shardId)) {
+				if (replica.getStatus() == NodeStatus.ALIVE && !candidates.contains(replica)) {
+					candidates.add(replica);
+				}
+			}
+		} else {
+			for (NodeRecord replica : shardMapCache.getReplicas(shardId)) {
+				if (replica.getStatus() == NodeStatus.ALIVE) {
+					candidates.add(replica);
+				}
+			}
+			NodeRecord leader = shardMapCache.getLeader(shardId);
+			if (leader != null && leader.getStatus() == NodeStatus.ALIVE && !candidates.contains(leader)) {
+				candidates.add(leader);
+			}
+		}
+
+		return candidates;
+	}
+
+	/**
+	 * Gets candidate nodes for a write operation.
+	 */
+	private List<NodeRecord> getNodesForWrite(String shardId) {
+		List<NodeRecord> candidates = new ArrayList<>();
+
+		NodeRecord leader = shardMapCache.getLeader(shardId);
+		if (leader != null) {
+			candidates.add(leader);
+		}
+
+		if (candidates.isEmpty()) {
+			for (NodeRecord replica : shardMapCache.getReplicas(shardId)) {
+				if (replica.getStatus() == NodeStatus.ALIVE) {
+					candidates.add(replica);
+				}
+			}
+		}
+
+		return candidates;
 	}
 }

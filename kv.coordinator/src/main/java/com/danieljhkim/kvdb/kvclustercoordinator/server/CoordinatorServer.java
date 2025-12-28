@@ -3,7 +3,10 @@ package com.danieljhkim.kvdb.kvclustercoordinator.server;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.StubRaftStateMachine;
 import com.danieljhkim.kvdb.kvclustercoordinator.service.CoordinatorServiceImpl;
 import com.danieljhkim.kvdb.kvclustercoordinator.service.WatcherManager;
+import com.danieljhkim.kvdb.kvcommon.grpc.GlobalExceptionInterceptor;
 import io.grpc.Server;
+import io.grpc.ServerInterceptors;
+import io.grpc.ServerServiceDefinition;
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
 import lombok.Getter;
 
@@ -32,10 +35,11 @@ public class CoordinatorServer {
 
 		// Create the coordinator service
 		CoordinatorServiceImpl coordinatorService = new CoordinatorServiceImpl(raftStateMachine, watcherManager);
-
+		ServerServiceDefinition interceptedService = ServerInterceptors.intercept(coordinatorService,
+				new GlobalExceptionInterceptor());
 		this.server = NettyServerBuilder
 				.forPort(port)
-				.addService(coordinatorService)
+				.addService(interceptedService)
 				.build();
 	}
 

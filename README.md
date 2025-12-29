@@ -1,149 +1,128 @@
-# KvDB - Distributed Key-Value Database
+# KvDB — Distributed Key-Value Database
 
 [![Build and Test](https://github.com/danieljhkim/Distributed-Key-Value-Database/actions/workflows/build.yml/badge.svg)](https://github.com/danieljhkim/Distributed-Key-Value-Database/actions/workflows/build.yml)
 
-A Redis-like distributed key-value store implemented in Java with clustering capabilities.
+KvDB is a Redis-like distributed key-value store implemented in Java, built around a clear separation between the **control plane** (cluster metadata) and the **data plane** (storage nodes). The system uses gRPC for service-to-service communication and is designed to evolve toward production-grade correctness (leader routing, topology epochs, retries, and consistent metadata propagation).
 
-## Features
-
-This project provides a lightweight distributed in-memory database, interfaced with a CLI.
-Supports a distributed architecture with a coordinator node and multiple storage nodes using modulo-based sharding strategy, enabling horizontal scalability.
-The system ensures data durability through periodic disc persistence and offers basic fault tolerance with node failure recovery via WAL.
-
-### Failure recovery
-
-Failure of any node is managed by the coordinator node, by delegating failed node's work to another healthy node and, once the failed node is back online, it syncs the state via 2 WAL's:
-- **Primary WAL**: Logs from the failed storage node
-- **Secondary WAL**: Logs from the coordinator node that were kept while the node was down
-
-### Client-Server Communication
-
-- The server uses a combination of TCP sockets and gRPC for server-server communication
-- Individual nodes can be accessed directly or through the coordinator
-
-
---- 
-
-## Architecture Overview
-
-KvDB follows a distributed architecture with the following components:
-
-- **Coordinator Node**: Manages the cluster topology, routes client requests to appropriate nodes. Performs health checks and delegates tasks in case of node failures.
-- **Storage Nodes**: Store the actual key-value data and handle read/write operations
-- **Client Interface**: Connects to the coordinator for executing commands
-
-```
-         +-----------------------------+
-         |        Client / CLI         |
-         +-------------+---------------+
-                       |
-                       v
-         +-------------+---------------+
-         |       Coordinator Node      |
-         |  - Knows cluster topology   |
-         |  - Handles client requests  |
-         |  - Routes to correct node   |
-         +-------------+---------------+
-                       |
-       ----------------+------------------
-      |                |                  |
-+-----+-----+    +-----+-----+     +------+------+
-|   Node A  |    |   Node B  |     |   Node C     |
-| - KV store|    | - KV store|     | - KV store   |
-+-----------+    +-----------+     +-------------+
-```
-
---- 
-
-## CLI Preview
-
-![kvclient](assets/kvclient.png)
+> Note: KvDB currently exposes a gRPC API. There is no CLI included at this stage.
 
 ---
 
-## Usage
+## Architecture
 
-### Prerequisites
+KvDB is composed of three primary components:
 
-- Java 11 or higher
-- Maven
-
-### Starting the Cluster
-
-1. Package the project using Maven:
-
-```bash
-make build
-````
-
-2. Start the Cluster: Coordinator Server and Node Servers
-
-```bash
-make run-cluster 
-```
-
-3. Start the Client CLI
-
-**Option 1** (recommended): [Use kvcli CLI Go application](./golang/kvcli/README.md)
-```bash
-make build-cli
-
-# connect to the cluster
-make run-cli
-```
-
-### Basic CLI Commands
-
-#### In-Memory Store Operations
-
-- `KV SET key value` - Set key to hold string value
-- `KV GET key` - Get the value of key
-- `KV DEL key` - Delete one or more keys
-
-
-#### Other Commands
-
-- `PING` - Test connection
-- `HELP` - Show help message
-- `EXIT` - Exit the client
-
---- 
-
-## Configuration
-
-Storage node configuration is done via `application.properties` file located in the `kv.common/src/main/resources/<node_id>` directory for locally running.
-
-### File-based Persistence
-
-The system supports file-based persistence with options for auto-flushing and custom file types.
-
-```properties
-kvdb.persistence.filepath=data/kvstore.dat
-kvdb.persistence.filetype=dat
-kvdb.persistence.enableAutoFlush=true
-kvdb.persistence.autoFlushInterval=2
-```
-
-### Cluster Configuration
-
-The coordinator uses a YAML configuration file to define the cluster topology, located in the `kv.coordinator/src/main/resources/cluster-config.yaml` file:
-
-```yaml
-nodes:
-  - id: node1
-    host: 127.0.0.1
-    port: 8081
-    useGrpc: true
-
-  - id: node2
-    host: 127.0.0.1
-    port: 8082
-    useGrpc: true
+- **Gateway (gRPC)**: Front door for clients. Performs shard routing, retries, and maintains a local shard-map cache.
+- **Coordinator (metadata / control plane)**: Owns the shard map, node records, shard epochs/versions, and streaming shard-map updates.
+- **Storage Nodes (data plane)**: Own shard replicas, serve reads, and accept writes only when they are the shard leader (or can provide a leader hint).
 
 ```
+         +-----------------------------+
+         |        Client (gRPC)        |
+         +-------------+---------------+
+                       |
+         +-------------v---------------+
+         |          Gateway            |
+         | - Shard map cache           |
+         | - Routing + retries         |
+         | - Parses routing hints      |
+         +------+------+---------------+
+                |      \
+                |       \  (data plane)
+                v        v
+         +------+-----+  +------+-----+  +------+-----+
+         |  Node A    |  |  Node B    |  |  Node C    |
+         | KV shard(s)|  | KV shard(s)|  | KV shard(s)|
+         +------------+  +------------+  +------------+
 
---- 
+                 (control plane / metadata)
+         +--------------------------------------+
+         |     Coordinator (Raft group)         |
+         | - Shard map + epochs/versions        |
+         | - Membership + status                |
+         | - WatchShardMap (deltas)             |
+         +--------------------------------------+
+                 ^                |
+                 | watch/deltas   | bootstrap/refresh
+                 +----------------+
+                        Gateway
+```
 
-# License
+---
+
+## Key Concepts
+
+### Shards, Replicas, and Leaders
+- Keys map to a **shard** (routing is based on the shard map).
+- Each shard has a **replica set** (one or more storage nodes).
+- Writes are routed to the **per-shard leader**.
+- Reads may be served by a leader or a replica, depending on routing policy.
+
+### Shard Map Cache (Gateway)
+The Gateway keeps a local shard map cache and keeps it fresh using a streaming watch:
+- **WatchShardMap** provides **delta-based updates** to avoid full refreshes.
+- On stream failures, the Gateway falls back to periodic polling until streaming resumes.
+
+### Routing Hints (Fast Recovery)
+Storage nodes return routing hints via **gRPC trailers**, allowing the Gateway to react quickly without global refreshes:
+- `x-leader-hint`: preferred leader address for a shard
+- `x-shard-id`: shard identifier related to the error
+- `x-new-node-hint`: node address hint when shard ownership has moved
+
+The Gateway uses these hints to:
+- Retry once directly to the hinted leader for `NOT_LEADER`
+- Force a shard-map refresh for `SHARD_MOVED`
+- Otherwise trigger throttled refresh/backoff to avoid thrash
+
+### Node-side Validation
+Storage nodes consult the coordinator shard map to validate:
+- Whether they are a **replica** of the shard
+- Whether they are the **leader** for write operations
+- Whether the provided **epoch** matches the shard’s current epoch (to prevent stale routing)
+
+---
+
+## APIs
+
+### Client → Gateway (gRPC)
+Core operations:
+- `Get`
+- `Put`
+- `Delete`
+
+The Gateway is responsible for:
+- Resolving the shard for a key
+- Routing reads/writes to appropriate nodes
+- Retrying with backoff where safe
+- Interpreting routing hints from trailers
+
+### Gateway/Nodes → Coordinator (gRPC)
+Metadata and control plane operations:
+- Shard map snapshot reads
+- Shard map watch (delta streaming)
+- Node/shard admin mutations (e.g., register node, init shards, set node status, set shard replicas/leader)
+
+
+---
+
+## Running Locally
+
+Consult the `Makefile` for common developer commands.
+
+Typical flow:
+1. Build:
+   ```bash
+   make build
+   ```
+2. Run a local cluster (coordinator + a few nodes + gateway):
+   ```bash
+   make run-cluster
+   ```
+
+
+---
+
+
+## License
 
 This project is licensed under the MIT License.

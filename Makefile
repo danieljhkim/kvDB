@@ -19,7 +19,7 @@ all: clean build run_cluster run_cli
 # -----------------
 build:
 	@echo "Running Maven build for all modules..."
-	$(MVN) clean package
+	$(MVN) clean package -DskipTests
 
 # -----------------
 # Build Go CLI
@@ -54,6 +54,16 @@ run-cluster:
 stop:
 	./scripts/run_cluster.sh stop
 
+bootstrap-cluster:
+	@echo "Bootstrapping coordinator (registering nodes and initializing shards)..."
+	chmod +x scripts/bootstrap_cluster.sh
+	./scripts/bootstrap_cluster.sh
+
+smoke-test:
+	@echo "Running integration smoke test (bootstrap + Put/Get)..."
+	chmod +x scripts/smoke_test.sh
+	./scripts/smoke_test.sh
+
 # -----------------
 # Gateway commands
 # -----------------
@@ -79,4 +89,4 @@ lint:
 	mvn spotless:check
 
 
-.PHONY: all build clean run_cluster stop_cluster logs cluster_status wipe_data build_cli run_cli run_gateway
+.PHONY: all build clean run_cluster stop_cluster logs cluster_status wipe_data build_cli run_cli run_gateway bootstrap_cluster smoke_test

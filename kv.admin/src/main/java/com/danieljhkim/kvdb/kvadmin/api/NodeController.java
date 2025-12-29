@@ -66,4 +66,3 @@ public class NodeController {
 		return ResponseEntity.ok(node);
 	}
 }
-

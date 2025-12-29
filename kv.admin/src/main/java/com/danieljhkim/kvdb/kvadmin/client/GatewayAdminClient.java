@@ -12,7 +12,8 @@ import io.grpc.ManagedChannelBuilder;
  * gRPC client for Gateway admin operations (stats, routing cache, etc.).
  * 
  * <p>
- * Note: Gateway admin APIs are not yet defined in the proto. This is a placeholder.
+ * Note: Gateway admin APIs are not yet defined in the proto. This is a
+ * placeholder.
  */
 public class GatewayAdminClient {
 
@@ -42,4 +43,3 @@ public class GatewayAdminClient {
 		}
 	}
 }
-

@@ -45,4 +45,3 @@ public class OpsController {
 		return ResponseEntity.ok(result);
 	}
 }
-

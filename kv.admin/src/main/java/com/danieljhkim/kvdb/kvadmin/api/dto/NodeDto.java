@@ -24,4 +24,3 @@ public class NodeDto {
 	private long lastHeartbeatMs;
 	private Map<String, String> capacityHints;
 }
-

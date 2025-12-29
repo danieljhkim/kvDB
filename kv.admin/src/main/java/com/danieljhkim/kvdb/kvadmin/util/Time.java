@@ -33,4 +33,3 @@ public class Time {
 		return seconds * 1000;
 	}
 }
-

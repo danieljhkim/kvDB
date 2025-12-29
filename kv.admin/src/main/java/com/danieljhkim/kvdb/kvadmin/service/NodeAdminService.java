@@ -27,20 +27,40 @@ public class NodeAdminService {
 	private final NodeAdminClient nodeAdminClient;
 
 	public List<NodeDto> listNodes() {
-		com.danieljhkim.kvdb.kvadmin.api.dto.ShardMapSnapshotDto shardMap = coordinatorReadClient
-				.getShardMap();
-		return shardMap.getNodes().values().stream()
-				.collect(Collectors.toList());
+		// Use the listNodes() method from CoordinatorReadClient which is more efficient
+		try {
+			return coordinatorReadClient.listNodes();
+		} catch (Exception e) {
+			log.warn("Failed to list nodes via dedicated RPC, falling back to shard map", e);
+			// Fallback to shard map if listNodes RPC fails
+			com.danieljhkim.kvdb.kvadmin.api.dto.ShardMapSnapshotDto shardMap = coordinatorReadClient
+					.getShardMap();
+			if (shardMap == null || shardMap.getNodes() == null) {
+				throw new IllegalStateException("Shard map not available: cannot list nodes", e);
+			}
+			return shardMap.getNodes().values().stream()
+					.collect(Collectors.toList());
+		}
 	}
 
 	public NodeDto getNode(String nodeId) {
-		com.danieljhkim.kvdb.kvadmin.api.dto.ShardMapSnapshotDto shardMap = coordinatorReadClient
-				.getShardMap();
-		NodeDto node = shardMap.getNodes().get(nodeId);
-		if (node == null) {
-			throw new IllegalArgumentException("Node not found: " + nodeId);
+		// Use the getNode() method from CoordinatorReadClient which is more efficient
+		try {
+			return coordinatorReadClient.getNode(nodeId);
+		} catch (Exception e) {
+			log.warn("Failed to get node via dedicated RPC, falling back to shard map", e);
+			// Fallback to shard map if getNode RPC fails
+			com.danieljhkim.kvdb.kvadmin.api.dto.ShardMapSnapshotDto shardMap = coordinatorReadClient
+					.getShardMap();
+			if (shardMap == null || shardMap.getNodes() == null) {
+				throw new IllegalStateException("Shard map not available: cannot get node " + nodeId, e);
+			}
+			NodeDto node = shardMap.getNodes().get(nodeId);
+			if (node == null) {
+				throw new IllegalArgumentException("Node not found: " + nodeId);
+			}
+			return node;
 		}
-		return node;
 	}
 
 	public HealthDto getNodeHealth(String nodeId) {
@@ -76,4 +96,3 @@ public class NodeAdminService {
 		return getNode(nodeId);
 	}
 }
-

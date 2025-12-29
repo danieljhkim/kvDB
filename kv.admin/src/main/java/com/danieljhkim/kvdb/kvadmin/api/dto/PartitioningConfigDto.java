@@ -17,4 +17,3 @@ public class PartitioningConfigDto {
 	private int numShards;
 	private int replicationFactor;
 }
-

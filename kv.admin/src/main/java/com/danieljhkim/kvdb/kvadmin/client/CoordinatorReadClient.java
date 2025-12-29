@@ -15,8 +15,12 @@ import com.danieljhkim.kvdb.kvadmin.api.dto.ShardDto;
 import com.danieljhkim.kvdb.kvadmin.api.dto.ShardMapSnapshotDto;
 import com.danieljhkim.kvdb.proto.coordinator.ClusterState;
 import com.danieljhkim.kvdb.proto.coordinator.CoordinatorGrpc;
+import com.danieljhkim.kvdb.proto.coordinator.GetNodeRequest;
+import com.danieljhkim.kvdb.proto.coordinator.GetNodeResponse;
 import com.danieljhkim.kvdb.proto.coordinator.GetShardMapRequest;
 import com.danieljhkim.kvdb.proto.coordinator.GetShardMapResponse;
+import com.danieljhkim.kvdb.proto.coordinator.ListNodesRequest;
+import com.danieljhkim.kvdb.proto.coordinator.ListNodesResponse;
 import com.danieljhkim.kvdb.proto.coordinator.NodeRecord;
 import com.danieljhkim.kvdb.proto.coordinator.ShardRecord;
 
@@ -55,14 +59,80 @@ public class CoordinatorReadClient {
 					.getShardMap(request);
 
 			if (response.getNotModified()) {
-				logger.warn("Shard map not modified");
-				return null;
+				// If notModified is true, it means the version hasn't changed,
+				// but we should still have the state. If state is missing, that's an error.
+				if (!response.hasState()) {
+					logger.error("Shard map response marked as notModified but has no state");
+					throw new IllegalStateException(
+							"Shard map not available: coordinator returned notModified without state");
+				}
+				logger.debug("Shard map not modified (version unchanged), returning existing state");
+			}
+
+			if (!response.hasState()) {
+				logger.error("Shard map response has no state");
+				throw new IllegalStateException("Shard map not available: coordinator returned response without state");
 			}
 
 			ClusterState state = response.getState();
 			return convertToDto(state);
 		} catch (StatusRuntimeException e) {
 			logger.error("Failed to get shard map", e);
+			throw e;
+		}
+	}
+
+	/**
+	 * Lists all nodes in the cluster.
+	 * 
+	 * @return List of NodeDto objects
+	 * @throws StatusRuntimeException
+	 *             if the RPC fails
+	 */
+	public List<NodeDto> listNodes() {
+		ListNodesRequest request = ListNodesRequest.newBuilder().build();
+
+		try {
+			ListNodesResponse response = blockingStub
+					.withDeadlineAfter(timeoutSeconds, TimeUnit.SECONDS)
+					.listNodes(request);
+
+			return response.getNodesList().stream()
+					.map(this::convertNode)
+					.collect(Collectors.toList());
+		} catch (StatusRuntimeException e) {
+			logger.error("Failed to list nodes", e);
+			throw e;
+		}
+	}
+
+	/**
+	 * Gets a specific node by node ID.
+	 * 
+	 * @param nodeId
+	 *            The node ID to retrieve
+	 * @return NodeDto for the requested node
+	 * @throws StatusRuntimeException
+	 *             if the RPC fails or node not found
+	 */
+	public NodeDto getNode(String nodeId) {
+		GetNodeRequest request = GetNodeRequest.newBuilder()
+				.setNodeId(nodeId)
+				.build();
+
+		try {
+			GetNodeResponse response = blockingStub
+					.withDeadlineAfter(timeoutSeconds, TimeUnit.SECONDS)
+					.getNode(request);
+
+			if (!response.hasNode()) {
+				throw new StatusRuntimeException(
+						io.grpc.Status.NOT_FOUND.withDescription("Node not found: " + nodeId));
+			}
+
+			return convertNode(response.getNode());
+		} catch (StatusRuntimeException e) {
+			logger.error("Failed to get node: {}", nodeId, e);
 			throw e;
 		}
 	}
@@ -136,4 +206,3 @@ public class CoordinatorReadClient {
 		}
 	}
 }
-

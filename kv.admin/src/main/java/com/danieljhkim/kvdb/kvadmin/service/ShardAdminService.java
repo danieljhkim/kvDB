@@ -27,6 +27,9 @@ public class ShardAdminService {
 	public List<ShardDto> listShards() {
 		com.danieljhkim.kvdb.kvadmin.api.dto.ShardMapSnapshotDto shardMap = coordinatorReadClient
 				.getShardMap();
+		if (shardMap == null || shardMap.getShards() == null) {
+			throw new IllegalStateException("Shard map not available: cannot list shards");
+		}
 		return shardMap.getShards().values().stream()
 				.collect(Collectors.toList());
 	}
@@ -34,6 +37,9 @@ public class ShardAdminService {
 	public ShardDto getShard(String shardId) {
 		com.danieljhkim.kvdb.kvadmin.api.dto.ShardMapSnapshotDto shardMap = coordinatorReadClient
 				.getShardMap();
+		if (shardMap == null || shardMap.getShards() == null) {
+			throw new IllegalStateException("Shard map not available: cannot get shard " + shardId);
+		}
 		ShardDto shard = shardMap.getShards().get(shardId);
 		if (shard == null) {
 			throw new IllegalArgumentException("Shard not found: " + shardId);
@@ -58,4 +64,3 @@ public class ShardAdminService {
 		return request;
 	}
 }
-

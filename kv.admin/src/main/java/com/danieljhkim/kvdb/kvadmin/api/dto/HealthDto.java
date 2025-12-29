@@ -18,4 +18,3 @@ public class HealthDto {
 	private String message;
 	private long timestampMs;
 }
-

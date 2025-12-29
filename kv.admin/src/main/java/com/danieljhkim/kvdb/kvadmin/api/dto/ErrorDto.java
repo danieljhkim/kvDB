@@ -18,5 +18,9 @@ public class ErrorDto {
 	private String message;
 	private String code;
 	private long timestampMs;
-}
 
+	// Optional fields for routing hints
+	private String shardId;
+	private String leaderHint;
+	private String newNodeHint;
+}

@@ -9,23 +9,17 @@ import lombok.Data;
  * Configuration for the admin server (ports, timeouts, etc.).
  */
 @Configuration
-@ConfigurationProperties(prefix = "kvdb.admin.server")
+@ConfigurationProperties(prefix = "kvdb.admin")
 @Data
 public class AdminServerConfig {
 
 	/**
-	 * HTTP server port for admin API.
+	 * Overall timeout budget for a single admin request.
 	 */
-	private int port = 8081;
+	private long requestTimeoutMs = 3000;
 
 	/**
-	 * Request timeout in milliseconds.
+	 * Maximum number of nodes queried in parallel.
 	 */
-	private long requestTimeoutMs = 30000;
-
-	/**
-	 * Maximum request body size in bytes.
-	 */
-	private long maxRequestBodySize = 10485760; // 10MB
+	private int maxNodeFanout = 8;
 }
-

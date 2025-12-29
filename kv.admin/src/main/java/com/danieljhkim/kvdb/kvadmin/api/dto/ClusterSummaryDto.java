@@ -30,4 +30,3 @@ public class ClusterSummaryDto {
 	private List<NodeDto> nodes;
 	private List<ShardDto> shards;
 }
-

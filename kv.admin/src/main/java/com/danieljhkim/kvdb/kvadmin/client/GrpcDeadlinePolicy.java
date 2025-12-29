@@ -31,4 +31,3 @@ public class GrpcDeadlinePolicy {
 		return stub.withDeadlineAfter(timeout, unit);
 	}
 }
-

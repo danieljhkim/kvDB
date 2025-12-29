@@ -24,6 +24,9 @@ public class ConfigService {
 	public Map<String, Object> getConfig() {
 		com.danieljhkim.kvdb.kvadmin.api.dto.ShardMapSnapshotDto shardMap = coordinatorReadClient
 				.getShardMap();
+		if (shardMap == null) {
+			throw new IllegalStateException("Shard map not available: cannot get config");
+		}
 		return Map.of(
 				"map_version", shardMap.getMapVersion(),
 				"num_shards", shardMap.getPartitioning() != null
@@ -52,4 +55,3 @@ public class ConfigService {
 				"replication_factor", replicationFactor);
 	}
 }
-

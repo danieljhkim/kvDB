@@ -72,4 +72,3 @@ public class NodeAdminClient {
 		logger.info("Triggering compaction on node: {}", nodeAddress);
 	}
 }
-

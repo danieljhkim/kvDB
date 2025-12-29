@@ -22,4 +22,3 @@ public class ShardMapSnapshotDto {
 	private Map<String, ShardDto> shards;
 	private PartitioningConfigDto partitioning;
 }
-

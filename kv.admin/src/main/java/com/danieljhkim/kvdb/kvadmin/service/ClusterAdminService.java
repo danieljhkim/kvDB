@@ -26,9 +26,13 @@ public class ClusterAdminService {
 	private final CoordinatorReadClient coordinatorReadClient;
 	private final ShardAdminService shardAdminService;
 	private final NodeAdminService nodeAdminService;
+	private final ShardMapCache shardMapCache;
 
 	public ClusterSummaryDto getClusterSummary() {
 		ShardMapSnapshotDto shardMap = getShardMap();
+		if (shardMap == null) {
+			throw new IllegalStateException("Shard map not available: cannot generate cluster summary");
+		}
 
 		List<NodeDto> nodes = nodeAdminService.listNodes();
 		List<ShardDto> shards = shardAdminService.listShards();
@@ -64,7 +68,40 @@ public class ClusterAdminService {
 	}
 
 	public ShardMapSnapshotDto getShardMap() {
-		return coordinatorReadClient.getShardMap();
+		// Check cache first
+		ShardMapSnapshotDto cached = shardMapCache.get();
+		if (cached != null) {
+			return cached;
+		}
+
+		// Cache miss or expired - fetch from coordinator
+		ShardMapSnapshotDto shardMap = coordinatorReadClient.getShardMap();
+		if (shardMap != null) {
+			shardMapCache.put(shardMap);
+		}
+		return shardMap;
+	}
+
+	/**
+	 * Gets the shard map version, using cache if available.
+	 * 
+	 * @return The map version number
+	 */
+	public long getShardMapVersion() {
+		// Check cache first
+		Long cachedVersion = shardMapCache.getVersion();
+		if (cachedVersion != null) {
+			return cachedVersion;
+		}
+
+		// Cache miss or expired - fetch from coordinator
+		ShardMapSnapshotDto shardMap = coordinatorReadClient.getShardMap();
+		if (shardMap != null) {
+			shardMapCache.put(shardMap);
+			return shardMap.getMapVersion();
+		}
+
+		// Fallback: return 0 if coordinator unavailable
+		return 0;
 	}
 }
-

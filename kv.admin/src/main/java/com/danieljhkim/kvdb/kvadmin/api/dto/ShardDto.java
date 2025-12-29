@@ -23,4 +23,3 @@ public class ShardDto {
 	private String configState; // STABLE, MOVING
 	private KeyRangeDto keyRange;
 }
-

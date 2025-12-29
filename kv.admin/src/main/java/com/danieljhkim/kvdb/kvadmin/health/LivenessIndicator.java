@@ -21,4 +21,3 @@ public class LivenessIndicator implements HealthIndicator {
 				.build();
 	}
 }
-

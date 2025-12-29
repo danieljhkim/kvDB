@@ -22,4 +22,3 @@ public class TriggerRequestDto {
 	private List<String> targetShards; // optional: specific shards
 	private List<String> targetNodes; // optional: specific nodes
 }
-

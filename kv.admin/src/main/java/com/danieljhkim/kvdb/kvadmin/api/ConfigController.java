@@ -47,4 +47,3 @@ public class ConfigController {
 		return ResponseEntity.ok(result);
 	}
 }
-

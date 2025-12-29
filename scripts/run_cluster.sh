@@ -11,6 +11,7 @@ BASE_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/.."
 COORDINATOR_JAR="$BASE_DIR/kv.coordinator/target/kv-coordinator.jar"
 NODE_JAR="$BASE_DIR/kv.node/target/kv-node.jar"
 GATEWAY_JAR="$BASE_DIR/kv.gateway/target/kv-gateway.jar"
+ADMIN_JAR="$BASE_DIR/kv.admin/target/kv-admin.jar"
 
 LOG_DIR="$BASE_DIR/logs"
 DATA_DIR="$BASE_DIR/data"
@@ -34,6 +35,9 @@ require_file "$NODE_JAR"
 if [ "$START_GATEWAY" = "true" ]; then
   require_file "$GATEWAY_JAR"
 fi
+if [ "$START_ADMIN" = "true" ]; then
+  require_file "$ADMIN_JAR"
+fi
 
 # Number of nodes
 N_NODES=${N_NODES:-2}
@@ -43,9 +47,33 @@ N_NODES=${N_NODES:-2}
 COORDINATOR_PORT=${COORDINATOR_PORT:-9000}
 # Gateway (gRPC) defaults to 7000 in code
 GATEWAY_PORT=${GATEWAY_PORT:-7000}
+# Admin API (HTTP) defaults to 8081 in code
+ADMIN_PORT=${ADMIN_PORT:-8081}
 
 # Start gateway (optional)
 START_GATEWAY=${START_GATEWAY:-true}
+# Start admin server (optional)
+START_ADMIN=${START_ADMIN:-true}
+start_admin() {
+  if [ "$START_ADMIN" = "true" ]; then
+    echo "Starting Admin API..."
+    export ADMIN_PORT
+
+    touch "$LOG_DIR/admin.log"
+
+    nohup java -jar "$ADMIN_JAR" \
+      > "$LOG_DIR/admin.log" 2>&1 &
+    ADMIN_PID=$!
+
+    echo "Admin API started (PID: $ADMIN_PID, port: $ADMIN_PORT)"
+    echo "  Log file: $LOG_DIR/admin.log"
+
+    sleep 0.5
+    if ! ps -p $ADMIN_PID > /dev/null 2>&1; then
+      echo "⚠️  Warning: Admin API process may have crashed. Check $LOG_DIR/admin.log"
+    fi
+  fi
+}
 
 
 ############################################
@@ -65,7 +93,7 @@ start_coordinator() {
 
   echo "Coordinator started (PID: $COORDINATOR_PID, port: $COORDINATOR_PORT)"
   echo "  Log file: $LOG_DIR/coordinator.log"
-  
+
   # Give it a moment to start and write to log
   sleep 0.5
   if ! ps -p $COORDINATOR_PID > /dev/null 2>&1; then
@@ -89,7 +117,7 @@ start_nodes() {
     NODE_PID=$!
     echo "Data-Node #$i started (NODE_ID=$node_id, PID: $NODE_PID)"
     echo "  Log file: $LOG_DIR/node-$i.log"
-    
+
     # Give it a moment to start and write to log
     sleep 0.3
     if ! ps -p $NODE_PID > /dev/null 2>&1; then
@@ -112,7 +140,7 @@ start_gateway() {
 
     echo "Gateway started (PID: $GATEWAY_PID, port: $GATEWAY_PORT)"
     echo "  Log file: $LOG_DIR/gateway.log"
-    
+
     # Give it a moment to start and write to log
     sleep 0.5
     if ! ps -p $GATEWAY_PID > /dev/null 2>&1; then
@@ -126,6 +154,7 @@ stop_cluster() {
   pkill -f "kv-coordinator.jar" || true
   pkill -f "kv-node.jar" || true
   pkill -f "kv-gateway.jar" || true
+  pkill -f "kv-admin.jar" || true
   echo "Cluster stopped."
 }
 
@@ -189,6 +218,7 @@ echo " Spinning up Distributed kvdb Cluster"
 echo "================================================="
 echo "Coordinator : localhost:${COORDINATOR_PORT}"
 echo "Data Nodes : ${N_NODES}"
+echo "Admin API  : localhost:${ADMIN_PORT}"
 echo "================================================="
 
 start_coordinator
@@ -202,12 +232,20 @@ if [ "$START_GATEWAY" = "true" ]; then
   sleep 1
 fi
 
+start_admin
+if [ "$START_ADMIN" = "true" ]; then
+  sleep 1
+fi
+
 echo ""
 echo "================================================="
 echo "Cluster is running!"
 echo "Coordinator : localhost:${COORDINATOR_PORT}"
 if [ "$START_GATEWAY" = "true" ]; then
   echo "Gateway     : localhost:${GATEWAY_PORT}"
+fi
+if [ "$START_ADMIN" = "true" ]; then
+  echo "Admin API  : localhost:${ADMIN_PORT}"
 fi
 echo "Logs  : $LOG_DIR"
 echo "Data  : $DATA_DIR"

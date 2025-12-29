@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="WARN" monitorInterval="30">
+<!--
+  kv.admin uses Spring Boot with Log4j2. This file is Spring-aware (log4j2-spring.xml),
+  so Spring properties can be referenced if needed.
+
+  NOTE: We intentionally log to CONSOLE only. The cluster scripts redirect stdout/stderr
+  to logs/admin.log, so adding a FileAppender here would double-write logs by default.
+-->
+
+<Properties>
+    <!-- ISO-8601 timestamp with timezone -->
+    <Property name="LOG_PATTERN">%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} [%t] %-5p %c{36} - %m</Property>
+</Properties>
+
+<Appenders>
+    <Console name="Console" target="SYSTEM_OUT">
+        <PatternLayout pattern="${LOG_PATTERN}"/>
+    </Console>
+</Appenders>
+
+<Loggers>
+    <!-- Reduce common Spring noise; adjust as needed -->
+    <Logger name="org.springframework" level="INFO" additivity="false">
+        <AppenderRef ref="Console"/>
+    </Logger>
+    <Logger name="org.apache.catalina" level="INFO" additivity="false">
+        <AppenderRef ref="Console"/>
+    </Logger>
+    <Logger name="org.apache.tomcat" level="INFO" additivity="false">
+        <AppenderRef ref="Console"/>
+    </Logger>
+
+    <!-- Your application code -->
+    <Logger name="com.danieljhkim.kvdb" level="DEBUG" additivity="false">
+        <AppenderRef ref="Console"/>
+    </Logger>
+
+    <Root level="INFO">
+        <AppenderRef ref="Console"/>
+    </Root>
+</Loggers>
+</Configuration>

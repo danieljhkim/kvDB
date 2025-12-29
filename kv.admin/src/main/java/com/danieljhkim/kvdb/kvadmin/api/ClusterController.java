@@ -1,5 +1,7 @@
 package com.danieljhkim.kvdb.kvadmin.api;
 
+import java.util.Map;
+
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -37,5 +39,10 @@ public class ClusterController {
 		ShardMapSnapshotDto shardMap = clusterAdminService.getShardMap();
 		return ResponseEntity.ok(shardMap);
 	}
-}
 
+	@GetMapping("/shard-map/version")
+	public ResponseEntity<Map<String, Long>> getShardMapVersion() {
+		long version = clusterAdminService.getShardMapVersion();
+		return ResponseEntity.ok(Map.of("map_version", version));
+	}
+}

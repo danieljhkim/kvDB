@@ -17,4 +17,3 @@ public class KeyRangeDto {
 	private byte[] startKey; // inclusive
 	private byte[] endKey; // exclusive
 }
-

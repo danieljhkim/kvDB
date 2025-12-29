@@ -134,14 +134,24 @@ Typical flow:
    ```bash
    make build
    ```
-2. Run a local cluster (coordinator + a few nodes + gateway + admin API):
+2. Run a local cluster (coordinator + 2 data nodes + gateway + admin API):
    ```bash
    make run-cluster
+   ```
+3. Boostrap the cluster:
+   ```bash
+   make bootstrap-cluster
+   ```
+4. Smoke test the cluster:
+   ```bash
+   make smoke-test
    ```
 
 ---
 
 ## Benchmarking
+
+Detailed benchmark results and analysis are documented in [docs/performance.md](docs/performance.md).
 
 Gateway (gRPC)
 ```bash

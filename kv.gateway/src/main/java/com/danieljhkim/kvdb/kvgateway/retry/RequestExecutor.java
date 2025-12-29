@@ -4,12 +4,13 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.function.Supplier;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
-import com.danieljhkim.kvdb.kvgateway.cache.ShardRoutingFailureTracker;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.danieljhkim.kvdb.kvgateway.cache.NodeFailureTracker;
 import com.danieljhkim.kvdb.kvgateway.cache.ShardMapCache;
+import com.danieljhkim.kvdb.kvgateway.cache.ShardRoutingFailureTracker;
 import com.danieljhkim.kvdb.kvgateway.client.NodeConnectionPool;
 import com.danieljhkim.kvdb.proto.coordinator.NodeRecord;
 import com.kvdb.proto.kvstore.KVServiceGrpc;
@@ -24,7 +25,7 @@ import io.grpc.StatusRuntimeException;
  */
 public class RequestExecutor {
 
-	private static final Logger LOGGER = Logger.getLogger(RequestExecutor.class.getName());
+	private static final Logger logger = LoggerFactory.getLogger(RequestExecutor.class);
 
 	private final ShardMapCache shardMapCache;
 	private final NodeConnectionPool nodePool;
@@ -138,7 +139,7 @@ public class RequestExecutor {
 			// Get candidate nodes
 			List<NodeRecord> candidates = nodeSupplier.get();
 			if (candidates == null || candidates.isEmpty()) {
-				LOGGER.warning("No candidate nodes available for shard: " + shardId);
+				logger.warn("No candidate nodes available for shard: {}", shardId);
 				return ExecutionResult.failure(
 						Status.Code.UNAVAILABLE,
 						"No available nodes for shard: " + shardId,
@@ -148,7 +149,7 @@ public class RequestExecutor {
 			// Select a node (skip recently failed ones for reads)
 			NodeRecord targetNode = selectNode(candidates, isWrite);
 			if (targetNode == null) {
-				LOGGER.warning("All candidate nodes recently failed for shard: " + shardId);
+				logger.warn("All candidate nodes recently failed for shard: {}", shardId);
 				// Clear failure records and try again
 				for (NodeRecord node : candidates) {
 					failureTracker.clearFailure(node.getAddress());
@@ -172,10 +173,8 @@ public class RequestExecutor {
 				lastException = e;
 				Status.Code code = e.getStatus().getCode();
 
-				LOGGER.log(Level.WARNING,
-						"Request failed (attempt " + attempt + "/" + maxAttempts
-								+ ", node=" + lastNodeAddress + ", code=" + code + "): "
-								+ e.getStatus().getDescription());
+				logger.warn("Request failed (attempt {}/{}, node={}, code={}): {}",
+						attempt, maxAttempts, lastNodeAddress, code, e.getStatus().getDescription());
 
 				// Record the failure
 				failureTracker.recordFailure(lastNodeAddress);
@@ -200,13 +199,10 @@ public class RequestExecutor {
 								return ExecutionResult.success(hintedResponse, hintedLeaderAddress);
 							} catch (StatusRuntimeException hintedEx) {
 								// fall through to regular retry loop
-								LOGGER.log(Level.WARNING,
-										"Leader-hint retry failed (node={0}, code={1}): {2}",
-										new Object[] {
-												hintedLeaderAddress,
-												hintedEx.getStatus().getCode(),
-												hintedEx.getStatus().getDescription()
-										});
+								logger.warn("Leader-hint retry failed (node={}, code={}): {}",
+										hintedLeaderAddress,
+										hintedEx.getStatus().getCode(),
+										hintedEx.getStatus().getDescription());
 								failureTracker.recordFailure(hintedLeaderAddress);
 								lastException = hintedEx;
 							}
@@ -217,11 +213,11 @@ public class RequestExecutor {
 
 					} else if (hints.newNodeHint().isPresent()) {
 						// SHARD_MOVED signal -> force refresh
-						LOGGER.info("SHARD_MOVED hint received, forcing shard map refresh");
+						logger.info("SHARD_MOVED hint received, forcing shard map refresh");
 						shardMapCache.forceRefreshAsync();
 					} else {
 						// Generic stale routing - schedule refresh (gated)
-						LOGGER.info("FAILED_PRECONDITION received, scheduling shard map refresh");
+						logger.info("FAILED_PRECONDITION received, scheduling shard map refresh");
 						shardMapCache.scheduleRefreshIfStale();
 					}
 				}
@@ -229,7 +225,7 @@ public class RequestExecutor {
 				// Check if we should retry
 				boolean retryable = retryPolicy.isRetryable(code) || code == Status.Code.FAILED_PRECONDITION;
 				if (!retryable) {
-					LOGGER.fine("Error code " + code + " is not retryable");
+					logger.debug("Error code {} is not retryable", code);
 					break;
 				}
 
@@ -237,7 +233,7 @@ public class RequestExecutor {
 				if (attempt < maxAttempts) {
 					// Apply backoff before retry
 					long backoffMs = retryPolicy.calculateBackoff(attempt);
-					LOGGER.fine("Backing off for " + backoffMs + "ms before retry");
+					logger.debug("Backing off for {}ms before retry", backoffMs);
 					try {
 						Thread.sleep(backoffMs);
 					} catch (InterruptedException ie) {

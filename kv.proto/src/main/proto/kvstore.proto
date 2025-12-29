@@ -10,6 +10,9 @@ service KVService {
   rpc Get (KeyRequest) returns (ValueResponse);
   rpc Set (KeyValueRequest) returns (SetResponse);
   rpc Delete (DeleteRequest) returns (DeleteResponse);
+  // Internal replication RPCs (node-to-node). These should not be called by clients.
+  rpc ReplicateSet (ReplicateSetRequest) returns (SetResponse);
+  rpc ReplicateDelete (ReplicateDeleteRequest) returns (DeleteResponse);
   rpc Ping (PingRequest) returns (PingResponse);
   rpc Shutdown (ShutdownRequest) returns (ShutdownResponse);
 }
@@ -37,6 +40,25 @@ message DeleteRequest {
 
 message DeleteResponse {
   bool success = 1;
+}
+
+// ============================
+// Replication (internal)
+// ============================
+
+message ReplicateSetRequest {
+  string shard_id = 1;
+  uint64 epoch = 2;
+  string key = 3;
+  string value = 4;
+  string origin_node_id = 5;
+}
+
+message ReplicateDeleteRequest {
+  string shard_id = 1;
+  uint64 epoch = 2;
+  string key = 3;
+  string origin_node_id = 4;
 }
 
 message PingRequest {

@@ -4,11 +4,13 @@ import com.danieljhkim.kvdb.kvnode.storage.KVStore;
 
 import java.util.List;
 import java.util.Map;
-import java.util.logging.Logger;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class KVStoreRepository implements BaseRepository {
 
-	private static final Logger LOGGER = Logger.getLogger(KVStoreRepository.class.getName());
+	private static final Logger logger = LoggerFactory.getLogger(KVStoreRepository.class);
 
 	private final KVStore store = KVStore.getInstance();
 
@@ -48,7 +50,7 @@ public class KVStoreRepository implements BaseRepository {
 	}
 
 	public void initialize(String tableName) {
-		LOGGER.info("Initializing KVStore with table name: " + tableName);
+		logger.info("Initializing KVStore with table name: {}", tableName);
 	}
 
 	public int truncate() {
@@ -61,6 +63,6 @@ public class KVStoreRepository implements BaseRepository {
 
 	public void shutdown() {
 		store.shutdown();
-		LOGGER.info("KVStoreRepository shutdown complete.");
+		logger.info("KVStoreRepository shutdown complete.");
 	}
 }

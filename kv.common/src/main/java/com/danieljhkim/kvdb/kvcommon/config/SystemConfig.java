@@ -10,12 +10,12 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.Properties;
 import java.util.Set;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class SystemConfig {
 
-	private static final Logger LOGGER = Logger.getLogger(SystemConfig.class.getName());
+	private static final Logger logger = LoggerFactory.getLogger(SystemConfig.class);
 	private static final String DEFAULT_CONFIG_FILE = "application.properties";
 
 	private static SystemConfig INSTANCE;
@@ -54,11 +54,10 @@ public class SystemConfig {
 		if (Files.exists(path)) {
 			try (InputStream input = new FileInputStream(path.toFile())) {
 				properties.load(input);
-				LOGGER.info("Loaded default configuration from filesystem: " + path);
+				logger.info("Loaded default configuration from filesystem: {}", path);
 				return;
 			} catch (IOException e) {
-				LOGGER.log(
-						Level.WARNING, "Failed to load default configuration from filesystem", e);
+				logger.warn("Failed to load default configuration from filesystem", e);
 			}
 		}
 		try (InputStream input = getClass()
@@ -66,20 +65,13 @@ public class SystemConfig {
 				.getResourceAsStream(resourcePath + "/" + DEFAULT_CONFIG_FILE)) {
 			if (input != null) {
 				properties.load(input);
-				LOGGER.info(
-						"Loaded default configuration from classpath: "
-								+ resourcePath
-								+ "/"
-								+ DEFAULT_CONFIG_FILE);
+				logger.info("Loaded default configuration from classpath: {}/{}", resourcePath, DEFAULT_CONFIG_FILE);
 			} else {
-				LOGGER.warning(
-						"Default configuration file not found in classpath: "
-								+ resourcePath
-								+ "/"
-								+ DEFAULT_CONFIG_FILE);
+				logger.warn("Default configuration file not found in classpath: {}/{}", resourcePath,
+						DEFAULT_CONFIG_FILE);
 			}
 		} catch (IOException e) {
-			LOGGER.log(Level.WARNING, "Failed to load default configuration from classpath", e);
+			logger.warn("Failed to load default configuration from classpath", e);
 		}
 	}
 
@@ -92,17 +84,12 @@ public class SystemConfig {
 			if (Files.exists(envPath)) {
 				try (InputStream input = new FileInputStream(envConfigFile)) {
 					properties.load(input);
-					LOGGER.info("Loaded environment-specific configuration from: " + envConfigFile);
+					logger.info("Loaded environment-specific configuration from: {}", envConfigFile);
 				} catch (IOException e) {
-					LOGGER.log(
-							Level.WARNING,
-							"Failed to load environment-specific configuration file: "
-									+ envConfigFile,
-							e);
+					logger.warn("Failed to load environment-specific configuration file: {}", envConfigFile, e);
 				}
 			} else {
-				LOGGER.warning(
-						"Environment-specific configuration file not found: " + envConfigFile);
+				logger.warn("Environment-specific configuration file not found: {}", envConfigFile);
 			}
 		}
 	}

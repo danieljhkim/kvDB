@@ -10,12 +10,12 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class DatabaseConfig {
 
-	private static final Logger LOGGER = Logger.getLogger(DatabaseConfig.class.getName());
+	private static final Logger logger = LoggerFactory.getLogger(DatabaseConfig.class);
 	private static final String DEFAULT_DB = "default";
 	private static final String DB_PREFIX = "kvdb.database.";
 	private static DatabaseConfig INSTANCE;
@@ -31,7 +31,7 @@ public class DatabaseConfig {
 		if (availableDatabases.contains(dbName)) {
 			initializeDataSource(dbName);
 		} else {
-			LOGGER.warning("No database configuration found for: " + dbName);
+			logger.warn("No database configuration found for: {}", dbName);
 			throw new IllegalArgumentException("No database configuration found for: " + dbName);
 		}
 	}
@@ -63,7 +63,7 @@ public class DatabaseConfig {
 				String dbName = propName.substring(
 						DB_PREFIX.length(), propName.length() - 4); // remove ".url"
 				databases.add(dbName);
-				LOGGER.info("Found database configuration for: " + dbName);
+				logger.info("Found database configuration for: {}", dbName);
 			}
 		}
 		return Collections.unmodifiableSet(databases);
@@ -93,12 +93,9 @@ public class DatabaseConfig {
 
 			HikariDataSource dataSource = new HikariDataSource(config);
 			dataSources.put(dbName, dataSource);
-			LOGGER.info("Database connection pool initialized for: " + dbName);
+			logger.info("Database connection pool initialized for: {}", dbName);
 		} catch (Exception e) {
-			LOGGER.log(
-					Level.SEVERE,
-					"Failed to initialize database connection pool for: " + dbName,
-					e);
+			logger.error("Failed to initialize database connection pool for: {}", dbName, e);
 			throw new RuntimeException("Database configuration error for " + dbName, e);
 		}
 	}
@@ -123,17 +120,14 @@ public class DatabaseConfig {
 		try {
 			return dataSources.get(dbName).getConnection();
 		} catch (SQLException e) {
-			LOGGER.log(
-					Level.WARNING,
-					"Failed to get connection for " + dbName + ", attempting to reinitialize",
-					e);
+			logger.warn("Failed to get connection for {}, attempting to reinitialize", dbName, e);
 			reinitializeDataSource(dbName);
 			return dataSources.get(dbName).getConnection();
 		}
 	}
 
 	public void reinitializeDataSource(String dbName) {
-		LOGGER.info("Reinitializing database connection pool for: " + dbName);
+		logger.info("Reinitializing database connection pool for: {}", dbName);
 		closeDataSource(dbName);
 		initializeDataSource(dbName);
 	}
@@ -146,7 +140,7 @@ public class DatabaseConfig {
 		try (Connection conn = dataSources.get(dbName).getConnection()) {
 			return conn.isValid(2);
 		} catch (SQLException e) {
-			LOGGER.log(Level.WARNING, "Database health check failed for: " + dbName, e);
+			logger.warn("Database health check failed for: {}", dbName, e);
 			return false;
 		}
 	}
@@ -155,7 +149,7 @@ public class DatabaseConfig {
 		HikariDataSource dataSource = dataSources.remove(dbName);
 		if (dataSource != null && !dataSource.isClosed()) {
 			dataSource.close();
-			LOGGER.info("Database connection pool closed for: " + dbName);
+			logger.info("Database connection pool closed for: {}", dbName);
 		}
 	}
 

@@ -10,12 +10,12 @@ import java.net.Socket;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class KVServer implements BaseServer {
 
-	private static final Logger LOGGER = Logger.getLogger(KVServer.class.getName());
+	private static final Logger logger = LoggerFactory.getLogger(KVServer.class);
 
 	@Getter
 	private final int port;
@@ -42,17 +42,17 @@ public class KVServer implements BaseServer {
 
 	public void start() {
 		if (running) {
-			LOGGER.warning("Server is already running");
+			logger.warn("Server is already running");
 			return;
 		}
 		threadPool = Executors.newVirtualThreadPerTaskExecutor();
 		try {
 			serverSocket = new ServerSocket(port);
 			running = true;
-			LOGGER.info("Server started on port " + port);
+			logger.info("Server started on port {}", port);
 			acceptConnectionLoop(serverSocket);
 		} catch (IOException e) {
-			LOGGER.log(Level.SEVERE, "Failed to start server on port " + port, e);
+			logger.error("Failed to start server on port {}", port, e);
 		} finally {
 			shutdown();
 		}
@@ -65,7 +65,7 @@ public class KVServer implements BaseServer {
 				threadPool.execute(this.handlerFactory.createHandler(clientSocket));
 			} catch (IOException e) {
 				if (running) {
-					LOGGER.log(Level.WARNING, "Error accepting client connection", e);
+					logger.warn("Error accepting client connection", e);
 				}
 			}
 		}
@@ -76,13 +76,13 @@ public class KVServer implements BaseServer {
 			return;
 		}
 		running = false;
-		LOGGER.info("Shutting down server...");
+		logger.info("Shutting down server...");
 		try {
 			if (serverSocket != null && !serverSocket.isClosed()) {
 				serverSocket.close();
 			}
 		} catch (IOException e) {
-			LOGGER.log(Level.WARNING, "Error closing server socket", e);
+			logger.warn("Error closing server socket", e);
 		}
 		if (threadPool != null) {
 			threadPool.shutdown();
@@ -95,6 +95,6 @@ public class KVServer implements BaseServer {
 				Thread.currentThread().interrupt();
 			}
 		}
-		LOGGER.info("Server shutdown complete");
+		logger.info("Server shutdown complete");
 	}
 }

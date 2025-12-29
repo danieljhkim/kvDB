@@ -3,12 +3,13 @@ package com.danieljhkim.kvdb.kvgateway.cache;
 import com.danieljhkim.kvdb.kvgateway.client.CoordinatorClient;
 import com.danieljhkim.kvdb.proto.coordinator.*;
 import lombok.Getter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
-import java.util.logging.Logger;
 
 /**
  * Caches the cluster shard map from the coordinator.
@@ -17,7 +18,7 @@ import java.util.logging.Logger;
  */
 public class ShardMapCache implements Consumer<ShardMapDelta> {
 
-	private static final Logger LOGGER = Logger.getLogger(ShardMapCache.class.getName());
+	private static final Logger logger = LoggerFactory.getLogger(ShardMapCache.class);
 
 	/** Minimum interval between refresh attempts to avoid thrashing */
 	private static final long MIN_REFRESH_INTERVAL_MS = 5000;
@@ -52,16 +53,15 @@ public class ShardMapCache implements Consumer<ShardMapDelta> {
 	 * @return true if the map was updated, false otherwise
 	 */
 	public boolean refresh() {
-		LOGGER.info("Refreshing shard map from coordinator");
+		logger.info("Refreshing shard map from coordinator");
 		ClusterState newState = coordinatorClient.fetchShardMap();
 		if (newState != null) {
 			ClusterState oldState = cachedState.get();
 			if (oldState == null || newState.getMapVersion() > oldState.getMapVersion()) {
 				cachedState.set(newState);
 				lastRefreshTime = System.currentTimeMillis();
-				LOGGER.info("Shard map updated to version " + newState.getMapVersion()
-						+ " with " + newState.getShardsCount() + " shards and "
-						+ newState.getNodesCount() + " nodes");
+				logger.info("Shard map updated to version {} with {} shards and {} nodes",
+						newState.getMapVersion(), newState.getShardsCount(), newState.getNodesCount());
 				return true;
 			}
 		}
@@ -94,7 +94,7 @@ public class ShardMapCache implements Consumer<ShardMapDelta> {
 
 		// Version 0 is a heartbeat, ignore
 		if (newVersion == 0) {
-			LOGGER.fine("Ignoring heartbeat delta");
+			logger.debug("Ignoring heartbeat delta");
 			return false;
 		}
 
@@ -103,7 +103,7 @@ public class ShardMapCache implements Consumer<ShardMapDelta> {
 
 		// Only apply if newer
 		if (newVersion <= currentVersion) {
-			LOGGER.fine("Ignoring stale delta (version=" + newVersion + ", current=" + currentVersion + ")");
+			logger.debug("Ignoring stale delta (version={}, current={})", newVersion, currentVersion);
 			return false;
 		}
 
@@ -112,9 +112,8 @@ public class ShardMapCache implements Consumer<ShardMapDelta> {
 			ClusterState fullState = delta.getFullState();
 			cachedState.set(fullState);
 			lastDeltaUpdateTime = System.currentTimeMillis();
-			LOGGER.info("Shard map updated from delta (full state) to version " + fullState.getMapVersion()
-					+ " with " + fullState.getShardsCount() + " shards and "
-					+ fullState.getNodesCount() + " nodes");
+			logger.info("Shard map updated from delta (full state) to version {} with {} shards and {} nodes",
+					fullState.getMapVersion(), fullState.getShardsCount(), fullState.getNodesCount());
 			return true;
 		}
 
@@ -122,10 +121,9 @@ public class ShardMapCache implements Consumer<ShardMapDelta> {
 		// For now, if we receive an incremental delta without full state,
 		// trigger a full refresh to ensure consistency
 		if (!delta.getChangedShardsList().isEmpty() || !delta.getChangedNodesList().isEmpty()) {
-			LOGGER.info("Received incremental delta for version " + newVersion
-					+ " (changedShards=" + delta.getChangedShardsCount()
-					+ ", changedNodes=" + delta.getChangedNodesCount()
-					+ "). Triggering full refresh for consistency.");
+			logger.info(
+					"Received incremental delta for version {} (changedShards={}, changedNodes={}). Triggering full refresh for consistency.",
+					newVersion, delta.getChangedShardsCount(), delta.getChangedNodesCount());
 
 			// Schedule async refresh to avoid blocking the stream handler
 			// For now, do a synchronous refresh
@@ -148,7 +146,7 @@ public class ShardMapCache implements Consumer<ShardMapDelta> {
 			try {
 				refresh();
 			} catch (Exception e) {
-				LOGGER.warning("Async refresh failed: " + e.getMessage());
+				logger.warn("Async refresh failed: {}", e.getMessage());
 			}
 		});
 	}
@@ -165,12 +163,12 @@ public class ShardMapCache implements Consumer<ShardMapDelta> {
 		// Only refresh if we haven't refreshed recently
 		if (timeSinceLastRefresh > MIN_REFRESH_INTERVAL_MS
 				&& timeSinceLastDelta > MIN_REFRESH_INTERVAL_MS) {
-			LOGGER.fine("Scheduling refresh (timeSinceLastRefresh="
-					+ timeSinceLastRefresh + "ms, timeSinceLastDelta=" + timeSinceLastDelta + "ms)");
+			logger.debug("Scheduling refresh (timeSinceLastRefresh={}ms, timeSinceLastDelta={}ms)",
+					timeSinceLastRefresh, timeSinceLastDelta);
 			scheduleRefresh();
 		} else {
-			LOGGER.fine("Skipping refresh (too recent: timeSinceLastRefresh="
-					+ timeSinceLastRefresh + "ms, timeSinceLastDelta=" + timeSinceLastDelta + "ms)");
+			logger.debug("Skipping refresh (too recent: timeSinceLastRefresh={}ms, timeSinceLastDelta={}ms)",
+					timeSinceLastRefresh, timeSinceLastDelta);
 		}
 	}
 
@@ -180,7 +178,7 @@ public class ShardMapCache implements Consumer<ShardMapDelta> {
 	 * SHARD_MOVED).
 	 */
 	public void forceRefreshAsync() {
-		LOGGER.info("Forcing shard map refresh (bypassing refresh gating)");
+		logger.info("Forcing shard map refresh (bypassing refresh gating)");
 		scheduleRefresh();
 	}
 

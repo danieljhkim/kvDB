@@ -7,12 +7,13 @@ import java.io.IOException;
 import java.nio.file.*;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class FilePersistenceManager<T> implements PersistenceManager<T> {
 
-	private static final Logger LOGGER = Logger.getLogger(FilePersistenceManager.class.getName());
+	private static final Logger logger = LoggerFactory.getLogger(FilePersistenceManager.class);
 
 	private final Path filePath;
 	private final ReadWriteLock lock = new ReentrantReadWriteLock();
@@ -29,7 +30,7 @@ public class FilePersistenceManager<T> implements PersistenceManager<T> {
 				Files.createDirectories(parent);
 			}
 		} catch (IOException e) {
-			LOGGER.log(Level.WARNING, "Failed to create directory for persistence: " + filePath, e);
+			logger.warn("Failed to create directory for persistence: {}", filePath, e);
 		}
 	}
 
@@ -38,7 +39,7 @@ public class FilePersistenceManager<T> implements PersistenceManager<T> {
 		lock.writeLock().lock();
 		try {
 			if (data == null) {
-				LOGGER.log(Level.WARNING, "Data to save is null; skipping persistence");
+				logger.warn("Data to save is null; skipping persistence");
 				return;
 			}
 
@@ -68,13 +69,13 @@ public class FilePersistenceManager<T> implements PersistenceManager<T> {
 		lock.readLock().lock();
 		try {
 			if (!Files.exists(filePath)) {
-				LOGGER.log(Level.INFO, "Persistence file does not exist: {0}", filePath);
+				logger.info("Persistence file does not exist: {}", filePath);
 				return null;
 			}
 
 			T out = objectMapper.readValue(filePath.toFile(), typeReference);
 			if (out == null) {
-				LOGGER.log(Level.WARNING, "Loaded data is null from file: {0}", filePath);
+				logger.warn("Loaded data is null from file: {}", filePath);
 			}
 			return out;
 		} finally {
@@ -86,6 +87,6 @@ public class FilePersistenceManager<T> implements PersistenceManager<T> {
 	public void close() {
 		// No long-lived resources to close; kept for interface symmetry and future
 		// extensibility.
-		LOGGER.fine("FilePersistenceManager closed for file: " + filePath);
+		logger.debug("FilePersistenceManager closed for file: {}", filePath);
 	}
 }

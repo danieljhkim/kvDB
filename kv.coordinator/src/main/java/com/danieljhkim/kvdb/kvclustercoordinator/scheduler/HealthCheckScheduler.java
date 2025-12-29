@@ -3,8 +3,9 @@ package com.danieljhkim.kvdb.kvclustercoordinator.scheduler;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.danieljhkim.kvdb.kvclustercoordinator.health.NodeHealthChecker;
 import com.danieljhkim.kvdb.kvcommon.config.SystemConfig;
@@ -15,7 +16,7 @@ import com.danieljhkim.kvdb.kvcommon.config.SystemConfig;
  */
 public class HealthCheckScheduler {
 
-	private static final Logger LOGGER = Logger.getLogger(HealthCheckScheduler.class.getName());
+	private static final Logger logger = LoggerFactory.getLogger(HealthCheckScheduler.class);
 
 	private final ScheduledExecutorService clusterHealthScheduler;
 	private final NodeHealthChecker healthChecker;
@@ -36,10 +37,10 @@ public class HealthCheckScheduler {
 
 	public void start() {
 		if (!enabled) {
-			LOGGER.info("Health check scheduler is disabled.");
+			logger.info("Health check scheduler is disabled.");
 			return;
 		}
-		LOGGER.info("Starting health check scheduler with interval " + refreshIntervalSeconds + " seconds");
+		logger.info("Starting health check scheduler with interval {} seconds", refreshIntervalSeconds);
 		this.clusterHealthScheduler.scheduleAtFixedRate(
 				this::checkClusterHealth,
 				refreshIntervalSeconds, refreshIntervalSeconds,
@@ -47,10 +48,10 @@ public class HealthCheckScheduler {
 	}
 
 	public void shutdown() throws InterruptedException {
-		LOGGER.info("Shutting down health check scheduler...");
+		logger.info("Shutting down health check scheduler...");
 		this.clusterHealthScheduler.shutdown();
 		if (!this.clusterHealthScheduler.awaitTermination(5, TimeUnit.SECONDS)) {
-			LOGGER.warning("Health check scheduler did not terminate in time; forcing shutdown");
+			logger.warn("Health check scheduler did not terminate in time; forcing shutdown");
 			this.clusterHealthScheduler.shutdownNow();
 		}
 		// Shutdown health checker to clean up cached channels
@@ -59,10 +60,10 @@ public class HealthCheckScheduler {
 
 	private void checkClusterHealth() {
 		try {
-			LOGGER.fine("Performing scheduled health check on storage nodes");
+			logger.debug("Performing scheduled health check on storage nodes");
 			healthChecker.checkAllNodes();
 		} catch (Exception e) {
-			LOGGER.log(Level.WARNING, "Error during scheduled health check", e);
+			logger.warn("Error during scheduled health check", e);
 		}
 	}
 }

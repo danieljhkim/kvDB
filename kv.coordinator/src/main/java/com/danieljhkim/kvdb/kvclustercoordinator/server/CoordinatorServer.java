@@ -9,18 +9,16 @@ import io.grpc.ServerInterceptors;
 import io.grpc.ServerServiceDefinition;
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
 import lombok.Getter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.util.logging.Logger;
 
 public class CoordinatorServer {
-	private static final Logger LOGGER = Logger.getLogger(CoordinatorServer.class.getName());
+	private static final Logger logger = LoggerFactory.getLogger(CoordinatorServer.class);
 
 	private final Server server;
-	/**
-	 * -- GETTER --
-	 * Gets the Raft state machine for external access (e.g., for health checks).
-	 */
+
 	@Getter
 	private final StubRaftStateMachine raftStateMachine;
 	private final WatcherManager watcherManager;
@@ -37,6 +35,7 @@ public class CoordinatorServer {
 		CoordinatorServiceImpl coordinatorService = new CoordinatorServiceImpl(raftStateMachine, watcherManager);
 		ServerServiceDefinition interceptedService = ServerInterceptors.intercept(coordinatorService,
 				new GlobalExceptionInterceptor());
+
 		this.server = NettyServerBuilder
 				.forPort(port)
 				.addService(interceptedService)
@@ -50,12 +49,11 @@ public class CoordinatorServer {
 	}
 
 	public void shutdown() throws InterruptedException {
-		LOGGER.info("Shutting down CoordinatorServer...");
+		logger.info("Shutting down CoordinatorServer...");
 
-		// Shutdown gRPC server
 		if (server != null) {
 			server.shutdown().awaitTermination(3, java.util.concurrent.TimeUnit.SECONDS);
-			LOGGER.info("CoordinatorServer stopped");
+			logger.info("CoordinatorServer stopped");
 		}
 	}
 

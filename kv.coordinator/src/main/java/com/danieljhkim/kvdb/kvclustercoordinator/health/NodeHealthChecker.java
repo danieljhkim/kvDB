@@ -3,8 +3,9 @@ package com.danieljhkim.kvdb.kvclustercoordinator.health;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftCommand;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftStateMachine;
@@ -25,7 +26,7 @@ import io.grpc.StatusRuntimeException;
  */
 public class NodeHealthChecker {
 
-	private static final Logger LOGGER = Logger.getLogger(NodeHealthChecker.class.getName());
+	private static final Logger logger = LoggerFactory.getLogger(NodeHealthChecker.class);
 	private static final int PING_TIMEOUT_SECONDS = 5;
 
 	private final RaftStateMachine raftStateMachine;
@@ -76,12 +77,12 @@ public class NodeHealthChecker {
 					case DEAD -> {
 						// Node recovered from DEAD
 						newStatus = NodeRecord.NodeStatus.ALIVE;
-						LOGGER.info(() -> "Node " + node.nodeId() + " recovered, marking as ALIVE");
+						logger.info("Node {} recovered, marking as ALIVE", node.nodeId());
 					}
 					case SUSPECT -> {
 						// Node recovered from SUSPECT
 						newStatus = NodeRecord.NodeStatus.ALIVE;
-						LOGGER.info(() -> "Node " + node.nodeId() + " recovered, marking as ALIVE");
+						logger.info("Node {} recovered, marking as ALIVE", node.nodeId());
 					}
 					default -> {
 						// Node is already ALIVE, no change needed
@@ -97,12 +98,12 @@ public class NodeHealthChecker {
 					case ALIVE -> {
 						// Node became unhealthy, mark as SUSPECT first
 						newStatus = NodeRecord.NodeStatus.SUSPECT;
-						LOGGER.warning(() -> "Node " + node.nodeId() + " is unhealthy, marking as SUSPECT");
+						logger.warn("Node {} is unhealthy, marking as SUSPECT", node.nodeId());
 					}
 					case SUSPECT -> {
 						// Node still unhealthy after being SUSPECT, mark as DEAD
 						newStatus = NodeRecord.NodeStatus.DEAD;
-						LOGGER.warning(() -> "Node " + node.nodeId() + " is still unhealthy, marking as DEAD");
+						logger.warn("Node {} is still unhealthy, marking as DEAD", node.nodeId());
 					}
 					default -> {
 						// Node is already DEAD, no change needed
@@ -116,7 +117,7 @@ public class NodeHealthChecker {
 			RaftCommand.SetNodeStatus command = new RaftCommand.SetNodeStatus(node.nodeId(), newStatus);
 			raftStateMachine.apply(command).get(5, TimeUnit.SECONDS);
 		} catch (Exception e) {
-			LOGGER.log(Level.WARNING, "Failed to update node status for " + node.nodeId(), e);
+			logger.warn("Failed to update node status for {}", node.nodeId(), e);
 		}
 	}
 
@@ -131,7 +132,7 @@ public class NodeHealthChecker {
 	private boolean pingNode(String address) {
 		String[] parts = address.split(":");
 		if (parts.length != 2) {
-			LOGGER.warning("Invalid node address format: " + address);
+			logger.warn("Invalid node address format: {}", address);
 			return false;
 		}
 
@@ -140,7 +141,7 @@ public class NodeHealthChecker {
 		try {
 			port = Integer.parseInt(parts[1]);
 		} catch (NumberFormatException e) {
-			LOGGER.warning("Invalid port in address: " + address);
+			logger.warn("Invalid port in address: {}", address);
 			return false;
 		}
 
@@ -156,12 +157,12 @@ public class NodeHealthChecker {
 					.ping(request);
 			return true;
 		} catch (StatusRuntimeException e) {
-			LOGGER.fine("Node " + address + " ping failed: " + e.getStatus().getDescription());
+			logger.debug("Node {} ping failed: {}", address, e.getStatus().getDescription());
 			// Remove unhealthy channel/stub from cache
 			removeStub(address);
 			return false;
 		} catch (Exception e) {
-			LOGGER.fine("Node " + address + " ping failed: " + e.getMessage());
+			logger.debug("Node {} ping failed: {}", address, e.getMessage());
 			// Remove unhealthy channel/stub from cache
 			removeStub(address);
 			return false;
@@ -175,7 +176,7 @@ public class NodeHealthChecker {
 	private KVServiceGrpc.KVServiceBlockingStub getOrCreateStub(String address, String host, int port) {
 		return stubs.computeIfAbsent(address, addr -> {
 			ManagedChannel channel = channels.computeIfAbsent(addr, a -> {
-				LOGGER.fine("Creating gRPC channel for health check: " + addr);
+				logger.debug("Creating gRPC channel for health check: {}", addr);
 				return ManagedChannelBuilder.forAddress(host, port)
 						.usePlaintext()
 						.build();
@@ -192,7 +193,7 @@ public class NodeHealthChecker {
 		stubs.remove(address);
 		ManagedChannel channel = channels.remove(address);
 		if (channel != null) {
-			LOGGER.fine("Removing unhealthy channel: " + address);
+			logger.debug("Removing unhealthy channel: {}", address);
 			channel.shutdown();
 			try {
 				channel.awaitTermination(1, TimeUnit.SECONDS);
@@ -208,7 +209,7 @@ public class NodeHealthChecker {
 	 * Should be called when the health checker is no longer needed.
 	 */
 	public void shutdown() {
-		LOGGER.info("Shutting down NodeHealthChecker, closing " + channels.size() + " channels");
+		logger.info("Shutting down NodeHealthChecker, closing {} channels", channels.size());
 		stubs.clear();
 		for (Map.Entry<String, ManagedChannel> entry : channels.entrySet()) {
 			try {

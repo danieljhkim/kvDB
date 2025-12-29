@@ -1,14 +1,16 @@
 package com.danieljhkim.kvdb.kvgateway.client;
 
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.kvdb.proto.kvstore.KVServiceGrpc;
 
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
-
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
-import java.util.logging.Logger;
 
 /**
  * Manages gRPC connections to storage nodes.
@@ -16,7 +18,7 @@ import java.util.logging.Logger;
  */
 public class NodeConnectionPool {
 
-	private static final Logger LOGGER = Logger.getLogger(NodeConnectionPool.class.getName());
+	private static final Logger logger = LoggerFactory.getLogger(NodeConnectionPool.class);
 
 	private final Map<String, ManagedChannel> channels = new ConcurrentHashMap<>();
 	private final Map<String, KVServiceGrpc.KVServiceBlockingStub> stubs = new ConcurrentHashMap<>();
@@ -46,7 +48,7 @@ public class NodeConnectionPool {
 			io.grpc.internal.DnsNameResolverProvider provider = new io.grpc.internal.DnsNameResolverProvider();
 			io.grpc.NameResolverRegistry.getDefaultRegistry().register(provider);
 
-			LOGGER.info("Creating gRPC channel to storage node: " + addr);
+			logger.info("Creating gRPC channel to storage node: {}", addr);
 			return ManagedChannelBuilder.forAddress(host, port)
 					.usePlaintext()
 					.build();
@@ -57,13 +59,13 @@ public class NodeConnectionPool {
 	 * Closes all channels gracefully.
 	 */
 	public void closeAll() {
-		LOGGER.info("Closing all node connections");
+		logger.info("Closing all node connections");
 		for (Map.Entry<String, ManagedChannel> entry : channels.entrySet()) {
 			try {
 				entry.getValue().shutdown().awaitTermination(5, TimeUnit.SECONDS);
-				LOGGER.fine("Closed channel to " + entry.getKey());
+				logger.debug("Closed channel to {}", entry.getKey());
 			} catch (InterruptedException e) {
-				LOGGER.warning("Interrupted while closing channel to " + entry.getKey());
+				logger.warn("Interrupted while closing channel to {}", entry.getKey());
 				entry.getValue().shutdownNow();
 				Thread.currentThread().interrupt();
 			}
@@ -82,7 +84,7 @@ public class NodeConnectionPool {
 		stubs.remove(nodeAddress);
 		ManagedChannel channel = channels.remove(nodeAddress);
 		if (channel != null) {
-			LOGGER.info("Removing node from pool: " + nodeAddress);
+			logger.info("Removing node from pool: {}", nodeAddress);
 			channel.shutdownNow();
 		}
 	}

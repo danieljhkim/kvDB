@@ -1,5 +1,10 @@
 package com.danieljhkim.kvdb.kvgateway.client;
 
+import java.util.concurrent.TimeUnit;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.danieljhkim.kvdb.proto.coordinator.ClusterState;
 import com.danieljhkim.kvdb.proto.coordinator.CoordinatorGrpc;
 import com.danieljhkim.kvdb.proto.coordinator.GetShardMapRequest;
@@ -9,17 +14,13 @@ import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.StatusRuntimeException;
 
-import java.util.concurrent.TimeUnit;
-import java.util.logging.Level;
-import java.util.logging.Logger;
-
 /**
  * Client for communicating with the Coordinator service.
  * Used to fetch and refresh the shard map.
  */
 public class CoordinatorClient {
 
-	private static final Logger LOGGER = Logger.getLogger(CoordinatorClient.class.getName());
+	private static final Logger logger = LoggerFactory.getLogger(CoordinatorClient.class);
 
 	private final ManagedChannel channel;
 	private final CoordinatorGrpc.CoordinatorBlockingStub blockingStub;
@@ -33,7 +34,7 @@ public class CoordinatorClient {
 				.usePlaintext()
 				.build();
 		this.blockingStub = CoordinatorGrpc.newBlockingStub(channel);
-		LOGGER.info("CoordinatorClient created for " + host + ":" + port);
+		logger.info("CoordinatorClient created for {}:{}", host, port);
 	}
 
 	/**
@@ -56,7 +57,7 @@ public class CoordinatorClient {
 					.withDeadlineAfter(5, TimeUnit.SECONDS)
 					.getShardMap(request);
 		} catch (StatusRuntimeException e) {
-			LOGGER.log(Level.WARNING, "Failed to fetch shard map from coordinator", e);
+			logger.warn("Failed to fetch shard map from coordinator", e);
 			throw e;
 		}
 	}
@@ -70,12 +71,12 @@ public class CoordinatorClient {
 		try {
 			GetShardMapResponse response = getShardMap(0);
 			if (response.getNotModified()) {
-				LOGGER.fine("Shard map not modified");
+				logger.debug("Shard map not modified");
 				return null;
 			}
 			return response.getState();
 		} catch (StatusRuntimeException e) {
-			LOGGER.log(Level.WARNING, "Failed to fetch shard map", e);
+			logger.warn("Failed to fetch shard map", e);
 			return null;
 		}
 	}
@@ -84,11 +85,11 @@ public class CoordinatorClient {
 	 * Shuts down the channel gracefully.
 	 */
 	public void shutdown() {
-		LOGGER.info("Shutting down CoordinatorClient");
+		logger.info("Shutting down CoordinatorClient");
 		try {
 			channel.shutdown().awaitTermination(5, TimeUnit.SECONDS);
 		} catch (InterruptedException e) {
-			LOGGER.warning("Interrupted while shutting down CoordinatorClient");
+			logger.warn("Interrupted while shutting down CoordinatorClient");
 			channel.shutdownNow();
 			Thread.currentThread().interrupt();
 		}

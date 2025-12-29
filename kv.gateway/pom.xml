@@ -88,6 +88,9 @@
                                         implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                                     <mainClass>com.danieljhkim.kvdb.kvgateway.GatewayApplication</mainClass>
                                 </transformer>
+                                <!-- Merge META-INF/services entries so SLF4J providers are discoverable in the shaded jar -->
+                                <transformer
+                                        implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
                             </transformers>
                         </configuration>
                     </execution>

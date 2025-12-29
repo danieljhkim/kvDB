@@ -13,8 +13,8 @@ import io.grpc.StatusRuntimeException;
  *
  * <p>
  * The {@link GlobalExceptionInterceptor} is responsible for attaching these
- * keys
- * to trailers when services throw domain exceptions.
+ * keys to trailers when services throw domain exceptions.
+ * </p>
  */
 public final class GrpcRoutingHints {
 

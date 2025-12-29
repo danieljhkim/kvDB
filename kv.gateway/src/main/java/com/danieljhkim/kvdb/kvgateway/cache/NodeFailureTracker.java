@@ -2,7 +2,9 @@ package com.danieljhkim.kvdb.kvgateway.cache;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.logging.Logger;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Tracks recently failed nodes to avoid immediate retry to the same node.
@@ -10,7 +12,7 @@ import java.util.logging.Logger;
  */
 public class NodeFailureTracker {
 
-	private static final Logger LOGGER = Logger.getLogger(NodeFailureTracker.class.getName());
+	private static final Logger logger = LoggerFactory.getLogger(NodeFailureTracker.class);
 
 	private final Map<String, Long> failedNodes = new ConcurrentHashMap<>();
 	private final long failureTtlMs;
@@ -44,7 +46,7 @@ public class NodeFailureTracker {
 		}
 		long now = System.currentTimeMillis();
 		failedNodes.put(nodeAddress, now);
-		LOGGER.fine("Recorded failure for node: " + nodeAddress);
+		logger.debug("Recorded failure for node: {}", nodeAddress);
 	}
 
 	/**
@@ -85,7 +87,7 @@ public class NodeFailureTracker {
 			return;
 		}
 		if (failedNodes.remove(nodeAddress) != null) {
-			LOGGER.fine("Cleared failure for node: " + nodeAddress);
+			logger.debug("Cleared failure for node: {}", nodeAddress);
 		}
 	}
 

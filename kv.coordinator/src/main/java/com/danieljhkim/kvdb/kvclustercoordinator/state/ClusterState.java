@@ -1,5 +1,7 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.state;
 
+import lombok.Getter;
+
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -13,6 +15,7 @@ import java.util.Map;
  * After each mutation, a new immutable {@link ShardMapSnapshot} should be
  * created for safe concurrent reads.
  */
+@Getter
 public class ClusterState {
 
 	private long mapVersion;
@@ -43,26 +46,6 @@ public class ClusterState {
 	// ============================
 	// Getters
 	// ============================
-
-	public long getMapVersion() {
-		return mapVersion;
-	}
-
-	public Map<String, NodeRecord> getNodes() {
-		return nodes;
-	}
-
-	public Map<String, ShardRecord> getShards() {
-		return shards;
-	}
-
-	public int getNumShards() {
-		return numShards;
-	}
-
-	public int getReplicationFactor() {
-		return replicationFactor;
-	}
 
 	public NodeRecord getNode(String nodeId) {
 		return nodes.get(nodeId);

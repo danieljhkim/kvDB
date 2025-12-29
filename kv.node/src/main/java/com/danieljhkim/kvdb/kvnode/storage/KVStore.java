@@ -12,12 +12,13 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class KVStore implements KVStorageBase {
 
-	private static final Logger LOGGER = Logger.getLogger(KVStore.class.getName());
+	private static final Logger logger = LoggerFactory.getLogger(KVStore.class);
 	private static final SystemConfig CONFIG = SystemConfig.getInstance();
 
 	private static final String OK_RESPONSE = "OK";
@@ -53,11 +54,8 @@ public class KVStore implements KVStorageBase {
 		loadFromDisk();
 		recover();
 
-		LOGGER.info(
-				"KVStore initialized. Auto-flush interval: "
-						+ FLUSH_INTERVAL
-						+ ", auto-flush enabled: "
-						+ ENABLE_AUTO_FLUSH);
+		logger.info("KVStore initialized. Auto-flush interval: {}, auto-flush enabled: {}", FLUSH_INTERVAL,
+				ENABLE_AUTO_FLUSH);
 	}
 
 	public static KVStore getInstance() {
@@ -69,23 +67,23 @@ public class KVStore implements KVStorageBase {
 		try {
 			Map<String, String> loadedData = persistenceManager.load();
 			if (loadedData == null) {
-				LOGGER.warning("Loaded data is null, initializing empty store");
+				logger.warn("Loaded data is null, initializing empty store");
 				return;
 			}
 			store.putAll(loadedData);
-			LOGGER.info("Loaded " + loadedData.size() + " entries from disk");
+			logger.info("Loaded {} entries from disk", loadedData.size());
 		} catch (IOException e) {
-			LOGGER.log(Level.SEVERE, "Failed to load data from disk", e);
+			logger.error("Failed to load data from disk", e);
 		}
 	}
 
 	@Timer
 	private void saveToDisk() {
-		LOGGER.info("Saving data to disk");
+		logger.info("Saving data to disk");
 		try {
 			persistenceManager.save(store);
 		} catch (IOException e) {
-			LOGGER.log(Level.SEVERE, "Failed to save data to disk", e);
+			logger.error("Failed to save data to disk", e);
 		}
 	}
 
@@ -119,7 +117,7 @@ public class KVStore implements KVStorageBase {
 	}
 
 	public int clear() {
-		LOGGER.info("Clearing the KVStore");
+		logger.info("Clearing the KVStore");
 		int sizeBeforeClear = store.size();
 		store.clear();
 		walManager.clear();
@@ -175,7 +173,7 @@ public class KVStore implements KVStorageBase {
 		try {
 			// Re-check under the lock
 			if (curFlushInterval.get() >= FLUSH_INTERVAL) {
-				LOGGER.info("Auto-flushing data to disk");
+				logger.info("Auto-flushing data to disk");
 				saveToDisk();
 				walManager.clear();
 				curFlushInterval.set(0);
@@ -187,7 +185,7 @@ public class KVStore implements KVStorageBase {
 
 	@Override
 	public void shutdown() {
-		LOGGER.info("Shutting down KVStore");
+		logger.info("Shutting down KVStore");
 		// Final flush
 		saveToDisk();
 		walManager.clear();
@@ -195,19 +193,19 @@ public class KVStore implements KVStorageBase {
 		try {
 			persistenceManager.close();
 		} catch (IOException e) {
-			LOGGER.log(Level.WARNING, "Error closing persistence manager", e);
+			logger.warn("Error closing persistence manager", e);
 		}
 
 		// If WALManager has a close(), call it here
 		try {
 			walManager.close();
 		} catch (Exception e) {
-			LOGGER.log(Level.WARNING, "Error closing WAL manager", e);
+			logger.warn("Error closing WAL manager", e);
 		}
 	}
 
 	public void initialize(String tableName) {
-		LOGGER.info("Initializing KVStore with table name: " + tableName);
+		logger.info("Initializing KVStore with table name: {}", tableName);
 		// TODO: implement multi-table support if needed
 	}
 
@@ -229,11 +227,11 @@ public class KVStore implements KVStorageBase {
 			switch (operation) {
 				case "SET" -> store.put(key, value);
 				case "DEL" -> store.remove(key);
-				default -> LOGGER.warning("Unknown WAL op: " + operation);
+				default -> logger.warn("Unknown WAL op: {}", operation);
 			}
 		}
 		if (!ops.isEmpty()) {
-			LOGGER.info("Replayed " + ops.size() + " WAL operations during recovery");
+			logger.info("Replayed {} WAL operations during recovery", ops.size());
 		}
 	}
 

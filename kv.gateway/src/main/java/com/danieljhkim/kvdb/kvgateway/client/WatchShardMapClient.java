@@ -1,14 +1,19 @@
 package com.danieljhkim.kvdb.kvgateway.client;
 
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.danieljhkim.kvdb.proto.coordinator.CoordinatorGrpc;
 import com.danieljhkim.kvdb.proto.coordinator.ShardMapDelta;
@@ -16,7 +21,8 @@ import com.danieljhkim.kvdb.proto.coordinator.WatchShardMapRequest;
 
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
-import io.grpc.stub.StreamObserver;
+import io.grpc.stub.ClientCallStreamObserver;
+import io.grpc.stub.ClientResponseObserver;
 
 /**
  * Async streaming client for WatchShardMap RPC.
@@ -25,7 +31,7 @@ import io.grpc.stub.StreamObserver;
  */
 public class WatchShardMapClient {
 
-	private static final Logger LOGGER = Logger.getLogger(WatchShardMapClient.class.getName());
+	private static final Logger logger = LoggerFactory.getLogger(WatchShardMapClient.class);
 
 	// Backoff configuration
 	private static final long INITIAL_BACKOFF_MS = 1000;
@@ -42,6 +48,10 @@ public class WatchShardMapClient {
 	private final AtomicLong currentVersion = new AtomicLong(0);
 	private final AtomicInteger consecutiveFailures = new AtomicInteger(0);
 
+	private final ExecutorService consumerExecutor;
+	private final AtomicReference<ClientCallStreamObserver<WatchShardMapRequest>> activeCall = new AtomicReference<>(
+			null);
+
 	/**
 	 * Creates a new WatchShardMapClient.
 	 *
@@ -53,10 +63,6 @@ public class WatchShardMapClient {
 	 *            consumer to receive delta updates
 	 */
 	public WatchShardMapClient(String host, int port, Consumer<ShardMapDelta> deltaConsumer) {
-		// Register DNS resolver
-		io.grpc.internal.DnsNameResolverProvider provider = new io.grpc.internal.DnsNameResolverProvider();
-		io.grpc.NameResolverRegistry.getDefaultRegistry().register(provider);
-
 		this.channel = ManagedChannelBuilder.forAddress(host, port)
 				.usePlaintext()
 				.build();
@@ -68,7 +74,20 @@ public class WatchShardMapClient {
 			return t;
 		});
 
-		LOGGER.info("WatchShardMapClient created for " + host + ":" + port);
+		this.consumerExecutor = new ThreadPoolExecutor(
+				1,
+				1,
+				0L,
+				TimeUnit.MILLISECONDS,
+				new ArrayBlockingQueue<>(1024),
+				r -> {
+					Thread t = new Thread(r, "watch-shard-map-consumer");
+					t.setDaemon(true);
+					return t;
+				},
+				new ThreadPoolExecutor.CallerRunsPolicy());
+
+		logger.info("WatchShardMapClient created for {}:{}", host, port);
 	}
 
 	/**
@@ -77,7 +96,7 @@ public class WatchShardMapClient {
 	 */
 	public void start() {
 		if (running.compareAndSet(false, true)) {
-			LOGGER.info("Starting WatchShardMapClient");
+			logger.info("Starting WatchShardMapClient");
 			connect();
 		}
 	}
@@ -99,8 +118,16 @@ public class WatchShardMapClient {
 	 */
 	public void stop() {
 		if (running.compareAndSet(true, false)) {
-			LOGGER.info("Stopping WatchShardMapClient");
+			logger.info("Stopping WatchShardMapClient");
 			connected.set(false);
+			ClientCallStreamObserver<WatchShardMapRequest> call = activeCall.getAndSet(null);
+			if (call != null) {
+				try {
+					call.cancel("WatchShardMapClient stopped", null);
+				} catch (Exception e) {
+					logger.debug("Error cancelling active WatchShardMap call", e);
+				}
+			}
 			scheduler.shutdown();
 			try {
 				if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
@@ -110,6 +137,16 @@ public class WatchShardMapClient {
 				Thread.currentThread().interrupt();
 				scheduler.shutdownNow();
 			}
+
+			consumerExecutor.shutdown();
+			try {
+				if (!consumerExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+					consumerExecutor.shutdownNow();
+				}
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+				consumerExecutor.shutdownNow();
+			}
 		}
 	}
 
@@ -118,11 +155,11 @@ public class WatchShardMapClient {
 	 */
 	public void shutdown() {
 		stop();
-		LOGGER.info("Shutting down WatchShardMapClient channel");
+		logger.info("Shutting down WatchShardMapClient channel");
 		try {
 			channel.shutdown().awaitTermination(5, TimeUnit.SECONDS);
 		} catch (InterruptedException e) {
-			LOGGER.warning("Interrupted while shutting down channel");
+			logger.warn("Interrupted while shutting down channel");
 			channel.shutdownNow();
 			Thread.currentThread().interrupt();
 		}
@@ -149,15 +186,32 @@ public class WatchShardMapClient {
 		if (!running.get()) {
 			return;
 		}
+		if (channel.isShutdown() || channel.isTerminated()) {
+			logger.debug("Not connecting - channel is shut down");
+			return;
+		}
 
 		long fromVersion = currentVersion.get();
-		LOGGER.info("Connecting to WatchShardMap stream (fromVersion=" + fromVersion + ")");
+		logger.info("Connecting to WatchShardMap stream (fromVersion={})", fromVersion);
 
 		WatchShardMapRequest request = WatchShardMapRequest.newBuilder()
 				.setFromVersion(fromVersion)
 				.build();
 
-		asyncStub.watchShardMap(request, new StreamObserver<ShardMapDelta>() {
+		asyncStub.watchShardMap(request, new ClientResponseObserver<WatchShardMapRequest, ShardMapDelta>() {
+			@Override
+			public void beforeStart(ClientCallStreamObserver<WatchShardMapRequest> requestStream) {
+				// Capture the call so we can cancel it on stop().
+				ClientCallStreamObserver<WatchShardMapRequest> prev = activeCall.getAndSet(requestStream);
+				if (prev != null) {
+					try {
+						prev.cancel("Replaced by new WatchShardMap call", null);
+					} catch (Exception e) {
+						logger.debug("Error cancelling previous WatchShardMap call", e);
+					}
+				}
+			}
+
 			@Override
 			public void onNext(ShardMapDelta delta) {
 				handleDelta(delta);
@@ -165,11 +219,13 @@ public class WatchShardMapClient {
 
 			@Override
 			public void onError(Throwable t) {
+				activeCall.set(null);
 				handleError(t);
 			}
 
 			@Override
 			public void onCompleted() {
+				activeCall.set(null);
 				handleCompleted();
 			}
 		});
@@ -181,36 +237,38 @@ public class WatchShardMapClient {
 	private void handleDelta(ShardMapDelta delta) {
 		long newVersion = delta.getNewMapVersion();
 
-		// Version 0 is a heartbeat, not a real update
-		if (newVersion == 0) {
-			LOGGER.fine("Received heartbeat from coordinator");
-			return;
-		}
-
-		// Mark as connected on first real message
+		// Version 0 is a heartbeat (liveness), not a real update
 		if (!connected.get()) {
 			connected.set(true);
 			consecutiveFailures.set(0);
-			LOGGER.info("WatchShardMap stream connected");
+			logger.info("WatchShardMap stream connected");
+		}
+
+		if (newVersion == 0) {
+			logger.debug("Received heartbeat from coordinator");
+			return;
 		}
 
 		// Update our tracked version
 		if (newVersion > currentVersion.get()) {
 			currentVersion.set(newVersion);
-			LOGGER.fine("Received delta: version=" + newVersion
-					+ ", changedShards=" + delta.getChangedShardsCount()
-					+ ", changedNodes=" + delta.getChangedNodesCount()
-					+ ", hasFullState=" + delta.hasFullState());
+			logger.debug("Received delta: version={}, changedShards={}, changedNodes={}, hasFullState={}",
+					newVersion, delta.getChangedShardsCount(), delta.getChangedNodesCount(), delta.hasFullState());
 
-			// Notify consumer
+			// Notify consumer off the gRPC callback thread
 			try {
-				deltaConsumer.accept(delta);
+				consumerExecutor.execute(() -> {
+					try {
+						deltaConsumer.accept(delta);
+					} catch (Exception e) {
+						logger.warn("Error processing delta in consumer", e);
+					}
+				});
 			} catch (Exception e) {
-				LOGGER.log(Level.WARNING, "Error processing delta in consumer", e);
+				logger.warn("Failed to dispatch delta to consumer executor", e);
 			}
 		} else {
-			LOGGER.fine("Ignoring stale delta (version=" + newVersion
-					+ ", current=" + currentVersion.get() + ")");
+			logger.debug("Ignoring stale delta (version={}, current={})", newVersion, currentVersion.get());
 		}
 	}
 
@@ -220,7 +278,7 @@ public class WatchShardMapClient {
 	private void handleError(Throwable t) {
 		connected.set(false);
 		int failures = consecutiveFailures.incrementAndGet();
-		LOGGER.log(Level.WARNING, "WatchShardMap stream error (failures=" + failures + ")", t);
+		logger.warn("WatchShardMap stream error (failures={})", failures, t);
 
 		scheduleReconnect(failures);
 	}
@@ -230,7 +288,7 @@ public class WatchShardMapClient {
 	 */
 	private void handleCompleted() {
 		connected.set(false);
-		LOGGER.info("WatchShardMap stream completed by server");
+		logger.info("WatchShardMap stream completed by server");
 
 		// Schedule immediate reconnect (server completed normally)
 		scheduleReconnect(0);
@@ -240,13 +298,13 @@ public class WatchShardMapClient {
 	 * Schedules a reconnection attempt with exponential backoff.
 	 */
 	private void scheduleReconnect(int failureCount) {
-		if (!running.get()) {
-			LOGGER.fine("Not scheduling reconnect - client stopped");
+		if (!running.get() || scheduler.isShutdown()) {
+			logger.debug("Not scheduling reconnect - client stopped or scheduler shut down");
 			return;
 		}
 
 		long backoffMs = calculateBackoff(failureCount);
-		LOGGER.info("Scheduling reconnect in " + backoffMs + "ms");
+		logger.info("Scheduling reconnect in {}ms", backoffMs);
 
 		scheduler.schedule(this::connect, backoffMs, TimeUnit.MILLISECONDS);
 	}

@@ -4,12 +4,13 @@ import com.danieljhkim.kvdb.kvcommon.config.SystemConfig;
 import com.danieljhkim.kvdb.kvnode.server.NodeServer;
 
 import java.util.Arrays;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class KvNodeApplication {
 
-	private static final Logger LOGGER = Logger.getLogger(KvNodeApplication.class.getName());
+	private static final Logger logger = LoggerFactory.getLogger(KvNodeApplication.class);
 	private static final int DEFAULT_PORT = 8001;
 	private static SystemConfig CONFIG;
 
@@ -18,7 +19,7 @@ public class KvNodeApplication {
 			if (args.length < 1) {
 				CONFIG = SystemConfig.getInstance("node-1");
 			} else {
-				LOGGER.info(Arrays.toString(args));
+				logger.info("{}", Arrays.toString(args));
 				CONFIG = SystemConfig.getInstance(args[0]);
 			}
 
@@ -26,19 +27,19 @@ public class KvNodeApplication {
 			NodeServer nodeServer = new NodeServer(port);
 
 			Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-				LOGGER.info("Shutting down Node gRPC server...");
+				logger.info("Shutting down Node gRPC server...");
 				try {
 					nodeServer.shutdown();
 				} catch (InterruptedException e) {
-					LOGGER.log(Level.SEVERE, "Error during shutdown", e);
+					logger.error("Error during shutdown", e);
 					Thread.currentThread().interrupt();
 				}
 			}));
 
-			LOGGER.info(() -> "IndexNode gRPC server started on port " + port);
+			logger.info("IndexNode gRPC server started on port {}", port);
 			nodeServer.start();
 		} catch (Exception e) {
-			LOGGER.log(Level.SEVERE, "Server failed to start", e);
+			logger.error("Server failed to start", e);
 			System.exit(1);
 		}
 	}

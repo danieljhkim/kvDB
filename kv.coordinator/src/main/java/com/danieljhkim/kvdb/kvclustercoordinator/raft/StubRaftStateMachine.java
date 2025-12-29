@@ -5,8 +5,9 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ClusterState;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
@@ -31,7 +32,7 @@ import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
  */
 public class StubRaftStateMachine implements RaftStateMachine {
 
-	private static final Logger LOGGER = Logger.getLogger(StubRaftStateMachine.class.getName());
+	private static final Logger logger = LoggerFactory.getLogger(StubRaftStateMachine.class);
 
 	private final ClusterState state;
 	private final AtomicReference<ShardMapSnapshot> snapshotRef;
@@ -51,10 +52,10 @@ public class StubRaftStateMachine implements RaftStateMachine {
 				try {
 					ShardMapDelta delta = applyCommand(command);
 					notifyWatchers(delta);
-					LOGGER.info("Applied command: " + command.describe());
+					logger.info("Applied command: {}", command.describe());
 					return null;
 				} catch (Exception e) {
-					LOGGER.log(Level.SEVERE, "Failed to apply command: " + command.describe(), e);
+					logger.error("Failed to apply command: {}", command.describe(), e);
 					throw new RuntimeException("Command application failed: " + command.describe(), e);
 				}
 			}
@@ -117,7 +118,7 @@ public class StubRaftStateMachine implements RaftStateMachine {
 			try {
 				watcher.accept(delta);
 			} catch (Exception e) {
-				LOGGER.log(Level.WARNING, "Watcher threw exception", e);
+				logger.warn("Watcher threw exception", e);
 			}
 		}
 	}
@@ -131,7 +132,7 @@ public class StubRaftStateMachine implements RaftStateMachine {
 	public void addWatcher(Consumer<ShardMapDelta> watcher) {
 		if (watcher != null) {
 			watchers.add(watcher);
-			LOGGER.fine("Added watcher, total watchers: " + watchers.size());
+			logger.debug("Added watcher, total watchers: {}", watchers.size());
 		}
 	}
 
@@ -139,7 +140,7 @@ public class StubRaftStateMachine implements RaftStateMachine {
 	public boolean removeWatcher(Consumer<ShardMapDelta> watcher) {
 		boolean removed = watchers.remove(watcher);
 		if (removed) {
-			LOGGER.fine("Removed watcher, remaining watchers: " + watchers.size());
+			logger.debug("Removed watcher, remaining watchers: {}", watchers.size());
 		}
 		return removed;
 	}

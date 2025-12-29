@@ -1,8 +1,9 @@
 package com.danieljhkim.kvdb.kvcommon.grpc;
 
 import java.io.UncheckedIOException;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.danieljhkim.kvdb.kvcommon.exception.KvException;
 import com.danieljhkim.kvdb.kvcommon.exception.NotLeaderException;
@@ -23,7 +24,7 @@ import io.grpc.Status;
  */
 public class GlobalExceptionInterceptor implements ServerInterceptor {
 
-	private static final Logger LOGGER = Logger.getLogger(GlobalExceptionInterceptor.class.getName());
+	private static final Logger logger = LoggerFactory.getLogger(GlobalExceptionInterceptor.class);
 
 	// Metadata keys for client routing hints
 	public static final Metadata.Key<String> SHARD_ID_KEY = Metadata.Key.of("x-shard-id",
@@ -64,12 +65,10 @@ public class GlobalExceptionInterceptor implements ServerInterceptor {
 	 */
 	private void logException(Status status, Throwable t) {
 		switch (status.getCode()) {
-			case INTERNAL -> LOGGER.log(Level.SEVERE, "Unhandled exception in gRPC call", t);
+			case INTERNAL -> logger.error("Unhandled exception in gRPC call", t);
 			case UNAVAILABLE, DEADLINE_EXCEEDED ->
-				LOGGER.log(Level.WARNING, "gRPC call failed: {0} - {1}",
-						new Object[] { status.getCode(), status.getDescription() });
-			default -> LOGGER.log(Level.FINE, "gRPC exception: {0} - {1}",
-					new Object[] { status.getCode(), status.getDescription() });
+				logger.warn("gRPC call failed: {} - {}", status.getCode(), status.getDescription());
+			default -> logger.debug("gRPC exception: {} - {}", status.getCode(), status.getDescription());
 		}
 	}
 

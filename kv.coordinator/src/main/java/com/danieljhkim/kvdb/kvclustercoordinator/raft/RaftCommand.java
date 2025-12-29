@@ -1,8 +1,8 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.raft;
 
-import java.util.List;
-
 import com.danieljhkim.kvdb.kvclustercoordinator.state.NodeRecord;
+
+import java.util.List;
 
 /**
  * Sealed interface representing Raft commands that modify the coordinator state machine.

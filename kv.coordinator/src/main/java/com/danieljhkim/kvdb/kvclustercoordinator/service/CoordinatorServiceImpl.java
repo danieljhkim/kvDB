@@ -1,8 +1,9 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.service;
 
 import java.util.List;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.danieljhkim.kvdb.kvclustercoordinator.converter.ProtoConverter;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftCommand;
@@ -45,7 +46,7 @@ import io.grpc.stub.StreamObserver;
  */
 public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase {
 
-	private static final Logger LOGGER = Logger.getLogger(CoordinatorServiceImpl.class.getName());
+	private static final Logger logger = LoggerFactory.getLogger(CoordinatorServiceImpl.class);
 
 	private final RaftStateMachine raftStateMachine;
 	private final WatcherManager watcherManager;
@@ -74,8 +75,7 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
 
 		responseObserver.onNext(response.build());
 		responseObserver.onCompleted();
-		LOGGER.log(Level.FINE, "GetShardMap: clientVersion={0}, currentVersion={1}",
-				new Object[] { clientVersion, snapshot.getMapVersion() });
+		logger.debug("GetShardMap: clientVersion={}, currentVersion={}", clientVersion, snapshot.getMapVersion());
 	}
 
 	@Override
@@ -87,7 +87,7 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
 
 		// Register watcher (will send initial state if newer)
 		watcherManager.registerWatcher(responseObserver, fromVersion, snapshot);
-		LOGGER.log(Level.INFO, "WatchShardMap: registered watcher fromVersion={0}", fromVersion);
+		logger.info("WatchShardMap: registered watcher fromVersion={}", fromVersion);
 
 		// Note: Stream stays open. Client disconnect handled by gRPC.
 		// We don't call onCompleted here - the stream remains open for deltas.
@@ -147,7 +147,7 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
 		String nodeId = request.getNodeId();
 		long nowMs = request.getNowMs();
 
-		LOGGER.log(Level.FINE, "Heartbeat received from node {0} at {1}", new Object[] { nodeId, nowMs });
+		logger.debug("Heartbeat received from node {} at {}", nodeId, nowMs);
 
 		responseObserver.onNext(HeartbeatResponse.newBuilder().setAccepted(true).build());
 		responseObserver.onCompleted();
@@ -165,11 +165,11 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
 					responseObserver.onNext(ReportShardLeaderResponse.newBuilder()
 							.setAccepted(true).build());
 					responseObserver.onCompleted();
-					LOGGER.log(Level.INFO, "ReportShardLeader: shard={0}, leader={1}",
-							new Object[] { request.getShardId(), request.getLeaderNodeId() });
+					logger.info("ReportShardLeader: shard={}, leader={}", request.getShardId(),
+							request.getLeaderNodeId());
 				})
 				.exceptionally(e -> {
-					LOGGER.log(Level.WARNING, "ReportShardLeader failed", e);
+					logger.warn("ReportShardLeader failed", e);
 					responseObserver.onNext(ReportShardLeaderResponse.newBuilder()
 							.setAccepted(false).build());
 					responseObserver.onCompleted();
@@ -197,11 +197,10 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
 							.setMapVersion(version)
 							.build());
 					responseObserver.onCompleted();
-					LOGGER.log(Level.INFO, "RegisterNode: nodeId={0}, address={1}",
-							new Object[] { request.getNodeId(), request.getAddress() });
+					logger.info("RegisterNode: nodeId={}, address={}", request.getNodeId(), request.getAddress());
 				})
 				.exceptionally(e -> {
-					LOGGER.log(Level.SEVERE, "RegisterNode failed", e);
+					logger.error("RegisterNode failed", e);
 					responseObserver.onNext(RegisterNodeResponse.newBuilder()
 							.setSuccess(false)
 							.setMessage(e.getMessage())
@@ -229,11 +228,11 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
 							.addAllShardIds(shardIds)
 							.build());
 					responseObserver.onCompleted();
-					LOGGER.log(Level.INFO, "InitShards: numShards={0}, rf={1}",
-							new Object[] { request.getNumShards(), request.getReplicationFactor() });
+					logger.info("InitShards: numShards={}, rf={}", request.getNumShards(),
+							request.getReplicationFactor());
 				})
 				.exceptionally(e -> {
-					LOGGER.log(Level.SEVERE, "InitShards failed", e);
+					logger.error("InitShards failed", e);
 					responseObserver.onNext(InitShardsResponse.newBuilder()
 							.setSuccess(false)
 							.setMessage(e.getMessage())
@@ -259,11 +258,10 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
 							.setMapVersion(version)
 							.build());
 					responseObserver.onCompleted();
-					LOGGER.log(Level.INFO, "SetNodeStatus: nodeId={0}, status={1}",
-							new Object[] { request.getNodeId(), status });
+					logger.info("SetNodeStatus: nodeId={}, status={}", request.getNodeId(), status);
 				})
 				.exceptionally(e -> {
-					LOGGER.log(Level.SEVERE, "SetNodeStatus failed", e);
+					logger.error("SetNodeStatus failed", e);
 					responseObserver.onNext(SetNodeStatusResponse.newBuilder()
 							.setSuccess(false)
 							.setMessage(e.getMessage())
@@ -293,11 +291,11 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
 							.setNewEpoch(newEpoch)
 							.build());
 					responseObserver.onCompleted();
-					LOGGER.log(Level.INFO, "SetShardReplicas: shardId={0}, replicas={1}",
-							new Object[] { request.getShardId(), request.getReplicasList() });
+					logger.info("SetShardReplicas: shardId={}, replicas={}", request.getShardId(),
+							request.getReplicasList());
 				})
 				.exceptionally(e -> {
-					LOGGER.log(Level.SEVERE, "SetShardReplicas failed", e);
+					logger.error("SetShardReplicas failed", e);
 					responseObserver.onNext(SetShardReplicasResponse.newBuilder()
 							.setSuccess(false)
 							.setMessage(e.getMessage())
@@ -323,11 +321,11 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
 							.setMapVersion(version)
 							.build());
 					responseObserver.onCompleted();
-					LOGGER.log(Level.INFO, "SetShardLeader: shardId={0}, leader={1}",
-							new Object[] { request.getShardId(), request.getLeaderNodeId() });
+					logger.info("SetShardLeader: shardId={}, leader={}", request.getShardId(),
+							request.getLeaderNodeId());
 				})
 				.exceptionally(e -> {
-					LOGGER.log(Level.SEVERE, "SetShardLeader failed", e);
+					logger.error("SetShardLeader failed", e);
 					responseObserver.onNext(SetShardLeaderResponse.newBuilder()
 							.setSuccess(false)
 							.setMessage(e.getMessage())

@@ -1,5 +1,11 @@
 package com.danieljhkim.kvdb.kvgateway.server;
 
+import java.io.IOException;
+import java.util.concurrent.TimeUnit;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.danieljhkim.kvdb.kvcommon.grpc.GlobalExceptionInterceptor;
 import com.danieljhkim.kvdb.kvgateway.cache.NodeFailureTracker;
 import com.danieljhkim.kvdb.kvgateway.cache.ShardMapCache;
@@ -10,16 +16,12 @@ import com.danieljhkim.kvdb.kvgateway.client.WatchShardMapClient;
 import com.danieljhkim.kvdb.kvgateway.retry.RequestExecutor;
 import com.danieljhkim.kvdb.kvgateway.retry.RetryPolicy;
 import com.danieljhkim.kvdb.kvgateway.service.KvGatewayServiceImpl;
+
 import io.grpc.Server;
 import io.grpc.ServerInterceptors;
 import io.grpc.ServerServiceDefinition;
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
 import lombok.Getter;
-
-import java.io.IOException;
-import java.util.concurrent.TimeUnit;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
 /**
  * gRPC server for the KvGateway service.
@@ -28,12 +30,8 @@ import java.util.logging.Logger;
  */
 public class GatewayServer {
 
-	private static final Logger LOGGER = Logger.getLogger(GatewayServer.class.getName());
+	private static final Logger logger = LoggerFactory.getLogger(GatewayServer.class);
 
-	/**
-	 * -- GETTER --
-	 * Gets the port the server is running on.
-	 */
 	@Getter
 	private final int port;
 	private final Server grpcServer;
@@ -43,10 +41,7 @@ public class GatewayServer {
 	private final NodeFailureTracker failureTracker;
 	private final ShardRoutingFailureTracker shardRoutingFailureTracker;
 	private final RequestExecutor requestExecutor;
-	/**
-	 * -- GETTER --
-	 * Gets the shard map cache for external access (e.g., for refresh triggers).
-	 */
+
 	@Getter
 	private final ShardMapCache shardMapCache;
 
@@ -80,8 +75,7 @@ public class GatewayServer {
 				.addService(interceptedService)
 				.build();
 
-		LOGGER.info(() -> "GatewayServer initialized on port " + port
-				+ ", coordinator: " + coordinatorHost + ":" + coordinatorPort);
+		logger.info("GatewayServer initialized on port {}, coordinator: {}:{}", port, coordinatorHost, coordinatorPort);
 	}
 
 	/**
@@ -90,7 +84,7 @@ public class GatewayServer {
 	 * server.
 	 */
 	public void start() throws IOException {
-		LOGGER.info("Starting GatewayServer...");
+		logger.info("Starting GatewayServer...");
 
 		// Fetch initial shard map from coordinator via polling
 		long initialVersion = 0;
@@ -98,27 +92,27 @@ public class GatewayServer {
 			boolean refreshed = shardMapCache.refresh();
 			if (refreshed) {
 				initialVersion = shardMapCache.getMapVersion();
-				LOGGER.info("Initial shard map loaded successfully, version: " + initialVersion);
+				logger.info("Initial shard map loaded successfully, version: {}", initialVersion);
 			} else {
-				LOGGER.warning("Could not load initial shard map from coordinator. "
+				logger.warn("Could not load initial shard map from coordinator. "
 						+ "Gateway will start but may fail requests until coordinator is available.");
 			}
 		} catch (Exception e) {
-			LOGGER.log(Level.WARNING, "Failed to load initial shard map, continuing anyway", e);
+			logger.warn("Failed to load initial shard map, continuing anyway", e);
 		}
 
 		// Start streaming client for real-time updates
 		// Pass the initial version so we don't re-fetch what we already have
 		try {
 			watchShardMapClient.start(initialVersion);
-			LOGGER.info("Started WatchShardMap streaming client from version " + initialVersion);
+			logger.info("Started WatchShardMap streaming client from version {}", initialVersion);
 		} catch (Exception e) {
-			LOGGER.log(Level.WARNING, "Failed to start WatchShardMap client, will rely on polling", e);
+			logger.warn("Failed to start WatchShardMap client, will rely on polling", e);
 		}
 
 		// Start gRPC server
 		grpcServer.start();
-		LOGGER.info(() -> "GatewayServer started on port " + port);
+		logger.info("GatewayServer started on port {}", port);
 	}
 
 	/**
@@ -132,7 +126,7 @@ public class GatewayServer {
 	 * Shuts down the gateway server gracefully.
 	 */
 	public void shutdown() throws InterruptedException {
-		LOGGER.info("Shutting down GatewayServer...");
+		logger.info("Shutting down GatewayServer...");
 
 		// Stop streaming client first (prevents new updates during shutdown)
 		watchShardMapClient.shutdown();
@@ -140,7 +134,7 @@ public class GatewayServer {
 		// Shutdown gRPC server
 		grpcServer.shutdown();
 		if (!grpcServer.awaitTermination(10, TimeUnit.SECONDS)) {
-			LOGGER.warning("gRPC server did not terminate in time, forcing shutdown");
+			logger.warn("gRPC server did not terminate in time, forcing shutdown");
 			grpcServer.shutdownNow();
 		}
 
@@ -150,7 +144,7 @@ public class GatewayServer {
 		// Close coordinator client
 		coordinatorClient.shutdown();
 
-		LOGGER.info("GatewayServer shutdown complete");
+		logger.info("GatewayServer shutdown complete");
 	}
 
 	/**

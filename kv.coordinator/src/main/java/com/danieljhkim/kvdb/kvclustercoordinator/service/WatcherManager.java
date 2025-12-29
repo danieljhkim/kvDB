@@ -1,19 +1,20 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.service;
 
-import com.danieljhkim.kvdb.kvclustercoordinator.converter.ProtoConverter;
-import com.danieljhkim.kvdb.kvclustercoordinator.raft.ShardMapDelta;
-import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
-
-import io.grpc.stub.StreamObserver;
-
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.danieljhkim.kvdb.kvclustercoordinator.converter.ProtoConverter;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.ShardMapDelta;
+import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
+
+import io.grpc.stub.StreamObserver;
 
 /**
  * Manages active WatchShardMap streaming connections.
@@ -21,7 +22,7 @@ import java.util.logging.Logger;
  */
 public class WatcherManager implements Consumer<ShardMapDelta> {
 
-	private static final Logger LOGGER = Logger.getLogger(WatcherManager.class.getName());
+	private static final Logger logger = LoggerFactory.getLogger(WatcherManager.class);
 	private static final long HEARTBEAT_INTERVAL_MS = 30_000; // 30 seconds
 
 	/**
@@ -57,7 +58,7 @@ public class WatcherManager implements Consumer<ShardMapDelta> {
 		running = true;
 		heartbeatExecutor.scheduleAtFixedRate(
 				this::sendHeartbeats, HEARTBEAT_INTERVAL_MS, HEARTBEAT_INTERVAL_MS, TimeUnit.MILLISECONDS);
-		LOGGER.info("WatcherManager started with heartbeat interval " + HEARTBEAT_INTERVAL_MS + "ms");
+		logger.info("WatcherManager started with heartbeat interval {}ms", HEARTBEAT_INTERVAL_MS);
 	}
 
 	/**
@@ -80,11 +81,11 @@ public class WatcherManager implements Consumer<ShardMapDelta> {
 			try {
 				entry.getKey().onCompleted();
 			} catch (Exception e) {
-				LOGGER.log(Level.WARNING, "Error completing watcher on shutdown", e);
+				logger.warn("Error completing watcher on shutdown", e);
 			}
 		}
 		watchers.clear();
-		LOGGER.info("WatcherManager stopped");
+		logger.info("WatcherManager stopped");
 	}
 
 	/**
@@ -105,7 +106,7 @@ public class WatcherManager implements Consumer<ShardMapDelta> {
 
 		WatcherContext context = new WatcherContext(observer, fromVersion, System.currentTimeMillis());
 		watchers.put(observer, context);
-		LOGGER.info("Registered watcher (fromVersion=" + fromVersion + "), total watchers: " + watchers.size());
+		logger.info("Registered watcher (fromVersion={}), total watchers: {}", fromVersion, watchers.size());
 
 		// Send initial full state if snapshot is newer than fromVersion
 		if (snapshot.getMapVersion() > fromVersion) {
@@ -116,9 +117,9 @@ public class WatcherManager implements Consumer<ShardMapDelta> {
 						.setFullState(protoState)
 						.build();
 				observer.onNext(delta);
-				LOGGER.fine("Sent initial state to watcher (version=" + snapshot.getMapVersion() + ")");
+				logger.debug("Sent initial state to watcher (version={})", snapshot.getMapVersion());
 			} catch (Exception e) {
-				LOGGER.log(Level.WARNING, "Failed to send initial state to watcher", e);
+				logger.warn("Failed to send initial state to watcher", e);
 				unregisterWatcher(observer);
 			}
 		}
@@ -131,7 +132,7 @@ public class WatcherManager implements Consumer<ShardMapDelta> {
 			StreamObserver<com.danieljhkim.kvdb.proto.coordinator.ShardMapDelta> observer) {
 		WatcherContext removed = watchers.remove(observer);
 		if (removed != null) {
-			LOGGER.info("Unregistered watcher, remaining watchers: " + watchers.size());
+			logger.info("Unregistered watcher, remaining watchers: {}", watchers.size());
 		}
 	}
 
@@ -158,11 +159,11 @@ public class WatcherManager implements Consumer<ShardMapDelta> {
 			try {
 				entry.getKey().onNext(delta);
 			} catch (Exception e) {
-				LOGGER.log(Level.WARNING, "Failed to send delta to watcher, removing", e);
+				logger.warn("Failed to send delta to watcher, removing", e);
 				watchers.remove(entry.getKey());
 			}
 		}
-		LOGGER.fine("Broadcast delta (version=" + delta.getNewMapVersion() + ") to " + watchers.size() + " watchers");
+		logger.debug("Broadcast delta (version={}) to {} watchers", delta.getNewMapVersion(), watchers.size());
 	}
 
 	/**
@@ -182,11 +183,11 @@ public class WatcherManager implements Consumer<ShardMapDelta> {
 			try {
 				entry.getKey().onNext(heartbeat);
 			} catch (Exception e) {
-				LOGGER.log(Level.WARNING, "Heartbeat failed for watcher, removing", e);
+				logger.warn("Heartbeat failed for watcher, removing", e);
 				watchers.remove(entry.getKey());
 			}
 		}
-		LOGGER.fine("Sent heartbeat to " + watchers.size() + " watchers");
+		logger.debug("Sent heartbeat to {} watchers", watchers.size());
 	}
 
 	/**

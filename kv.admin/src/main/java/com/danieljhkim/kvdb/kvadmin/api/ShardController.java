@@ -41,14 +41,14 @@ public class ShardController {
 	}
 
 	@GetMapping("/{shardId}")
-	public ResponseEntity<ShardDto> getShard(@PathVariable String shardId) {
+	public ResponseEntity<ShardDto> getShard(@PathVariable("shardId") String shardId) {
 		ShardDto shard = shardAdminService.getShard(shardId);
 		return ResponseEntity.ok(shard);
 	}
 
 	@PostMapping("/{shardId}/replicas")
 	public ResponseEntity<ShardDto> setShardReplicas(
-			@PathVariable String shardId,
+			@PathVariable("shardId") String shardId,
 			@RequestBody List<String> replicaNodeIds) {
 		ShardDto shard = shardAdminService.setShardReplicas(shardId, replicaNodeIds);
 		return ResponseEntity.ok(shard);
@@ -56,7 +56,7 @@ public class ShardController {
 
 	@PostMapping("/{shardId}/leader")
 	public ResponseEntity<ShardDto> setShardLeader(
-			@PathVariable String shardId,
+			@PathVariable("shardId") String shardId,
 			@RequestBody String leaderNodeId) {
 		ShardDto shard = shardAdminService.setShardLeader(shardId, leaderNodeId);
 		return ResponseEntity.ok(shard);

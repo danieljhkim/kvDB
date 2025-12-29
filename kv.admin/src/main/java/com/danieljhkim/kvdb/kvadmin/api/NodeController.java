@@ -41,13 +41,13 @@ public class NodeController {
 	}
 
 	@GetMapping("/{nodeId}")
-	public ResponseEntity<NodeDto> getNode(@PathVariable String nodeId) {
+	public ResponseEntity<NodeDto> getNode(@PathVariable("nodeId") String nodeId) {
 		NodeDto node = nodeAdminService.getNode(nodeId);
 		return ResponseEntity.ok(node);
 	}
 
 	@GetMapping("/{nodeId}/health")
-	public ResponseEntity<HealthDto> getNodeHealth(@PathVariable String nodeId) {
+	public ResponseEntity<HealthDto> getNodeHealth(@PathVariable("nodeId") String nodeId) {
 		HealthDto health = nodeAdminService.getNodeHealth(nodeId);
 		return ResponseEntity.ok(health);
 	}
@@ -60,7 +60,7 @@ public class NodeController {
 
 	@PostMapping("/{nodeId}/status")
 	public ResponseEntity<NodeDto> setNodeStatus(
-			@PathVariable String nodeId,
+			@PathVariable("nodeId") String nodeId,
 			@RequestBody String status) {
 		NodeDto node = nodeAdminService.setNodeStatus(nodeId, status);
 		return ResponseEntity.ok(node);

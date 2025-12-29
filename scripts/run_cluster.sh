@@ -47,8 +47,8 @@ N_NODES=${N_NODES:-2}
 COORDINATOR_PORT=${COORDINATOR_PORT:-9000}
 # Gateway (gRPC) defaults to 7000 in code
 GATEWAY_PORT=${GATEWAY_PORT:-7000}
-# Admin API (HTTP) defaults to 8081 in code
-ADMIN_PORT=${ADMIN_PORT:-8081}
+# Admin API (HTTP) defaults to 8089 in code
+ADMIN_PORT=${ADMIN_PORT:-8089}
 
 # Start gateway (optional)
 START_GATEWAY=${START_GATEWAY:-true}

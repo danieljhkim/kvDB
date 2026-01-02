@@ -1,5 +1,8 @@
 package com.danieljhkim.kvdb.kvcommon.config;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -10,8 +13,6 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.Properties;
 import java.util.Set;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 public class SystemConfig {
 
@@ -90,6 +91,16 @@ public class SystemConfig {
 				}
 			} else {
 				logger.warn("Environment-specific configuration file not found: {}", envConfigFile);
+			}
+			try (InputStream input = getClass()
+					.getClassLoader()
+					.getResourceAsStream(envConfigFile)) {
+				if (input != null) {
+					properties.load(input);
+					logger.info("Loaded env configuration from classpath: {}", envConfigFile);
+				}
+			} catch (IOException e) {
+				logger.warn("Failed to load env configuration from classpath", e);
 			}
 		}
 	}

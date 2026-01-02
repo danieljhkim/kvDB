@@ -1,36 +1,105 @@
 # docker-compose up --build
 # docker-compose down
-# docker exec -it kvdb-cli /bin/sh
 
 services:
 
   coordinator:
     build:
-      context: ./kv.coordinator
+      context: .
+      dockerfile: kv.coordinator/Dockerfile
     container_name: kvdb-coordinator
     ports:
-      - "5000:5000"
+      - "9000:9000"
     networks:
       - kvdb-net
+    environment:
+      - KVDB_ENV=docker
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 1 bash -c '</dev/tcp/localhost/9000' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  admin:
+    build:
+      context: .
+      dockerfile: kv.admin/Dockerfile
+    container_name: kvdb-admin
+    ports:
+      - "8089:8089"
+    networks:
+      - kvdb-net
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    environment:
+      - KVDB_ENV=docker
+      - KVDB_COORDINATOR_GRPC_ADDRESS=coordinator:9000
+      # Security settings (can be overridden)
+      - KVDB_ADMIN_SECURITY_ENABLED=false
+      - KVDB_ADMIN_SECURITY_ALLOWED_IPS=127.0.0.1/32,::1/128,172.16.0.0/12,10.0.0.0/8,192.168.0.0/16
+      - KVDB_ADMIN_SECURITY_API_KEY=dev-secret
 
   node1:
     build:
-      context: ./kv.node
-    container_name: kvdb-node
+      context: .
+      dockerfile: kv.node/Dockerfile
+    container_name: kvdb-node1
+    command: ["sh", "-c", "java -Dkvdb.env=$${KVDB_ENV:-docker} -jar Node.jar node-1"]
     ports:
-      - "5001:5001"
+      - "8001:8001"
     networks:
       - kvdb-net
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    environment:
+      - KVDB_ENV=docker
+    volumes:
+      - node1-data:/app/data
 
-  cli:
+  node2:
     build:
-      context: ./golang/kvcli
-    container_name: kvdb-cli
-    stdin_open: true      # For interactive CLI input
-    tty: true             # Keeps terminal open
+      context: .
+      dockerfile: kv.node/Dockerfile
+    container_name: kvdb-node2
+    command: ["sh", "-c", "java -Dkvdb.env=$${KVDB_ENV:-docker} -jar Node.jar node-2"]
+    ports:
+      - "8002:8002"
     networks:
       - kvdb-net
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    environment:
+      - KVDB_ENV=docker
+    volumes:
+      - node2-data:/app/data
+
+  gateway:
+    build:
+      context: .
+      dockerfile: kv.gateway/Dockerfile
+    container_name: kvdb-gateway
+    ports:
+      - "7000:7000"
+    networks:
+      - kvdb-net
+    depends_on:
+      coordinator:
+        condition: service_healthy
+      node1:
+        condition: service_started
+      node2:
+        condition: service_started
+    environment:
+      - KVDB_ENV=docker
 
 networks:
   kvdb-net:
     driver: bridge
+
+volumes:
+  node1-data:
+  node2-data:

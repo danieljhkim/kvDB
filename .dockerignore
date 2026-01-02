@@ -1,0 +1,52 @@
+# Git
+.git
+.githooks
+.github
+
+# IDE
+.idea
+.cursor
+*.iml
+.vscode
+.settings
+.classpath
+.project
+
+# Build artifacts (will be rebuilt in Docker)
+target/
+*/target/
+
+# Logs
+logs/
+*.log
+
+# Data
+data/
+
+# Documentation (optional, comment out if needed in image)
+docs/
+*.md
+!README.md
+
+# Local config
+.local/
+.box/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Benchmarks
+benchmark/
+
+# Scripts (not needed in container)
+scripts/
+
+# Go CLI (not needed for Java services)
+golang/
+
+# Docker compose (not needed inside image)
+docker-compose.yml
+
+# Repo zip
+*.zip

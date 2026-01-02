@@ -65,6 +65,19 @@ wipe-data:
 	rm -rf data/*
 	@echo "Data directory wiped."
 
+
+# -----------------
+# docker commands
+# -----------------
+
+docker-build:
+    docker build -t kvcoordinator:latest -f docker/Coordinator.Dockerfile .
+    docker build -t kvnode:latest -f docker/Node.Dockerfile .
+    docker build -t kvgateway:latest -f docker/Gateway.Dockerfile .
+
+docker-compose:
+    docker-compose up --build
+
 # -----------------
 # Format and lint
 # -----------------

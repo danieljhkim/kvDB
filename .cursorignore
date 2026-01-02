@@ -1,0 +1,78 @@
+# Maven
+target/
+**/target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
+
+# Compiled class files
+*.class
+
+# JAR/WAR files
+*.jar
+*.war
+*.ear
+*.nar
+
+# IDE - IntelliJ IDEA
+.idea/
+*.iws
+*.iml
+*.ipr
+out/
+
+# IDE - Eclipse
+.classpath
+.project
+.settings/
+bin/
+.metadata
+
+# IDE - VS Code
+.vscode/
+
+# IDE - NetBeans
+nbproject/
+nbbuild/
+dist/
+nbdist/
+.nb-gradle/
+
+# Log files
+# *.log
+# logs/
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.*.sw?
+
+# Generated sources (optional - uncomment if you want to ignore generated code)
+**/generated-sources/
+**/generated-test-sources/
+
+# Spotless
+**/spotless-index
+
+# Maven wrapper (optional - uncomment if you don't want to see wrapper files)
+# .mvn/wrapper/maven-wrapper.properties
+

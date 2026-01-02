@@ -1,0 +1,142 @@
+version: 2
+
+updates:
+  # Maven dependencies
+  - package-ecosystem: "maven"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      # Group Spring Boot updates together
+      spring-boot:
+        patterns:
+          - "org.springframework.boot:*"
+          - "org.springframework:*"
+          - "org.springframework.data:*"
+        update-types:
+          - "minor"
+          - "patch"
+      # Group gRPC updates together
+      grpc:
+        patterns:
+          - "io.grpc:*"
+          - "com.google.protobuf:*"
+        update-types:
+          - "minor"
+          - "patch"
+      # Group logging dependencies
+      logging:
+        patterns:
+          - "org.slf4j:*"
+          - "org.apache.logging.log4j:*"
+        update-types:
+          - "minor"
+          - "patch"
+      # Group test dependencies
+      test:
+        patterns:
+          - "org.junit.jupiter:*"
+          - "org.mockito:*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # Prevent Java version bumps from 21
+      - dependency-name: "maven"
+        update-types: ["version-update:semver-major"]
+      # Prevent Spring Boot major version bumps (stay on 3.x)
+      - dependency-name: "org.springframework.boot:*"
+        update-types: ["version-update:semver-major"]
+      # Prevent gRPC major version bumps
+      - dependency-name: "io.grpc:*"
+        update-types: ["version-update:semver-major"]
+      # Prevent protobuf major version bumps
+      - dependency-name: "com.google.protobuf:*"
+        update-types: ["version-update:semver-major"]
+      # Prevent Jackson major version bumps
+      - dependency-name: "com.fasterxml.jackson.*:*"
+        update-types: ["version-update:semver-major"]
+      # Prevent Log4j major version bumps
+      - dependency-name: "org.apache.logging.log4j:*"
+        update-types: ["version-update:semver-major"]
+      # Prevent SLF4J major version bumps
+      - dependency-name: "org.slf4j:*"
+        update-types: ["version-update:semver-major"]
+      # Prevent JUnit major version bumps (stay on 5.x)
+      - dependency-name: "org.junit.jupiter:*"
+        update-types: ["version-update:semver-major"]
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    groups:
+      # Group all GitHub Actions updates
+      github-actions:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # Prevent major version bumps for actions
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # Docker base images
+  - package-ecosystem: "docker"
+    directory: "/kv.coordinator"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 2
+    ignore:
+      # Keep Eclipse Temurin on Java 21
+      - dependency-name: "eclipse-temurin"
+        versions: ["22", "22-jre", ">= 22"]
+      - dependency-name: "maven"
+        versions: [">= 4"]
+
+  - package-ecosystem: "docker"
+    directory: "/kv.node"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 2
+    ignore:
+      # Keep Eclipse Temurin on Java 21
+      - dependency-name: "eclipse-temurin"
+        versions: ["22", "22-jre", ">= 22"]
+      - dependency-name: "maven"
+        versions: [">= 4"]
+
+  - package-ecosystem: "docker"
+    directory: "/kv.gateway"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 2
+    ignore:
+      # Keep Eclipse Temurin on Java 21
+      - dependency-name: "eclipse-temurin"
+        versions: ["22", "22-jre", ">= 22"]
+      - dependency-name: "maven"
+        versions: [">= 4"]
+
+  - package-ecosystem: "docker"
+    directory: "/kv.admin"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 2
+    ignore:
+      # Keep Eclipse Temurin on Java 21
+      - dependency-name: "eclipse-temurin"
+        versions: ["22", "22-jre", ">= 22"]
+      - dependency-name: "maven"
+        versions: [">= 4"]

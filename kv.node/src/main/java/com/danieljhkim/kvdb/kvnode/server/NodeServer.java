@@ -1,6 +1,6 @@
 package com.danieljhkim.kvdb.kvnode.server;
 
-import com.danieljhkim.kvdb.kvcommon.config.SystemConfig;
+import com.danieljhkim.kvdb.kvcommon.config.AppConfig;
 import com.danieljhkim.kvdb.kvcommon.grpc.GlobalExceptionInterceptor;
 import com.danieljhkim.kvdb.kvnode.cache.ShardMapCache;
 import com.danieljhkim.kvdb.kvnode.client.CoordinatorShardMapClient;
@@ -28,22 +28,39 @@ public class NodeServer {
     private final ShardStoreRegistry shardStores;
     private final ReplicaWriteClient replicaWriteClient;
 
-    public NodeServer(int port) {
-        SystemConfig config = SystemConfig.getInstance();
-        String nodeId = config.getProperty("kvdb.node.id", "");
-        String coordinatorHost = config.getProperty("kvdb.coordinator.host", "localhost");
-        int coordinatorPort = Integer.parseInt(config.getProperty("kvdb.coordinator.port", "9000"));
+    public NodeServer(String nodeId, AppConfig appConfig) {
+        // Find this node's configuration
+        AppConfig.NodeConfig thisNode = findNodeConfig(nodeId, appConfig);
+        if (thisNode == null) {
+            throw new IllegalArgumentException("Node configuration not found for nodeId: " + nodeId);
+        }
+
+        // Get coordinator configuration
+        String coordinatorHost = "localhost";
+        int coordinatorPort = 9000;
+        if (appConfig.getStorageNodes() != null && appConfig.getStorageNodes().getCoordinator() != null) {
+            coordinatorHost = appConfig.getStorageNodes().getCoordinator().getHost();
+            coordinatorPort = appConfig.getStorageNodes().getCoordinator().getPort();
+        }
 
         this.coordinatorClient = new CoordinatorShardMapClient(coordinatorHost, coordinatorPort);
         this.shardMapCache = new ShardMapCache();
 
-        // Persistence + replication config
-        String baseDir = config.getProperty("kvdb.persistence.baseDir", defaultBaseDir(nodeId));
-        String snapshotFileName = config.getProperty("kvdb.persistence.shard.snapshotFileName", "kvstore.dat");
-        String walFileName = config.getProperty("kvdb.persistence.shard.walFileName", "kvstore.wal");
-        int flushInterval = Integer.parseInt(config.getProperty("kvdb.persistence.autoFlushInterval", "1000"));
-        boolean enableAutoFlush = Boolean.parseBoolean(config.getProperty("kvdb.persistence.enableAutoFlush", "true"));
-        long replicationTimeoutMs = Long.parseLong(config.getProperty("kvdb.replication.timeoutMs", "500"));
+        // Get persistence configuration with defaults
+        AppConfig.PersistenceConfig persistenceConfig = appConfig.getPersistence();
+        if (persistenceConfig == null) {
+            persistenceConfig = new AppConfig.PersistenceConfig();
+        }
+
+        String baseDir = thisNode.getDataDir();
+        String snapshotFileName = persistenceConfig.getSnapshotFileName();
+        String walFileName = persistenceConfig.getWalFileName();
+        int flushInterval = persistenceConfig.getAutoFlushIntervalMs();
+        boolean enableAutoFlush = persistenceConfig.isEnableAutoFlush();
+
+        // Get replication configuration with defaults
+        AppConfig.ReplicationConfig replicationConfig = appConfig.getReplication();
+        long replicationTimeoutMs = replicationConfig != null ? replicationConfig.getTimeoutMs() : 500;
 
         this.shardStores =
                 new ShardStoreRegistry(baseDir, snapshotFileName, walFileName, flushInterval, enableAutoFlush);
@@ -60,8 +77,22 @@ public class NodeServer {
         ServerServiceDefinition interceptedService =
                 ServerInterceptors.intercept(kvservice, new GlobalExceptionInterceptor());
 
-        this.server =
-                NettyServerBuilder.forPort(port).addService(interceptedService).build();
+        this.server = NettyServerBuilder.forPort(thisNode.getPort())
+                .addService(interceptedService)
+                .build();
+
+        logger.info("Initialized NodeServer: nodeId={}, port={}, dataDir={}", nodeId, thisNode.getPort(), baseDir);
+    }
+
+    private AppConfig.NodeConfig findNodeConfig(String nodeId, AppConfig appConfig) {
+        if (appConfig.getStorageNodes() == null || appConfig.getStorageNodes().getNodes() == null) {
+            return null;
+        }
+
+        return appConfig.getStorageNodes().getNodes().stream()
+                .filter(node -> nodeId.equals(node.getId()))
+                .findFirst()
+                .orElse(null);
     }
 
     public void start() throws IOException, InterruptedException {
@@ -111,12 +142,5 @@ public class NodeServer {
         } catch (Exception e) {
             logger.debug("Initial shard map fetch failed (continuing)", e);
         }
-    }
-
-    private static String defaultBaseDir(String nodeId) {
-        if (nodeId == null || nodeId.isBlank()) {
-            return "data";
-        }
-        return "data/" + nodeId;
     }
 }

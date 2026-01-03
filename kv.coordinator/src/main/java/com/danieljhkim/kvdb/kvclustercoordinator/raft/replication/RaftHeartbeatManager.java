@@ -4,14 +4,13 @@ import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftConfiguration;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.state.RaftNodeState;
 import com.danieljhkim.kvdb.proto.raft.AppendEntriesRequest;
 import com.danieljhkim.kvdb.proto.raft.AppendEntriesResponse;
-import lombok.extern.slf4j.Slf4j;
-
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Manages periodic heartbeats when node is a leader.
@@ -59,8 +58,7 @@ public class RaftHeartbeatManager {
                 this::sendHeartbeats,
                 0, // Send immediately
                 intervalMs,
-                TimeUnit.MILLISECONDS
-        );
+                TimeUnit.MILLISECONDS);
 
         heartbeatTask.set(task);
         log.info("[{}] Started heartbeat manager with interval {}ms", nodeId, intervalMs);
@@ -120,7 +118,8 @@ public class RaftHeartbeatManager {
             long prevLogTerm = 0;
 
             if (prevLogIndex > 0) {
-                prevLogTerm = state.getLog().getEntry(prevLogIndex)
+                prevLogTerm = state.getLog()
+                        .getEntry(prevLogIndex)
                         .map(entry -> entry.term())
                         .orElse(0L);
             }
@@ -134,10 +133,16 @@ public class RaftHeartbeatManager {
                     .setLeaderCommit(commitIndex)
                     .build();
 
-            log.trace("[{}] Sending heartbeat to {} (term={}, prevLogIndex={}, prevLogTerm={})",
-                    nodeId, peerId, term, prevLogIndex, prevLogTerm);
+            log.trace(
+                    "[{}] Sending heartbeat to {} (term={}, prevLogIndex={}, prevLogTerm={})",
+                    nodeId,
+                    peerId,
+                    term,
+                    prevLogIndex,
+                    prevLogTerm);
 
-            rpcClient.apply(peerId, request)
+            rpcClient
+                    .apply(peerId, request)
                     .whenComplete((response, error) -> handleHeartbeatResponse(peerId, response, error));
 
         } catch (Exception e) {
@@ -156,8 +161,11 @@ public class RaftHeartbeatManager {
 
         // Check if we discovered a higher term
         if (response.getTerm() > state.getCurrentTerm()) {
-            log.warn("[{}] Discovered higher term {} from {} during heartbeat, stepping down",
-                    nodeId, response.getTerm(), peerId);
+            log.warn(
+                    "[{}] Discovered higher term {} from {} during heartbeat, stepping down",
+                    nodeId,
+                    response.getTerm(),
+                    peerId);
             state.updateTerm(response.getTerm());
             state.transitionToFollower(null);
             stop();
@@ -172,4 +180,3 @@ public class RaftHeartbeatManager {
         }
     }
 }
-

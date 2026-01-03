@@ -140,3 +140,23 @@ message RaftRpc {
     RemoveServerResponse remove_server_resp = 12;
   }
 }
+
+// ========================================
+// Raft gRPC Service Definition
+// ========================================
+
+service RaftService {
+  // Leader election RPC
+  rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
+
+  // Heartbeat and log replication RPC
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+
+  // Snapshot installation RPC (for catching up lagging followers)
+  rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse);
+
+  // Optional: Cluster membership management
+  rpc AddServer(AddServerRequest) returns (AddServerResponse);
+  rpc RemoveServer(RemoveServerRequest) returns (RemoveServerResponse);
+}
+

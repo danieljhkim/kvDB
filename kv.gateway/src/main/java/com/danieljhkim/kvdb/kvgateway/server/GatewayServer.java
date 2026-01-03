@@ -1,5 +1,6 @@
 package com.danieljhkim.kvdb.kvgateway.server;
 
+import com.danieljhkim.kvdb.kvcommon.config.AppConfig;
 import com.danieljhkim.kvdb.kvcommon.grpc.GlobalExceptionInterceptor;
 import com.danieljhkim.kvdb.kvgateway.cache.NodeFailureTracker;
 import com.danieljhkim.kvdb.kvgateway.cache.ShardMapCache;
@@ -42,8 +43,19 @@ public class GatewayServer {
     @Getter
     private final ShardMapCache shardMapCache;
 
-    public GatewayServer(int port, String coordinatorHost, int coordinatorPort) {
-        this.port = port;
+    public GatewayServer(AppConfig appConfig) { // Get gateway configuration with defaults
+        AppConfig.GatewayConfig gatewayConfig = appConfig.getGateway();
+        if (gatewayConfig == null) {
+            gatewayConfig = new AppConfig.GatewayConfig();
+        }
+
+        this.port = gatewayConfig.getPort();
+        String coordinatorHost = "localhost";
+        int coordinatorPort = 9000;
+        if (gatewayConfig.getCoordinator() != null) {
+            coordinatorHost = gatewayConfig.getCoordinator().getHost();
+            coordinatorPort = gatewayConfig.getCoordinator().getPort();
+        }
 
         // Initialize core components
         this.coordinatorClient = new CoordinatorClient(coordinatorHost, coordinatorPort);
@@ -66,7 +78,6 @@ public class GatewayServer {
         ServerServiceDefinition interceptedService =
                 ServerInterceptors.intercept(gatewayService, new GlobalExceptionInterceptor());
 
-        // Build the gRPC server
         this.grpcServer =
                 NettyServerBuilder.forPort(port).addService(interceptedService).build();
 
@@ -120,23 +131,14 @@ public class GatewayServer {
      */
     public void shutdown() throws InterruptedException {
         logger.info("Shutting down GatewayServer...");
-
-        // Stop streaming client first (prevents new updates during shutdown)
         watchShardMapClient.shutdown();
-
-        // Shutdown gRPC server
         grpcServer.shutdown();
         if (!grpcServer.awaitTermination(10, TimeUnit.SECONDS)) {
             logger.warn("gRPC server did not terminate in time, forcing shutdown");
             grpcServer.shutdownNow();
         }
-
-        // Close node connections
         nodePool.closeAll();
-
-        // Close coordinator client
         coordinatorClient.shutdown();
-
         logger.info("GatewayServer shutdown complete");
     }
 

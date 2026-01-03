@@ -39,12 +39,15 @@ if [ "$START_ADMIN" = "true" ]; then
   require_file "$ADMIN_JAR"
 fi
 
-# Number of nodes
+# Number of coordinator nodes (for Raft cluster)
+N_COORDINATORS=${N_COORDINATORS:-3}
+
+# Number of storage nodes
 N_NODES=${N_NODES:-2}
 
 # Base ports
-# Coordinator (gRPC) defaults to 9000 in code
-COORDINATOR_PORT=${COORDINATOR_PORT:-9000}
+# Coordinator (gRPC) - first coordinator defaults to 9001
+COORDINATOR_BASE_PORT=${COORDINATOR_BASE_PORT:-9001}
 # Gateway (gRPC) defaults to 7000 in code
 GATEWAY_PORT=${GATEWAY_PORT:-7000}
 # Admin API (HTTP) defaults to 8089 in code
@@ -81,24 +84,30 @@ start_admin() {
 ############################################
 
 start_coordinator() {
-  echo "Starting Coordinator..."
-  export COORDINATOR_PORT
+  echo "Starting $N_COORDINATORS Coordinator(s)..."
 
-  # Ensure log file exists
-  touch "$LOG_DIR/coordinator.log"
+  for ((i=1; i<= N_COORDINATORS; i++)); do
+    local coordinator_id="coordinator-$i"
+    local coordinator_port=$((COORDINATOR_BASE_PORT + i - 1))
 
-  nohup java -jar "$COORDINATOR_JAR" "$COORDINATOR_PORT" \
-    > "$LOG_DIR/coordinator.log" 2>&1 &
-  COORDINATOR_PID=$!
+    export COORDINATOR_NODE_ID="$coordinator_id"
 
-  echo "Coordinator started (PID: $COORDINATOR_PID, port: $COORDINATOR_PORT)"
-  echo "  Log file: $LOG_DIR/coordinator.log"
+    # Ensure log file exists
+    touch "$LOG_DIR/coordinator-$i.log"
 
-  # Give it a moment to start and write to log
-  sleep 0.5
-  if ! ps -p $COORDINATOR_PID > /dev/null 2>&1; then
-    echo "⚠️  Warning: Coordinator process may have crashed. Check $LOG_DIR/coordinator.log"
-  fi
+    nohup java -jar "$COORDINATOR_JAR" \
+      > "$LOG_DIR/coordinator-$i.log" 2>&1 &
+    COORDINATOR_PID=$!
+
+    echo "Coordinator #$i started (NODE_ID=$coordinator_id, PID: $COORDINATOR_PID, port: $coordinator_port)"
+    echo "  Log file: $LOG_DIR/coordinator-$i.log"
+
+    # Give it a moment to start and write to log
+    sleep 0.5
+    if ! ps -p $COORDINATOR_PID > /dev/null 2>&1; then
+      echo "⚠️  Warning: Coordinator #$i process may have crashed. Check $LOG_DIR/coordinator-$i.log"
+    fi
+  done
 }
 
 start_nodes() {
@@ -106,13 +115,12 @@ start_nodes() {
 
   for ((i=1; i<= N_NODES; i++)); do
     local node_id="node-$i"
-    export NODE_ID="$node_id"
+    export STORAGE_NODE_ID="$node_id"
 
     # Ensure log file exists
     touch "$LOG_DIR/node-$i.log"
 
     nohup java -jar "$NODE_JAR" \
-      "$node_id" \
       > "$LOG_DIR/node-$i.log" 2>&1 &
     NODE_PID=$!
     echo "Data-Node #$i started (NODE_ID=$node_id, PID: $NODE_PID)"
@@ -129,12 +137,11 @@ start_nodes() {
 start_gateway() {
   if [ "$START_GATEWAY" = "true" ]; then
     echo "Starting Gateway..."
-    export GATEWAY_PORT
 
     # Ensure log file exists
     touch "$LOG_DIR/gateway.log"
 
-    nohup java -jar "$GATEWAY_JAR" "$GATEWAY_PORT" \
+    nohup java -jar "$GATEWAY_JAR" \
       > "$LOG_DIR/gateway.log" 2>&1 &
     GATEWAY_PID=$!
 
@@ -159,9 +166,9 @@ stop_cluster() {
 }
 
 is_running() {
-  local port="${COORDINATOR_PORT}"
+  local port="${COORDINATOR_BASE_PORT}"
 
-  # Check if any process is listening on the coordinator port (IPv4 or IPv6)
+  # Check if any process is listening on the first coordinator port (IPv4 or IPv6)
   if command -v lsof >/dev/null 2>&1; then
     # lsof available
     if lsof -iTCP:"$port" -sTCP:LISTEN -P -n >/dev/null 2>&1; then
@@ -216,9 +223,14 @@ fi
 echo "================================================="
 echo " Spinning up Distributed kvdb Cluster"
 echo "================================================="
-echo "Coordinator : localhost:${COORDINATOR_PORT}"
-echo "Data Nodes : ${N_NODES}"
-echo "Admin API  : localhost:${ADMIN_PORT}"
+echo "Coordinators: $N_COORDINATORS (ports: $COORDINATOR_BASE_PORT-$((COORDINATOR_BASE_PORT + N_COORDINATORS - 1)))"
+echo "Data Nodes  : $N_NODES"
+if [ "$START_GATEWAY" = "true" ]; then
+  echo "Gateway     : localhost:${GATEWAY_PORT}"
+fi
+if [ "$START_ADMIN" = "true" ]; then
+  echo "Admin API   : localhost:${ADMIN_PORT}"
+fi
 echo "================================================="
 
 start_coordinator
@@ -240,12 +252,16 @@ fi
 echo ""
 echo "================================================="
 echo "Cluster is running!"
-echo "Coordinator : localhost:${COORDINATOR_PORT}"
+echo "Coordinators: $N_COORDINATORS (ports: $COORDINATOR_BASE_PORT-$((COORDINATOR_BASE_PORT + N_COORDINATORS - 1)))"
+for ((i=1; i<= N_COORDINATORS; i++)); do
+  port=$((COORDINATOR_BASE_PORT + i - 1))
+  echo "  - Coordinator #$i: localhost:$port"
+done
 if [ "$START_GATEWAY" = "true" ]; then
   echo "Gateway     : localhost:${GATEWAY_PORT}"
 fi
 if [ "$START_ADMIN" = "true" ]; then
-  echo "Admin API  : localhost:${ADMIN_PORT}"
+  echo "Admin API   : localhost:${ADMIN_PORT}"
 fi
 echo "Logs  : $LOG_DIR"
 echo "Data  : $DATA_DIR"

@@ -13,7 +13,6 @@ import java.util.concurrent.ConcurrentHashMap;
 @Slf4j
 public class RaftLeaderState {
 
-
     private final String nodeId;
     private final Map<String, Long> nextIndex; // Next log entry to send to each server
     private final Map<String, Long> matchIndex; // Highest log entry known to be replicated
@@ -92,21 +91,30 @@ public class RaftLeaderState {
      * Computes the highest log index replicated on a majority of servers.
      * This is used to advance commitIndex.
      *
+     * <p>The leader's own log is implicitly at the highest index, so we include
+     * the leaderLogIndex in the calculation.
+     *
      * @param clusterSize the total number of nodes in the cluster
+     * @param leaderLogIndex the index of the last entry in the leader's log
      * @return the highest index replicated on majority, or 0 if none
      */
-    public long computeMajorityMatchIndex(int clusterSize) {
-        if (matchIndex.isEmpty()) {
-            return 0;
-        }
+    public long computeMajorityMatchIndex(int clusterSize, long leaderLogIndex) {
+        // Include leader's own log index (leader always has its own entries)
+        java.util.List<Long> allIndices = new java.util.ArrayList<>();
+        allIndices.add(leaderLogIndex);
+        allIndices.addAll(matchIndex.values());
 
-        var matchIndices = matchIndex.values().stream()
-                .sorted((a, b) -> Long.compare(b, a)) // Sort descending
-                .toList();
+        // Sort descending to find the N/2+1 highest index
+        allIndices.sort((a, b) -> Long.compare(b, a));
 
-        int majorityIndex = (clusterSize - 1) / 2; // -1 because leader isn't in matchIndex
-        if (majorityIndex < matchIndices.size()) {
-            return matchIndices.get(majorityIndex);
+        // Majority requires (clusterSize / 2) + 1 nodes
+        // In a sorted descending list, the index at position (clusterSize / 2)
+        // is the highest index that at least majority nodes have
+        int majorityPosition = clusterSize / 2;
+        // For cluster of 3: position 1; for 5: position 2
+
+        if (majorityPosition < allIndices.size()) {
+            return allIndices.get(majorityPosition);
         }
         return 0;
     }

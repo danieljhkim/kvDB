@@ -1,14 +1,13 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.raft.election;
 
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftConfiguration;
-import lombok.extern.slf4j.Slf4j;
-
 import java.time.Duration;
 import java.util.Random;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Manages election timeout for Raft consensus.
@@ -38,10 +37,7 @@ public class RaftElectionTimer {
      * @param electionCallback callback to invoke when election timeout fires
      */
     public RaftElectionTimer(
-            String nodeId,
-            RaftConfiguration config,
-            ScheduledExecutorService scheduler,
-            Runnable electionCallback) {
+            String nodeId, RaftConfiguration config, ScheduledExecutorService scheduler, Runnable electionCallback) {
         this.nodeId = nodeId;
         this.config = config;
         this.scheduler = scheduler;
@@ -69,10 +65,7 @@ public class RaftElectionTimer {
         cancel();
 
         long timeoutMs = randomElectionTimeout();
-        ScheduledFuture<?> newTimer = scheduler.schedule(
-                this::onElectionTimeout,
-                timeoutMs,
-                TimeUnit.MILLISECONDS);
+        ScheduledFuture<?> newTimer = scheduler.schedule(this::onElectionTimeout, timeoutMs, TimeUnit.MILLISECONDS);
 
         currentTimer.set(newTimer);
         log.trace("[{}] Election timer reset to {} ms", nodeId, timeoutMs);
@@ -145,4 +138,3 @@ public class RaftElectionTimer {
         return Duration.ofMillis(Math.max(0, remainingMs));
     }
 }
-

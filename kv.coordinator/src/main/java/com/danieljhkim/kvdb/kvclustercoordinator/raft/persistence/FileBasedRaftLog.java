@@ -1,8 +1,6 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence;
 
 import com.google.protobuf.InvalidProtocolBufferException;
-import lombok.extern.slf4j.Slf4j;
-
 import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -10,6 +8,7 @@ import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * File-based implementation of RaftLog that stores log entries in a binary format.
@@ -78,13 +77,14 @@ public class FileBasedRaftLog implements RaftLog {
 
     /**
      * Calculates the size of an entry including the 4-byte size prefix.
+     * @param arrayIndex 0-based index into the indexOffsets array
      */
-    private int getEntrySize(int index) throws IOException {
-        if (index < 0 || index >= indexOffsets.size()) {
-            throw new IllegalArgumentException("Invalid index: " + index);
+    private int getEntrySize(int arrayIndex) throws IOException {
+        if (arrayIndex < 0 || arrayIndex >= indexOffsets.size()) {
+            throw new IllegalArgumentException("Invalid array index: " + arrayIndex);
         }
 
-        long offset = indexOffsets.get(index);
+        long offset = indexOffsets.get(arrayIndex);
 
         try (RandomAccessFile raf = new RandomAccessFile(logFile.toFile(), "r")) {
             raf.seek(offset);
@@ -95,11 +95,13 @@ public class FileBasedRaftLog implements RaftLog {
 
     @Override
     public synchronized Optional<RaftLogEntry> getEntry(long index) throws IOException {
-        if (index < 0 || index >= indexOffsets.size()) {
+        // Raft log indices are 1-based
+        if (index < 1 || index > indexOffsets.size()) {
             return Optional.empty();
         }
 
-        long offset = indexOffsets.get((int) index);
+        // Convert 1-based Raft index to 0-based array index
+        long offset = indexOffsets.get((int) (index - 1));
 
         try (RandomAccessFile raf = new RandomAccessFile(logFile.toFile(), "r")) {
             raf.seek(offset);
@@ -116,7 +118,8 @@ public class FileBasedRaftLog implements RaftLog {
     @Override
     public synchronized List<RaftLogEntry> getEntriesSince(long fromIndex) throws IOException {
         List<RaftLogEntry> entries = new ArrayList<>();
-        for (long i = fromIndex; i < indexOffsets.size(); i++) {
+        // Raft indices are 1-based, size() returns count (last index = size)
+        for (long i = fromIndex; i <= indexOffsets.size(); i++) {
             getEntry(i).ifPresent(entries::add);
         }
         return entries;
@@ -127,7 +130,8 @@ public class FileBasedRaftLog implements RaftLog {
         if (indexOffsets.isEmpty()) {
             return Optional.empty();
         }
-        return getEntry(indexOffsets.size() - 1);
+        // Last entry is at 1-based index equal to size
+        return getEntry(indexOffsets.size());
     }
 
     @Override
@@ -137,22 +141,47 @@ public class FileBasedRaftLog implements RaftLog {
 
     @Override
     public synchronized void truncateAfter(long index) throws IOException {
+        // Keep entries 1..index, remove entries after index
+        // If index >= size, nothing to truncate
         if (index >= indexOffsets.size()) {
             return;
         }
 
-        long offset = indexOffsets.get((int) index);
-        try (RandomAccessFile raf = new RandomAccessFile(logFile.toFile(), "rw")) {
-            raf.setLength(offset);
+        // index is 1-based, we want to keep 'index' entries
+        // So we truncate starting from array position 'index' (0-based)
+        if (index < 0) {
+            index = 0; // Truncate everything
         }
 
-        indexOffsets.subList((int) index, indexOffsets.size()).clear();
+        long truncateOffset;
+        if (index == 0) {
+            truncateOffset = 0; // Truncate entire file
+        } else {
+            // Get the END of entry at position (index), which is the start of entry at (index+1)
+            // We need to keep bytes up to and including entry at index
+            int arrayIndex = (int) (index - 1); // Convert to 0-based
+            truncateOffset = indexOffsets.get(arrayIndex);
+            // Add the size of the entry we want to keep
+            try (RandomAccessFile raf = new RandomAccessFile(logFile.toFile(), "r")) {
+                raf.seek(truncateOffset);
+                int entrySize = raf.readInt();
+                truncateOffset += 4 + entrySize; // Skip past this entry
+            }
+        }
+
+        try (RandomAccessFile raf = new RandomAccessFile(logFile.toFile(), "rw")) {
+            raf.setLength(truncateOffset);
+        }
+
+        // Keep first 'index' elements in the list (indices 0 to index-1)
+        if (index < indexOffsets.size()) {
+            indexOffsets.subList((int) index, indexOffsets.size()).clear();
+        }
         log.info("Truncated log after index {}, new size: {}", index, indexOffsets.size());
     }
 
     @Override
     public void close() throws IOException {
         log.info("Closing Raft log with {} entries", indexOffsets.size());
-        // No resources to clean up in current implementation
     }
 }

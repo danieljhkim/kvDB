@@ -1,28 +1,29 @@
 package com.danieljhkim.kvdb.kvnode;
 
-import com.danieljhkim.kvdb.kvcommon.config.SystemConfig;
+import com.danieljhkim.kvdb.kvcommon.config.AppConfig;
+import com.danieljhkim.kvdb.kvcommon.config.ConfigLoader;
 import com.danieljhkim.kvdb.kvnode.server.NodeServer;
-import java.util.Arrays;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public class KvNodeApplication {
 
     private static final Logger logger = LoggerFactory.getLogger(KvNodeApplication.class);
-    private static final int DEFAULT_PORT = 8001;
-    private static SystemConfig CONFIG;
 
     public static void main(String[] args) {
         try {
-            if (args.length < 1) {
-                CONFIG = SystemConfig.getInstance("node-1");
+            String nodeId;
+            if (args.length > 0) {
+                nodeId = args[0];
+                logger.info("Starting node with ID from args: {}", nodeId);
             } else {
-                logger.info("{}", Arrays.toString(args));
-                CONFIG = SystemConfig.getInstance(args[0]);
+                nodeId = System.getenv().getOrDefault("STORAGE_NODE_ID", "node-1");
+                logger.info("Starting node with ID from env: {}", nodeId);
             }
 
-            int port = getPort();
-            NodeServer nodeServer = new NodeServer(port);
+            AppConfig appConfig = ConfigLoader.load();
+            logger.info("Loaded application configuration");
+            NodeServer nodeServer = new NodeServer(nodeId, appConfig);
 
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 logger.info("Shutting down Node gRPC server...");
@@ -34,15 +35,11 @@ public class KvNodeApplication {
                 }
             }));
 
-            logger.info("IndexNode gRPC server started on port {}", port);
+            logger.info("Storage Node gRPC server started for node: {}", nodeId);
             nodeServer.start();
         } catch (Exception e) {
             logger.error("Server failed to start", e);
             System.exit(1);
         }
-    }
-
-    private static int getPort() {
-        return Integer.parseInt(CONFIG.getProperty("kvdb.server.port", String.valueOf(KvNodeApplication.DEFAULT_PORT)));
     }
 }

@@ -14,7 +14,6 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 public class HealthCheckScheduler {
 
-
     private final ScheduledExecutorService clusterHealthScheduler;
     private final NodeHealthChecker healthChecker;
     private final int refreshIntervalSeconds;

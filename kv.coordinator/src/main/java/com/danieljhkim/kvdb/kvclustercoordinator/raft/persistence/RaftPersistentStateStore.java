@@ -1,13 +1,12 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence;
 
-import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.Properties;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Persists Raft's durable state (currentTerm and votedFor) to disk.
@@ -21,7 +20,6 @@ import java.util.Properties;
  */
 @Slf4j
 public class RaftPersistentStateStore {
-
 
     private static final String STATE_FILE_NAME = "raft_state.properties";
     private static final String STATE_FILE_TEMP = "raft_state.properties.tmp";

@@ -5,6 +5,7 @@ import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftPersistent
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.state.RaftNodeState;
 import com.danieljhkim.kvdb.proto.raft.RequestVoteRequest;
 import com.danieljhkim.kvdb.proto.raft.RequestVoteResponse;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
@@ -43,6 +44,8 @@ public class RaftElectionManager {
     // Track current election state
     private final AtomicInteger votesReceived = new AtomicInteger(0);
     private final Set<String> votedInCurrentElection = ConcurrentHashMap.newKeySet();
+
+    @Getter
     private volatile boolean electionWon = false;
 
     /**
@@ -82,30 +85,39 @@ public class RaftElectionManager {
                 return;
             }
 
-            // 1. Increment term and transition to CANDIDATE (§5.2)
+            // 1. FIRST reset election timer to prevent race condition
+            // where another timeout fires during state transition
+            electionTimer.reset();
+
+            // 2. Reset election state before transitioning
+            resetElectionState();
+
+            // 3. Increment term and transition to CANDIDATE (§5.2)
             state.becomeCandidate();
             long currentTerm = state.getCurrentTerm();
 
-            // 2. Persist the term and vote
+            // 4. Persist the term and self-vote BEFORE proceeding
+            // This ensures crash safety - if we crash, we won't lose our vote
             try {
                 persistentStore.save(currentTerm, nodeId);
             } catch (IOException e) {
-                log.error("[{}] Failed to persist election state for term {}", nodeId, currentTerm, e);
-                // Continue despite persistence failure - in-memory state is updated
+                log.error(
+                        "[{}] Failed to persist election state for term {}, aborting election", nodeId, currentTerm, e);
+                // Revert to follower if we can't persist
+                state.transitionToFollower(null);
+                return;
             }
-
-            // 3. Reset election timer
-            electionTimer.reset();
-
-            // 4. Reset election state
-            resetElectionState();
 
             // 5. Count our own vote
             votesReceived.set(1);
             votedInCurrentElection.add(nodeId);
 
-            log.info("[{}] Starting election for term {} (cluster size: {}, quorum: {})",
-                    nodeId, currentTerm, config.getClusterSize(), config.getQuorumSize());
+            log.info(
+                    "[{}] Starting election for term {} (cluster size: {}, quorum: {})",
+                    nodeId,
+                    currentTerm,
+                    config.getClusterSize(),
+                    config.getQuorumSize());
 
             // 6. Send RequestVote RPCs to all peers
             sendVoteRequests(currentTerm);
@@ -138,15 +150,14 @@ public class RaftElectionManager {
      * Sends a RequestVote RPC to a single peer.
      */
     private void sendVoteRequest(String peerId, RequestVoteRequest request, long electionTerm) {
-        rpcClient.apply(peerId, request)
-                .whenComplete((response, error) -> {
-                    if (error != null) {
-                        log.warn("[{}] Failed to get vote from {}: {}", nodeId, peerId, error.getMessage());
-                        return;
-                    }
+        rpcClient.apply(peerId, request).whenComplete((response, error) -> {
+            if (error != null) {
+                log.warn("[{}] Failed to get vote from {}: {}", nodeId, peerId, error.getMessage());
+                return;
+            }
 
-                    handleVoteResponse(peerId, response, electionTerm);
-                });
+            handleVoteResponse(peerId, response, electionTerm);
+        });
     }
 
     /**
@@ -156,22 +167,23 @@ public class RaftElectionManager {
         synchronized (state) {
             // Ignore response if we're no longer a candidate or the term has changed
             if (!state.isCandidate() || state.getCurrentTerm() != electionTerm) {
-                log.trace("[{}] Ignoring vote response from {} (no longer candidate or term changed)",
-                        nodeId, peerId);
+                log.trace("[{}] Ignoring vote response from {} (no longer candidate or term changed)", nodeId, peerId);
                 return;
             }
 
             // Check if we discovered a higher term (§5.1)
             if (response.getTerm() > electionTerm) {
-                log.info("[{}] Discovered higher term {} from {}, stepping down",
-                        nodeId, response.getTerm(), peerId);
-                state.becomeFollower(response.getTerm(), null);
+                log.info("[{}] Discovered higher term {} from {}, stepping down", nodeId, response.getTerm(), peerId);
+
+                // Persist FIRST, then update memory
                 try {
                     persistentStore.save(response.getTerm(), null);
                 } catch (IOException e) {
                     log.error("[{}] Failed to persist state after discovering higher term", nodeId, e);
-                    // Continue despite persistence failure
+                    // Still step down even if persistence fails - safety violation is worse
                 }
+
+                state.becomeFollower(response.getTerm(), null);
                 electionTimer.reset();
                 return;
             }
@@ -202,8 +214,7 @@ public class RaftElectionManager {
             }
 
             electionWon = true;
-            log.info("[{}] Won election for term {} with {} votes",
-                    nodeId, electionTerm, votesReceived.get());
+            log.info("[{}] Won election for term {} with {} votes", nodeId, electionTerm, votesReceived.get());
 
             // Transition to LEADER
             state.becomeLeader(config.getPeers().keySet());
@@ -223,7 +234,8 @@ public class RaftElectionManager {
         long lastLogTerm = 0;
         if (lastLogIndex > 0) {
             try {
-                lastLogTerm = state.getLog().getEntry(lastLogIndex)
+                lastLogTerm = state.getLog()
+                        .getEntry(lastLogIndex)
                         .map(com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLogEntry::term)
                         .orElse(0L);
             } catch (IOException e) {
@@ -255,12 +267,4 @@ public class RaftElectionManager {
     public int getVotesReceived() {
         return votesReceived.get();
     }
-
-    /**
-     * Returns whether the current election was won.
-     */
-    public boolean isElectionWon() {
-        return electionWon;
-    }
 }
-

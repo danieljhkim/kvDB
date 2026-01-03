@@ -148,8 +148,18 @@ public class WatcherManager implements Consumer<ShardMapDelta> {
         for (var entry : watchers.entrySet()) {
             try {
                 entry.getKey().onNext(delta);
+            } catch (io.grpc.StatusRuntimeException e) {
+                // Handle client disconnections gracefully
+                if (e.getStatus().getCode() == io.grpc.Status.Code.CANCELLED) {
+                    logger.debug("Watcher cancelled/disconnected, removing");
+                } else {
+                    logger.warn(
+                            "Failed to send delta to watcher ({}), removing",
+                            e.getStatus().getCode());
+                }
+                watchers.remove(entry.getKey());
             } catch (Exception e) {
-                logger.warn("Failed to send delta to watcher, removing", e);
+                logger.warn("Unexpected error sending delta to watcher, removing", e);
                 watchers.remove(entry.getKey());
             }
         }
@@ -166,19 +176,24 @@ public class WatcherManager implements Consumer<ShardMapDelta> {
 
         // Send an empty delta as a heartbeat (version 0 indicates heartbeat)
         var heartbeat = com.danieljhkim.kvdb.proto.coordinator.ShardMapDelta.newBuilder()
-                .setNewMapVersion(0) // 0
-                // indicates
-                // heartbeat,
-                // not a
-                // real
-                // update
+                .setNewMapVersion(0)
                 .build();
 
         for (var entry : watchers.entrySet()) {
             try {
                 entry.getKey().onNext(heartbeat);
+            } catch (io.grpc.StatusRuntimeException e) {
+                // Handle client disconnections gracefully
+                if (e.getStatus().getCode() == io.grpc.Status.Code.CANCELLED) {
+                    logger.debug("Watcher cancelled/disconnected during heartbeat, removing");
+                } else {
+                    logger.warn(
+                            "Heartbeat failed for watcher ({}), removing",
+                            e.getStatus().getCode());
+                }
+                watchers.remove(entry.getKey());
             } catch (Exception e) {
-                logger.warn("Heartbeat failed for watcher, removing", e);
+                logger.warn("Unexpected error during heartbeat, removing watcher", e);
                 watchers.remove(entry.getKey());
             }
         }

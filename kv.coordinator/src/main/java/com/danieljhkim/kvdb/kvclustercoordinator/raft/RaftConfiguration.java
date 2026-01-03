@@ -1,10 +1,9 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.raft;
 
-import lombok.Getter;
-
 import java.time.Duration;
 import java.util.Map;
 import java.util.Objects;
+import lombok.Getter;
 
 /**
  * Configuration for Raft consensus protocol.

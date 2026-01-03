@@ -6,8 +6,6 @@ import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLogEntry;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.state.RaftNodeState;
 import com.danieljhkim.kvdb.proto.raft.AppendEntriesRequest;
 import com.danieljhkim.kvdb.proto.raft.AppendEntriesResponse;
-import lombok.extern.slf4j.Slf4j;
-
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -15,6 +13,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiFunction;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Manages log replication from leader to followers.
@@ -123,9 +122,7 @@ public class RaftReplicationManager {
             long prevLogIndex = nextIndex - 1;
             long prevLogTerm = 0;
             if (prevLogIndex > 0) {
-                prevLogTerm = log.getEntry(prevLogIndex)
-                        .map(RaftLogEntry::term)
-                        .orElse(0L);
+                prevLogTerm = log.getEntry(prevLogIndex).map(RaftLogEntry::term).orElse(0L);
             }
 
             // Get entries to send (up to maxEntriesPerAppendRequest)
@@ -146,11 +143,19 @@ public class RaftReplicationManager {
                     .setLeaderCommit(commitIndex)
                     .build();
 
-            this.log.debug("[{}] Replicating {} entries to {} (nextIndex={}, prevLogIndex={}, prevLogTerm={})",
-                    nodeId, entriesToSend.size(), peerId, nextIndex, prevLogIndex, prevLogTerm);
+            this.log.debug(
+                    "[{}] Replicating {} entries to {} (nextIndex={}, prevLogIndex={}, prevLogTerm={})",
+                    nodeId,
+                    entriesToSend.size(),
+                    peerId,
+                    nextIndex,
+                    prevLogIndex,
+                    prevLogTerm);
 
-            return rpcClient.apply(peerId, request)
-                    .thenCompose(response -> handleReplicationResponse(peerId, nextIndex, entriesToSend.size(), response));
+            return rpcClient
+                    .apply(peerId, request)
+                    .thenCompose(
+                            response -> handleReplicationResponse(peerId, nextIndex, entriesToSend.size(), response));
 
         } catch (Exception e) {
             log.error("[{}] Error replicating to {}: {}", nodeId, peerId, e.getMessage(), e);
@@ -177,15 +182,11 @@ public class RaftReplicationManager {
      * Handles the response from an AppendEntries RPC.
      */
     private CompletableFuture<Void> handleReplicationResponse(
-            String peerId,
-            long nextIndex,
-            int entriesCount,
-            AppendEntriesResponse response) {
+            String peerId, long nextIndex, int entriesCount, AppendEntriesResponse response) {
 
         // Check for higher term
         if (response.getTerm() > state.getCurrentTerm()) {
-            log.warn("[{}] Discovered higher term {} from {}, stepping down",
-                    nodeId, response.getTerm(), peerId);
+            log.warn("[{}] Discovered higher term {} from {}, stepping down", nodeId, response.getTerm(), peerId);
             state.updateTerm(response.getTerm());
             state.transitionToFollower(null);
             return CompletableFuture.completedFuture(null);
@@ -196,8 +197,7 @@ public class RaftReplicationManager {
             long newMatchIndex = response.getMatchIndex();
             state.setMatchIndex(peerId, newMatchIndex);
 
-            log.debug("[{}] Successfully replicated to {} up to index {}",
-                    nodeId, peerId, newMatchIndex);
+            log.debug("[{}] Successfully replicated to {} up to index {}", nodeId, peerId, newMatchIndex);
 
             // Check if there are more entries to replicate
             if (newMatchIndex < state.getLog().size()) {
@@ -224,13 +224,23 @@ public class RaftReplicationManager {
         if (response.getConflictIndex() > 0) {
             // Fast backtracking: use conflict index from response
             newNextIndex = response.getConflictIndex();
-            log.debug("[{}] Log conflict with {}, adjusting nextIndex from {} to {} (conflictIndex={}, conflictTerm={})",
-                    nodeId, peerId, currentNextIndex, newNextIndex, response.getConflictIndex(), response.getConflictTerm());
+            log.debug(
+                    "[{}] Log conflict with {}, adjusting nextIndex from {} to {} (conflictIndex={}, conflictTerm={})",
+                    nodeId,
+                    peerId,
+                    currentNextIndex,
+                    newNextIndex,
+                    response.getConflictIndex(),
+                    response.getConflictTerm());
         } else {
             // Slow backtracking: decrement by 1
             newNextIndex = Math.max(1, currentNextIndex - 1);
-            log.debug("[{}] AppendEntries to {} failed, decrementing nextIndex from {} to {}",
-                    nodeId, peerId, currentNextIndex, newNextIndex);
+            log.debug(
+                    "[{}] AppendEntries to {} failed, decrementing nextIndex from {} to {}",
+                    nodeId,
+                    peerId,
+                    currentNextIndex,
+                    newNextIndex);
         }
 
         state.setNextIndex(peerId, newNextIndex);
@@ -263,8 +273,11 @@ public class RaftReplicationManager {
                     state.advanceCommitIndex(majorityMatchIndex);
                     log.info("[{}] Advanced commitIndex to {} (majority replicated)", nodeId, majorityMatchIndex);
                 } else {
-                    log.trace("[{}] Entry at {} is not from current term (entry term={}), not committing",
-                            nodeId, majorityMatchIndex, entry != null ? entry.term() : "null");
+                    log.trace(
+                            "[{}] Entry at {} is not from current term (entry term={}), not committing",
+                            nodeId,
+                            majorityMatchIndex,
+                            entry != null ? entry.term() : "null");
                 }
             } catch (IOException e) {
                 log.error("[{}] Error reading log entry at {}: {}", nodeId, majorityMatchIndex, e.getMessage());
@@ -281,4 +294,3 @@ public class RaftReplicationManager {
         log.debug("[{}] Cleared replication manager", nodeId);
     }
 }
-

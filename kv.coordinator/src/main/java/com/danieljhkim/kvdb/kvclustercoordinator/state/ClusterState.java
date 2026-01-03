@@ -58,12 +58,22 @@ public class ClusterState {
 
     /**
      * Initialize shards with the given configuration. This should only be called once when bootstrapping the cluster.
+     * This method is idempotent - if shards are already initialized with the same configuration, it returns the existing shards.
      *
      * @return list of created shard IDs
      */
     public List<String> initializeShards(int numShards, int replicationFactor) {
+        // Make this idempotent for Raft log replay
         if (!shards.isEmpty()) {
-            throw new IllegalStateException("Shards already initialized");
+            // If already initialized with the same configuration, return existing shards
+            if (this.numShards == numShards && this.replicationFactor == replicationFactor) {
+                // Already initialized with same config - return existing (idempotent behavior for log replay)
+                return new ArrayList<>(shards.keySet());
+            } else {
+                throw new IllegalStateException(String.format(
+                        "Shards already initialized with different configuration: existing(numShards=%d, rf=%d) vs requested(numShards=%d, rf=%d)",
+                        this.numShards, this.replicationFactor, numShards, replicationFactor));
+            }
         }
         if (numShards <= 0) {
             throw new IllegalArgumentException("numShards must be positive");

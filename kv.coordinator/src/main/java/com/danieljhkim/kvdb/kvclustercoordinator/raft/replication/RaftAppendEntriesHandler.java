@@ -7,12 +7,11 @@ import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftPersistent
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.state.RaftNodeState;
 import com.danieljhkim.kvdb.proto.raft.AppendEntriesRequest;
 import com.danieljhkim.kvdb.proto.raft.AppendEntriesResponse;
-import lombok.extern.slf4j.Slf4j;
-
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Handles AppendEntries RPC requests from the leader.
@@ -57,14 +56,24 @@ public class RaftAppendEntriesHandler {
         long currentTerm = state.getCurrentTerm();
         String leaderId = request.getLeaderId();
 
-        log.debug("[{}] Received AppendEntries from {} (term={}, prevLogIndex={}, prevLogTerm={}, entries={}, leaderCommit={})",
-                nodeId, leaderId, requestTerm, request.getPrevLogIndex(), request.getPrevLogTerm(),
-                request.getEntriesCount(), request.getLeaderCommit());
+        log.debug(
+                "[{}] Received AppendEntries from {} (term={}, prevLogIndex={}, prevLogTerm={}, entries={}, leaderCommit={})",
+                nodeId,
+                leaderId,
+                requestTerm,
+                request.getPrevLogIndex(),
+                request.getPrevLogTerm(),
+                request.getEntriesCount(),
+                request.getLeaderCommit());
 
         // 1. Reply false if term < currentTerm (§5.1)
         if (requestTerm < currentTerm) {
-            log.debug("[{}] Rejecting AppendEntries from {} due to stale term (request={}, current={})",
-                    nodeId, leaderId, requestTerm, currentTerm);
+            log.debug(
+                    "[{}] Rejecting AppendEntries from {} due to stale term (request={}, current={})",
+                    nodeId,
+                    leaderId,
+                    requestTerm,
+                    currentTerm);
             return AppendEntriesResponse.newBuilder()
                     .setTerm(currentTerm)
                     .setSuccess(false)
@@ -74,10 +83,21 @@ public class RaftAppendEntriesHandler {
 
         // Update term if necessary and step down to follower
         if (requestTerm > currentTerm) {
-            log.info("[{}] Discovered higher term {} from leader {}, updating term",
-                    nodeId, requestTerm, leaderId);
+            log.info("[{}] Discovered higher term {} from leader {}, updating term", nodeId, requestTerm, leaderId);
+
+            // Persist FIRST, then update memory for crash safety
+            try {
+                persistentStore.save(requestTerm, state.getVotedFor());
+            } catch (IOException e) {
+                log.error("[{}] Failed to persist term update, rejecting AppendEntries", nodeId, e);
+                return AppendEntriesResponse.newBuilder()
+                        .setTerm(currentTerm)
+                        .setSuccess(false)
+                        .setFollowerId(nodeId)
+                        .build();
+            }
+
             state.updateTerm(requestTerm);
-            persistState();
         }
 
         // Recognize leader and reset election timer
@@ -95,8 +115,13 @@ public class RaftAppendEntriesHandler {
                 long conflictIndex = findConflictIndex(raftLog, prevLogIndex, prevLogTerm);
                 long conflictTerm = getConflictTerm(raftLog, conflictIndex);
 
-                log.debug("[{}] Log inconsistency at prevLogIndex={}, prevLogTerm={}. Conflict at index={}, term={}",
-                        nodeId, prevLogIndex, prevLogTerm, conflictIndex, conflictTerm);
+                log.debug(
+                        "[{}] Log inconsistency at prevLogIndex={}, prevLogTerm={}. Conflict at index={}, term={}",
+                        nodeId,
+                        prevLogIndex,
+                        prevLogTerm,
+                        conflictIndex,
+                        conflictTerm);
 
                 return AppendEntriesResponse.newBuilder()
                         .setTerm(currentTerm)
@@ -200,7 +225,8 @@ public class RaftAppendEntriesHandler {
      * Raft paper §5.3: If an existing entry conflicts with a new one,
      * delete the existing entry and all that follow it.
      */
-    private void appendEntries(RaftLog raftLog, List<com.danieljhkim.kvdb.proto.raft.RaftLogEntry> protoEntries, long prevLogIndex)
+    private void appendEntries(
+            RaftLog raftLog, List<com.danieljhkim.kvdb.proto.raft.RaftLogEntry> protoEntries, long prevLogIndex)
             throws IOException {
 
         List<RaftLogEntry> entriesToAppend = new ArrayList<>();
@@ -211,8 +237,7 @@ public class RaftAppendEntriesHandler {
 
             // Sanity check: entries should be consecutive
             if (entryIndex != nextIndex) {
-                log.warn("[{}] Non-consecutive entry index: expected {}, got {}",
-                        nodeId, nextIndex, entryIndex);
+                log.warn("[{}] Non-consecutive entry index: expected {}, got {}", nodeId, nextIndex, entryIndex);
             }
 
             // Check if we already have an entry at this index
@@ -227,8 +252,12 @@ public class RaftAppendEntriesHandler {
                 }
 
                 // Terms don't match - delete this entry and all following entries
-                log.info("[{}] Conflict at index {}: existing term {}, new term {}. Truncating.",
-                        nodeId, entryIndex, existing.get().term(), protoEntry.getTerm());
+                log.info(
+                        "[{}] Conflict at index {}: existing term {}, new term {}. Truncating.",
+                        nodeId,
+                        entryIndex,
+                        existing.get().term(),
+                        protoEntry.getTerm());
                 raftLog.truncateAfter(entryIndex - 1);
             }
 
@@ -241,7 +270,8 @@ public class RaftAppendEntriesHandler {
         // Append all new entries
         for (RaftLogEntry entry : entriesToAppend) {
             raftLog.append(entry);
-            RaftAppendEntriesHandler.log.debug("[{}] Appended entry at index {} with term {}", nodeId, entry.index(), entry.term());
+            RaftAppendEntriesHandler.log.debug(
+                    "[{}] Appended entry at index {} with term {}", nodeId, entry.index(), entry.term());
         }
     }
 
@@ -256,4 +286,3 @@ public class RaftAppendEntriesHandler {
         }
     }
 }
-

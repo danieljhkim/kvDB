@@ -2,6 +2,7 @@ package com.danieljhkim.kvdb.kvclustercoordinator.raft;
 
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.election.RaftElectionManager;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.election.RaftElectionTimer;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.election.RaftVoteHandler;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLog;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftPersistentStateStore;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.replication.RaftAppendEntriesHandler;
@@ -15,15 +16,13 @@ import com.danieljhkim.kvdb.proto.raft.AppendEntriesRequest;
 import com.danieljhkim.kvdb.proto.raft.AppendEntriesResponse;
 import com.danieljhkim.kvdb.proto.raft.RequestVoteRequest;
 import com.danieljhkim.kvdb.proto.raft.RequestVoteResponse;
-import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
-
 import java.io.IOException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Main Raft node that orchestrates all Raft components.
@@ -46,6 +45,7 @@ public class RaftNode {
 
     @Getter
     private final RaftNodeState state;
+
     private final RaftPersistentStateStore persistentStore;
     private final RaftStateMachine stateMachine;
 
@@ -53,21 +53,25 @@ public class RaftNode {
     private final RaftElectionTimer electionTimer;
     private final RaftElectionManager electionManager;
 
+    @Getter
+    private final RaftVoteHandler voteHandler;
+
     // Replication components
     private final RaftHeartbeatManager heartbeatManager;
     private final RaftReplicationManager replicationManager;
+
+    @Getter
     private final RaftAppendEntriesHandler appendEntriesHandler;
+
     private final RaftStateMachineApplier stateMachineApplier;
 
     // RPC clients (to be provided by gRPC layer)
     private final BiFunction<String, RequestVoteRequest, CompletableFuture<RequestVoteResponse>> voteRpcClient;
-    private final BiFunction<String, AppendEntriesRequest, CompletableFuture<AppendEntriesResponse>> appendEntriesRpcClient;
+    private final BiFunction<String, AppendEntriesRequest, CompletableFuture<AppendEntriesResponse>>
+            appendEntriesRpcClient;
 
     // Executor for scheduled tasks
     private final ScheduledExecutorService scheduler;
-
-    // Track previous role for detecting transitions
-    private final AtomicReference<RaftRole> previousRole = new AtomicReference<>(RaftRole.FOLLOWER);
 
     private volatile boolean started = false;
 
@@ -102,60 +106,31 @@ public class RaftNode {
         this.state = loadOrCreateState(raftLog, persistentStore);
 
         // Create executor
-        this.scheduler = Executors.newScheduledThreadPool(
-                2,
-                r -> {
-                    Thread t = new Thread(r, "raft-" + nodeId);
-                    t.setDaemon(true);
-                    return t;
-                }
-        );
+        this.scheduler = Executors.newScheduledThreadPool(2, r -> {
+            Thread t = new Thread(r, "raft-" + nodeId);
+            t.setDaemon(true);
+            return t;
+        });
 
         // Initialize election components
-        this.electionTimer = new RaftElectionTimer(
-                nodeId,
-                config,
-                scheduler,
-                this::onElectionTimeout
-        );
+        this.electionTimer = new RaftElectionTimer(nodeId, config, scheduler, this::onElectionTimeout);
 
-        this.electionManager = new RaftElectionManager(
-                nodeId,
-                config,
-                state,
-                persistentStore,
-                electionTimer,
-                voteRpcClient
-        );
+        this.electionManager =
+                new RaftElectionManager(nodeId, config, state, persistentStore, electionTimer, voteRpcClient);
+
+        this.voteHandler = new RaftVoteHandler(nodeId, state, persistentStore, electionTimer);
 
         // Initialize replication components
-        this.heartbeatManager = new RaftHeartbeatManager(
-                nodeId,
-                config,
-                state,
-                scheduler,
-                appendEntriesRpcClient
-        );
+        this.heartbeatManager = new RaftHeartbeatManager(nodeId, config, state, scheduler, appendEntriesRpcClient);
 
-        this.replicationManager = new RaftReplicationManager(
-                nodeId,
-                config,
-                state,
-                appendEntriesRpcClient
-        );
+        this.replicationManager = new RaftReplicationManager(nodeId, config, state, appendEntriesRpcClient);
 
-        this.appendEntriesHandler = new RaftAppendEntriesHandler(
-                nodeId,
-                state,
-                persistentStore,
-                electionTimer
-        );
+        this.appendEntriesHandler = new RaftAppendEntriesHandler(nodeId, state, persistentStore, electionTimer);
 
-        this.stateMachineApplier = new RaftStateMachineApplier(
-                nodeId,
-                state,
-                stateMachine
-        );
+        this.stateMachineApplier = new RaftStateMachineApplier(nodeId, state, stateMachine);
+
+        // Register for immediate role change notifications (event-driven, not polling)
+        this.state.addRoleChangeListener(this::handleRoleTransition);
 
         log.info("[{}] RaftNode created in term {}", nodeId, state.getCurrentTerm());
     }
@@ -176,9 +151,6 @@ public class RaftNode {
 
         // Start election timer (will trigger elections when needed)
         electionTimer.start();
-
-        // Start monitoring role changes
-        startRoleChangeMonitor();
 
         started = true;
         log.info("[{}] RaftNode started successfully", nodeId);
@@ -211,9 +183,7 @@ public class RaftNode {
      * Handles incoming RequestVote RPC.
      */
     public RequestVoteResponse handleRequestVote(RequestVoteRequest request) {
-        // Delegate to election manager (to be implemented in Phase 2 enhancement)
-        // For now, this would be handled by a vote handler
-        throw new UnsupportedOperationException("Not yet implemented - needs RaftVoteHandler integration");
+        return voteHandler.handleRequestVote(request);
     }
 
     /**
@@ -239,8 +209,7 @@ public class RaftNode {
     public CompletableFuture<Void> submitCommand(RaftCommand command) {
         if (!state.isLeader()) {
             return CompletableFuture.failedFuture(
-                    new IllegalStateException("Not the leader. Current leader: " + state.getCurrentLeader())
-            );
+                    new IllegalStateException("Not the leader. Current leader: " + state.getCurrentLeader()));
         }
 
         try {
@@ -248,20 +217,18 @@ public class RaftNode {
             long index = state.getLog().size() + 1;
             long term = state.getCurrentTerm();
             var entry = com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLogEntry.create(
-                    index, term, command
-            );
+                    index, term, command);
             state.getLog().append(entry);
 
             log.debug("[{}] Appended command to log at index {} term {}", nodeId, index, term);
 
             // Replicate to followers
-            return replicationManager.replicateToAll()
-                    .thenRun(() -> {
-                        // After replication, apply to state machine if committed
-                        if (state.getCommitIndex() >= index) {
-                            stateMachineApplier.applyCommittedEntries();
-                        }
-                    });
+            return replicationManager.replicateToAll().thenRun(() -> {
+                // After replication, apply to state machine if committed
+                if (state.getCommitIndex() >= index) {
+                    stateMachineApplier.applyCommittedEntries();
+                }
+            });
 
         } catch (IOException e) {
             log.error("[{}] Failed to append command to log", nodeId, e);
@@ -298,6 +265,20 @@ public class RaftNode {
     }
 
     /**
+     * Gets the gRPC address of the current leader.
+     * Returns null if leader is unknown.
+     */
+    public String getLeaderAddress() {
+        String leaderId = state.getCurrentLeader();
+        if (leaderId == null) {
+            return null;
+        }
+
+        // Look up leader address from config
+        return config.getClusterMembers().get(leaderId);
+    }
+
+    /**
      * Called when election timeout expires.
      */
     private void onElectionTimeout() {
@@ -306,32 +287,8 @@ public class RaftNode {
     }
 
     /**
-     * Monitors role changes and manages component lifecycle accordingly.
-     */
-    private void startRoleChangeMonitor() {
-        // Schedule periodic check for role changes
-        scheduler.scheduleAtFixedRate(
-                this::checkAndHandleRoleChange,
-                100, // Initial delay
-                50,  // Check every 50ms
-                java.util.concurrent.TimeUnit.MILLISECONDS
-        );
-    }
-
-    /**
-     * Checks if role has changed and handles transitions.
-     */
-    private void checkAndHandleRoleChange() {
-        RaftRole currentRole = state.getCurrentRole();
-        RaftRole previous = previousRole.getAndSet(currentRole);
-
-        if (previous != currentRole) {
-            handleRoleTransition(previous, currentRole);
-        }
-    }
-
-    /**
      * Handles transitions between Raft roles.
+     * Called immediately when role changes via the listener mechanism.
      */
     private void handleRoleTransition(RaftRole from, RaftRole to) {
         log.info("[{}] Role transition: {} → {}", nodeId, from, to);
@@ -396,16 +353,10 @@ public class RaftNode {
     private RaftNodeState loadOrCreateState(RaftLog raftLog, RaftPersistentStateStore store) {
         try {
             var persistedState = store.load();
-            return new RaftNodeState(
-                    nodeId,
-                    raftLog,
-                    persistedState.getCurrentTerm(),
-                    persistedState.getVotedFor()
-            );
+            return new RaftNodeState(nodeId, raftLog, persistedState.getCurrentTerm(), persistedState.getVotedFor());
         } catch (IOException e) {
             log.warn("[{}] Failed to load persistent state, starting fresh: {}", nodeId, e.getMessage());
             return new RaftNodeState(nodeId, raftLog);
         }
     }
 }
-

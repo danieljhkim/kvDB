@@ -4,15 +4,14 @@ import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLog;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLogEntry;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.state.RaftNodeState;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine.RaftStateMachine;
-import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
-
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Applies committed log entries to the state machine.
@@ -36,6 +35,7 @@ public class RaftStateMachineApplier {
      */
     @Getter
     private volatile boolean running = false;
+
     private final Object applyLock = new Object();
 
     public RaftStateMachineApplier(String nodeId, RaftNodeState state, RaftStateMachine stateMachine) {
@@ -47,10 +47,7 @@ public class RaftStateMachineApplier {
     }
 
     public RaftStateMachineApplier(
-            String nodeId,
-            RaftNodeState state,
-            RaftStateMachine stateMachine,
-            Executor applyExecutor) {
+            String nodeId, RaftNodeState state, RaftStateMachine stateMachine, Executor applyExecutor) {
         this.nodeId = nodeId;
         this.state = state;
         this.stateMachine = stateMachine;
@@ -125,11 +122,15 @@ public class RaftStateMachineApplier {
 
         for (long i = fromIndex; i <= toIndex; i++) {
             final long index = i;
-            raftLog.getEntry(i).ifPresentOrElse(
-                    entries::add,
-                    () -> log.error("[{}] Missing log entry at index {} (lastApplied={}, commitIndex={})",
-                            nodeId, index, lastApplied, commitIndex)
-            );
+            raftLog.getEntry(i)
+                    .ifPresentOrElse(
+                            entries::add,
+                            () -> log.error(
+                                    "[{}] Missing log entry at index {} (lastApplied={}, commitIndex={})",
+                                    nodeId,
+                                    index,
+                                    lastApplied,
+                                    commitIndex));
         }
 
         return entries;
@@ -140,8 +141,8 @@ public class RaftStateMachineApplier {
      */
     private void applyEntry(RaftLogEntry entry) {
         try {
-            log.debug("[{}] Applying entry at index {} (term={}) to state machine",
-                    nodeId, entry.index(), entry.term());
+            log.debug(
+                    "[{}] Applying entry at index {} (term={}) to state machine", nodeId, entry.index(), entry.term());
 
             // Apply the command to state machine
             stateMachine.apply(entry.command());
@@ -149,13 +150,20 @@ public class RaftStateMachineApplier {
             // Update lastApplied
             state.advanceLastApplied(entry.index());
 
-            log.trace("[{}] Successfully applied entry at index {}, lastApplied={}",
-                    nodeId, entry.index(), state.getLastApplied());
+            log.trace(
+                    "[{}] Successfully applied entry at index {}, lastApplied={}",
+                    nodeId,
+                    entry.index(),
+                    state.getLastApplied());
 
         } catch (Exception e) {
             // This is a critical error - we cannot skip entries
-            log.error("[{}] FATAL: Failed to apply entry at index {}: {}. State machine may be inconsistent!",
-                    nodeId, entry.index(), e.getMessage(), e);
+            log.error(
+                    "[{}] FATAL: Failed to apply entry at index {}: {}. State machine may be inconsistent!",
+                    nodeId,
+                    entry.index(),
+                    e.getMessage(),
+                    e);
             // In a production system, you might want to halt the node here
             throw new RuntimeException("Failed to apply committed entry", e);
         }
@@ -182,4 +190,3 @@ public class RaftStateMachineApplier {
         return Math.max(0, state.getCommitIndex() - state.getLastApplied());
     }
 }
-

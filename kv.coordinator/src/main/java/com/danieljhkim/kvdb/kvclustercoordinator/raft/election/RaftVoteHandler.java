@@ -4,10 +4,9 @@ import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftPersistent
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.state.RaftNodeState;
 import com.danieljhkim.kvdb.proto.raft.RequestVoteRequest;
 import com.danieljhkim.kvdb.proto.raft.RequestVoteResponse;
-import lombok.extern.slf4j.Slf4j;
-
 import java.io.IOException;
 import java.util.Objects;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Handles RequestVote RPC requests during leader election.
@@ -55,9 +54,13 @@ public class RaftVoteHandler {
      * @return the vote response
      */
     public RequestVoteResponse handleRequestVote(RequestVoteRequest request) {
-        log.debug("[{}] Received RequestVote from {} for term {} (lastLogIndex={}, lastLogTerm={})",
-                nodeId, request.getCandidateId(), request.getTerm(),
-                request.getLastLogIndex(), request.getLastLogTerm());
+        log.debug(
+                "[{}] Received RequestVote from {} for term {} (lastLogIndex={}, lastLogTerm={})",
+                nodeId,
+                request.getCandidateId(),
+                request.getTerm(),
+                request.getLastLogIndex(),
+                request.getLastLogTerm());
 
         synchronized (state) {
             long currentTerm = state.getCurrentTerm();
@@ -65,22 +68,36 @@ public class RaftVoteHandler {
 
             // 1. Reply false if request.term < currentTerm (§5.1)
             if (request.getTerm() < currentTerm) {
-                log.debug("[{}] Rejecting vote for {} - stale term {} < {}",
-                        nodeId, request.getCandidateId(), request.getTerm(), currentTerm);
+                log.debug(
+                        "[{}] Rejecting vote for {} - stale term {} < {}",
+                        nodeId,
+                        request.getCandidateId(),
+                        request.getTerm(),
+                        currentTerm);
                 return buildResponse(currentTerm, false);
             }
 
             // 2. If request.term > currentTerm, update term and step down (§5.1)
             if (request.getTerm() > currentTerm) {
-                log.info("[{}] Discovered higher term {} from {}, stepping down from term {}",
-                        nodeId, request.getTerm(), request.getCandidateId(), currentTerm);
-                state.becomeFollower(request.getTerm(), null);
+                log.info(
+                        "[{}] Discovered higher term {} from {}, stepping down from term {}",
+                        nodeId,
+                        request.getTerm(),
+                        request.getCandidateId(),
+                        currentTerm);
+
+                // CRITICAL: Persist FIRST, then update memory
+                // This ensures crash safety - if we crash after memory update but before
+                // persistence, we could vote twice in the same term
                 try {
                     persistentStore.save(request.getTerm(), null);
                 } catch (IOException e) {
-                    log.error("[{}] Failed to persist state after term update", nodeId, e);
-                    // Continue despite persistence failure - in-memory state is updated
+                    log.error("[{}] Failed to persist state after term update, rejecting vote", nodeId, e);
+                    // Reject the vote if we can't persist - safety first
+                    return buildResponse(currentTerm, false);
                 }
+
+                state.becomeFollower(request.getTerm(), null);
                 currentTerm = request.getTerm();
                 votedFor = null;
             }
@@ -88,30 +105,42 @@ public class RaftVoteHandler {
             // 3. Check if we can vote for this candidate
             boolean canVote = votedFor == null || votedFor.equals(request.getCandidateId());
             if (!canVote) {
-                log.debug("[{}] Rejecting vote for {} - already voted for {} in term {}",
-                        nodeId, request.getCandidateId(), votedFor, currentTerm);
+                log.debug(
+                        "[{}] Rejecting vote for {} - already voted for {} in term {}",
+                        nodeId,
+                        request.getCandidateId(),
+                        votedFor,
+                        currentTerm);
                 return buildResponse(currentTerm, false);
             }
 
             // 4. Check if candidate's log is at least as up-to-date as ours (§5.4.1)
             boolean logIsUpToDate = isLogUpToDate(request.getLastLogTerm(), request.getLastLogIndex());
             if (!logIsUpToDate) {
-                log.debug("[{}] Rejecting vote for {} - log is not up-to-date (candidate: term={}, index={}; ours: term={}, index={})",
-                        nodeId, request.getCandidateId(),
-                        request.getLastLogTerm(), request.getLastLogIndex(),
-                        getLastLogTerm(), getLastLogIndex());
+                log.debug(
+                        "[{}] Rejecting vote for {} - log is not up-to-date (candidate: term={}, index={}; ours: term={}, index={})",
+                        nodeId,
+                        request.getCandidateId(),
+                        request.getLastLogTerm(),
+                        request.getLastLogIndex(),
+                        getLastLogTerm(),
+                        getLastLogIndex());
                 return buildResponse(currentTerm, false);
             }
 
-            // 5. Grant vote and reset election timer (§5.2)
+            // 5. Grant vote - persist FIRST, then update memory (§5.2)
             log.info("[{}] Granting vote to {} in term {}", nodeId, request.getCandidateId(), currentTerm);
-            state.setVotedFor(request.getCandidateId());
+
+            // CRITICAL: Persist vote before updating memory state
             try {
                 persistentStore.save(currentTerm, request.getCandidateId());
             } catch (IOException e) {
-                log.error("[{}] Failed to persist vote for {}", nodeId, request.getCandidateId(), e);
-                // Continue despite persistence failure - in-memory state is updated
+                log.error("[{}] Failed to persist vote for {}, rejecting", nodeId, request.getCandidateId(), e);
+                // Reject the vote if we can't persist
+                return buildResponse(currentTerm, false);
             }
+
+            state.setVotedFor(request.getCandidateId());
             electionTimer.reset();
 
             return buildResponse(currentTerm, true);
@@ -155,7 +184,8 @@ public class RaftVoteHandler {
             return 0;
         }
         try {
-            return state.getLog().getEntry(lastIndex)
+            return state.getLog()
+                    .getEntry(lastIndex)
                     .map(com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLogEntry::term)
                     .orElse(0L);
         } catch (IOException e) {
@@ -182,4 +212,3 @@ public class RaftVoteHandler {
                 .build();
     }
 }
-

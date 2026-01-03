@@ -1,10 +1,13 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.raft.state;
 
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLog;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiConsumer;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -19,7 +22,6 @@ import lombok.extern.slf4j.Slf4j;
  */
 @Slf4j
 public class RaftNodeState {
-
 
     // Persistent state on all servers (updated on stable storage before responding to RPCs)
     private final AtomicLong currentTerm;
@@ -36,6 +38,9 @@ public class RaftNodeState {
     private final RaftLeaderState leaderState;
 
     private final String nodeId;
+
+    // Role change listeners
+    private final List<BiConsumer<RaftRole, RaftRole>> roleChangeListeners = new CopyOnWriteArrayList<>();
 
     public RaftNodeState(String nodeId, RaftLog log) {
         this(nodeId, log, 0, null);
@@ -207,6 +212,30 @@ public class RaftNodeState {
     // === Role Transitions ===
 
     /**
+     * Adds a listener that will be notified when the role changes.
+     *
+     * @param listener callback that receives (oldRole, newRole) when transition occurs
+     */
+    public void addRoleChangeListener(BiConsumer<RaftRole, RaftRole> listener) {
+        roleChangeListeners.add(listener);
+    }
+
+    /**
+     * Notifies all registered listeners of a role change.
+     */
+    private void notifyRoleChange(RaftRole oldRole, RaftRole newRole) {
+        if (oldRole != newRole) {
+            roleChangeListeners.forEach(listener -> {
+                try {
+                    listener.accept(oldRole, newRole);
+                } catch (Exception e) {
+                    log.error("[{}] Error in role change listener", nodeId, e);
+                }
+            });
+        }
+    }
+
+    /**
      * Transitions to FOLLOWER state. This can happen from any state.
      *
      * @param term the term to adopt
@@ -219,6 +248,7 @@ public class RaftNodeState {
         if (oldRole != RaftRole.FOLLOWER) {
             log.info("[{}] Transitioned from {} to FOLLOWER in term {} (leader: {})", nodeId, oldRole, term, leaderId);
             clearLeaderState();
+            notifyRoleChange(oldRole, RaftRole.FOLLOWER);
         }
     }
 
@@ -241,6 +271,7 @@ public class RaftNodeState {
         votedFor.set(nodeId); // Vote for self
         clearLeaderState();
         log.info("[{}] Transitioned from {} to CANDIDATE in term {}", nodeId, oldRole, newTerm);
+        notifyRoleChange(oldRole, RaftRole.CANDIDATE);
     }
 
     /**
@@ -253,6 +284,7 @@ public class RaftNodeState {
         currentLeader.set(nodeId);
         leaderState.initialize(peerIds, raftLog.size());
         log.info("[{}] Transitioned from {} to LEADER in term {}", nodeId, oldRole, currentTerm.get());
+        notifyRoleChange(oldRole, RaftRole.LEADER);
     }
 
     /**
@@ -289,7 +321,9 @@ public class RaftNodeState {
      * @return the highest index replicated on majority
      */
     public long computeMajorityMatchIndex(int clusterSize) {
-        return leaderState.computeMajorityMatchIndex(clusterSize);
+        // Include leader's own log index in the calculation
+        long leaderLogIndex = raftLog.size();
+        return leaderState.computeMajorityMatchIndex(clusterSize, leaderLogIndex);
     }
 
     @Override

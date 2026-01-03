@@ -101,7 +101,11 @@ public class WALManager {
 
 	/**
 	 * Parse a WAL line more efficiently than String.split().
-	 * Format: "OP KEY VALUE"
+	 * Format: "OP KEY VALUE" where VALUE may be empty.
+	 * Returns: String array with 1, 2, or 3 elements depending on the line content:
+	 *   - [OP] if no spaces
+	 *   - [OP, KEY] if one space
+	 *   - [OP, KEY, VALUE] if two or more spaces (VALUE may contain spaces)
 	 */
 	private String[] parseLine(String line) {
 		int firstSpace = line.indexOf(' ');

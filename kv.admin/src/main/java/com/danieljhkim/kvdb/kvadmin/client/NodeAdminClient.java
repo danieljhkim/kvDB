@@ -37,23 +37,23 @@ public class NodeAdminClient {
 	 * @return true if node responds, false otherwise
 	 */
 	public boolean ping(String nodeAddress) {
-		// Use indexOf instead of split for better performance
-		int colonIndex = nodeAddress.indexOf(':');
-		if (colonIndex == -1) {
-			throw new IllegalArgumentException("Invalid node address format (missing ':'): " + nodeAddress);
-		}
-
-		String host = nodeAddress.substring(0, colonIndex);
-		String portStr = nodeAddress.substring(colonIndex + 1);
-		int port;
-		try {
-			port = Integer.parseInt(portStr);
-		} catch (NumberFormatException e) {
-			throw new IllegalArgumentException("Invalid port in node address: " + nodeAddress, e);
-		}
-
 		// Reuse channel instead of creating new one on each ping
 		ManagedChannel channel = channels.computeIfAbsent(nodeAddress, addr -> {
+			// Parse host and port inside lambda to avoid race conditions
+			int colonIndex = addr.indexOf(':');
+			if (colonIndex == -1) {
+				throw new IllegalArgumentException("Invalid node address format (missing ':'): " + addr);
+			}
+			
+			String host = addr.substring(0, colonIndex);
+			String portStr = addr.substring(colonIndex + 1);
+			int port;
+			try {
+				port = Integer.parseInt(portStr);
+			} catch (NumberFormatException e) {
+				throw new IllegalArgumentException("Invalid port in node address: " + addr, e);
+			}
+			
 			logger.debug("Creating gRPC channel to node: {}", addr);
 			return ManagedChannelBuilder.forAddress(host, port)
 					.usePlaintext()

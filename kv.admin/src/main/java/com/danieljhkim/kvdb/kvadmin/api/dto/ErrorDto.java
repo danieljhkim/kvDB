@@ -14,13 +14,13 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public class ErrorDto {
 
-	private String error;
-	private String message;
-	private String code;
-	private long timestampMs;
+    private String error;
+    private String message;
+    private String code;
+    private long timestampMs;
 
-	// Optional fields for routing hints
-	private String shardId;
-	private String leaderHint;
-	private String newNodeHint;
+    // Optional fields for routing hints
+    private String shardId;
+    private String leaderHint;
+    private String newNodeHint;
 }

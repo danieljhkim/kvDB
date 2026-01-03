@@ -1,36 +1,37 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.raft;
 
 import com.danieljhkim.kvdb.kvclustercoordinator.state.NodeRecord;
-
 import java.util.List;
 
 /**
- * Sealed interface representing Raft commands that modify the coordinator state machine.
- * Each command type corresponds to a specific mutation in {@link com.danieljhkim.kvdb.kvclustercoordinator.state.ClusterState}.
+ * Sealed interface representing Raft commands that modify the coordinator state machine. Each command type corresponds
+ * to a specific mutation in {@link com.danieljhkim.kvdb.kvclustercoordinator.state.ClusterState}.
  *
- * <p>Commands are applied via Raft consensus to ensure consistency across coordinator replicas.
- * For the stub implementation, commands are applied synchronously without replication.
+ * <p>
+ * Commands are applied via Raft consensus to ensure consistency across coordinator replicas. For the stub
+ * implementation, commands are applied synchronously without replication.
  */
-public sealed
+public sealed interface RaftCommand
+        permits RaftCommand.InitShards,
+                RaftCommand.RegisterNode,
+                RaftCommand.SetNodeStatus,
+                RaftCommand.SetShardReplicas,
+                RaftCommand.SetShardLeader {
 
-interface RaftCommand
-permits RaftCommand.InitShards,RaftCommand.RegisterNode,RaftCommand.SetNodeStatus,RaftCommand.SetShardReplicas,RaftCommand.SetShardLeader
-{
+    /**
+     * Returns a human-readable description of this command.
+     */
+    String describe();
 
-	/**
-	 * Returns a human-readable description of this command.
-	 */
-	String describe();
+    // ============================
+    // Command Types
+    // ============================
 
-	// ============================
-	// Command Types
-	// ============================
-
-	/**
-     * Initializes the shard map with the given configuration.
-     * Should only be called once when bootstrapping the cluster.
+    /**
+     * Initializes the shard map with the given configuration. Should only be called once when bootstrapping the
+     * cluster.
      *
-     * @param numShards         number of shards to create
+     * @param numShards number of shards to create
      * @param replicationFactor number of replicas per shard
      */
     record InitShards(int numShards, int replicationFactor) implements RaftCommand {
@@ -43,18 +44,18 @@ permits RaftCommand.InitShards,RaftCommand.RegisterNode,RaftCommand.SetNodeStatu
             }
         }
 
-	@Override
+        @Override
         public String describe() {
             return "InitShards(numShards=" + numShards + ", rf=" + replicationFactor + ")";
-        }}
+        }
+    }
 
-	/**
-     * Registers a new node or updates an existing node's address/zone.
-     * Marks the node as ALIVE.
+    /**
+     * Registers a new node or updates an existing node's address/zone. Marks the node as ALIVE.
      *
-     * @param nodeId  unique identifier for the node
+     * @param nodeId unique identifier for the node
      * @param address gRPC address (host:port)
-     * @param zone    optional availability zone
+     * @param zone optional availability zone
      */
     record RegisterNode(String nodeId, String address, String zone) implements RaftCommand {
         public RegisterNode {
@@ -66,14 +67,15 @@ permits RaftCommand.InitShards,RaftCommand.RegisterNode,RaftCommand.SetNodeStatu
             }
         }
 
-	@Override
+        @Override
         public String describe() {
             return "RegisterNode(nodeId=" + nodeId + ", address=" + address + ", zone=" + zone + ")";
-        }}
+        }
+    }
 
-	/**
-     * Updates a node's status (ALIVE, SUSPECT, DEAD).
-     * Status changes that affect routing (e.g., to/from DEAD) will bump the map version.
+    /**
+     * Updates a node's status (ALIVE, SUSPECT, DEAD). Status changes that affect routing (e.g., to/from DEAD) will bump
+     * the map version.
      *
      * @param nodeId unique identifier for the node
      * @param status new status for the node
@@ -88,16 +90,16 @@ permits RaftCommand.InitShards,RaftCommand.RegisterNode,RaftCommand.SetNodeStatu
             }
         }
 
-	@Override
+        @Override
         public String describe() {
             return "SetNodeStatus(nodeId=" + nodeId + ", status=" + status + ")";
-        }}
+        }
+    }
 
-	/**
-     * Changes the replica set for a shard.
-     * This increments the shard's epoch and bumps the map version.
+    /**
+     * Changes the replica set for a shard. This increments the shard's epoch and bumps the map version.
      *
-     * @param shardId  unique identifier for the shard
+     * @param shardId unique identifier for the shard
      * @param replicas new list of node IDs that should host this shard
      */
     record SetShardReplicas(String shardId, List<String> replicas) implements RaftCommand {
@@ -111,17 +113,17 @@ permits RaftCommand.InitShards,RaftCommand.RegisterNode,RaftCommand.SetNodeStatu
             replicas = List.copyOf(replicas); // defensive copy
         }
 
-	@Override
+        @Override
         public String describe() {
             return "SetShardReplicas(shardId=" + shardId + ", replicas=" + replicas + ")";
-        }}
+        }
+    }
 
-	/**
-     * Updates the leader hint for a shard.
-     * Only valid if the provided epoch matches the shard's current epoch.
+    /**
+     * Updates the leader hint for a shard. Only valid if the provided epoch matches the shard's current epoch.
      *
-     * @param shardId      unique identifier for the shard
-     * @param epoch        expected current epoch (for validation)
+     * @param shardId unique identifier for the shard
+     * @param epoch expected current epoch (for validation)
      * @param leaderNodeId new leader node ID
      */
     record SetShardLeader(String shardId, long epoch, String leaderNodeId) implements RaftCommand {
@@ -137,14 +139,9 @@ permits RaftCommand.InitShards,RaftCommand.RegisterNode,RaftCommand.SetNodeStatu
             }
         }
 
-	@Override
+        @Override
         public String describe() {
-            return "SetShardLeader(shardId="
-                    + shardId
-                    + ", epoch="
-                    + epoch
-                    + ", leader="
-                    + leaderNodeId
-                    + ")";
+            return "SetShardLeader(shardId=" + shardId + ", epoch=" + epoch + ", leader=" + leaderNodeId + ")";
         }
-}}
+    }
+}

@@ -14,7 +14,7 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public class HealthDto {
 
-	private String status; // UP, DOWN, DEGRADED
-	private String message;
-	private long timestampMs;
+    private String status; // UP, DOWN, DEGRADED
+    private String message;
+    private long timestampMs;
 }

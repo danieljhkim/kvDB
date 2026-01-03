@@ -14,6 +14,6 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public class PartitioningConfigDto {
 
-	private int numShards;
-	private int replicationFactor;
+    private int numShards;
+    private int replicationFactor;
 }

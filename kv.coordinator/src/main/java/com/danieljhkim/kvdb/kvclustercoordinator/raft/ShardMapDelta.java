@@ -1,21 +1,15 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.raft;
 
+import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
 import java.util.List;
 
-import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
-
 /**
- * Represents a change event in the shard map.
- * Used to notify watchers (e.g., gateways) of updates.
+ * Represents a change event in the shard map. Used to notify watchers (e.g., gateways) of updates.
  *
- * @param newMapVersion
- *            the new map version after this change
- * @param changedShards
- *            list of shard IDs that were modified
- * @param changedNodes
- *            list of node IDs that were modified
- * @param fullState
- *            optional full state snapshot (may be null if only delta is needed)
+ * @param newMapVersion the new map version after this change
+ * @param changedShards list of shard IDs that were modified
+ * @param changedNodes list of node IDs that were modified
+ * @param fullState optional full state snapshot (may be null if only delta is needed)
  */
 public record ShardMapDelta(
         long newMapVersion, List<String> changedShards, List<String> changedNodes, ShardMapSnapshot fullState) {

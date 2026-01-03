@@ -14,6 +14,6 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public class KeyRangeDto {
 
-	private byte[] startKey; // inclusive
-	private byte[] endKey; // exclusive
+    private byte[] startKey; // inclusive
+    private byte[] endKey; // exclusive
 }

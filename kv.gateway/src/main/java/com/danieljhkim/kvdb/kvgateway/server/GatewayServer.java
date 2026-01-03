@@ -1,11 +1,5 @@
 package com.danieljhkim.kvdb.kvgateway.server;
 
-import java.io.IOException;
-import java.util.concurrent.TimeUnit;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import com.danieljhkim.kvdb.kvcommon.grpc.GlobalExceptionInterceptor;
 import com.danieljhkim.kvdb.kvgateway.cache.NodeFailureTracker;
 import com.danieljhkim.kvdb.kvgateway.cache.ShardMapCache;
@@ -16,144 +10,142 @@ import com.danieljhkim.kvdb.kvgateway.client.WatchShardMapClient;
 import com.danieljhkim.kvdb.kvgateway.retry.RequestExecutor;
 import com.danieljhkim.kvdb.kvgateway.retry.RetryPolicy;
 import com.danieljhkim.kvdb.kvgateway.service.KvGatewayServiceImpl;
-
 import io.grpc.Server;
 import io.grpc.ServerInterceptors;
 import io.grpc.ServerServiceDefinition;
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
+import java.io.IOException;
+import java.util.concurrent.TimeUnit;
 import lombok.Getter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
- * gRPC server for the KvGateway service.
- * Manages the lifecycle of the gateway components including
- * streaming shard map updates from the coordinator.
+ * gRPC server for the KvGateway service. Manages the lifecycle of the gateway components including streaming shard map
+ * updates from the coordinator.
  */
 public class GatewayServer {
 
-	private static final Logger logger = LoggerFactory.getLogger(GatewayServer.class);
+    private static final Logger logger = LoggerFactory.getLogger(GatewayServer.class);
 
-	@Getter
-	private final int port;
-	private final Server grpcServer;
-	private final CoordinatorClient coordinatorClient;
-	private final NodeConnectionPool nodePool;
-	private final WatchShardMapClient watchShardMapClient;
-	private final NodeFailureTracker failureTracker;
-	private final ShardRoutingFailureTracker shardRoutingFailureTracker;
-	private final RequestExecutor requestExecutor;
+    @Getter
+    private final int port;
 
-	@Getter
-	private final ShardMapCache shardMapCache;
+    private final Server grpcServer;
+    private final CoordinatorClient coordinatorClient;
+    private final NodeConnectionPool nodePool;
+    private final WatchShardMapClient watchShardMapClient;
+    private final NodeFailureTracker failureTracker;
+    private final ShardRoutingFailureTracker shardRoutingFailureTracker;
+    private final RequestExecutor requestExecutor;
 
-	public GatewayServer(int port, String coordinatorHost, int coordinatorPort) {
-		this.port = port;
+    @Getter
+    private final ShardMapCache shardMapCache;
 
-		// Initialize core components
-		this.coordinatorClient = new CoordinatorClient(coordinatorHost, coordinatorPort);
-		this.nodePool = new NodeConnectionPool();
-		this.shardMapCache = new ShardMapCache(coordinatorClient);
+    public GatewayServer(int port, String coordinatorHost, int coordinatorPort) {
+        this.port = port;
 
-		// Initialize retry infrastructure
-		this.failureTracker = new NodeFailureTracker();
-		this.shardRoutingFailureTracker = new ShardRoutingFailureTracker();
-		RetryPolicy retryPolicy = RetryPolicy.defaults();
-		this.requestExecutor = new RequestExecutor(
-				shardMapCache, nodePool, failureTracker, shardRoutingFailureTracker, retryPolicy, 5000);
+        // Initialize core components
+        this.coordinatorClient = new CoordinatorClient(coordinatorHost, coordinatorPort);
+        this.nodePool = new NodeConnectionPool();
+        this.shardMapCache = new ShardMapCache(coordinatorClient);
 
-		// Create streaming client for real-time shard map updates
-		// The ShardMapCache implements Consumer<ShardMapDelta> to receive updates
-		this.watchShardMapClient = new WatchShardMapClient(
-				coordinatorHost, coordinatorPort, shardMapCache);
+        // Initialize retry infrastructure
+        this.failureTracker = new NodeFailureTracker();
+        this.shardRoutingFailureTracker = new ShardRoutingFailureTracker();
+        RetryPolicy retryPolicy = RetryPolicy.defaults();
+        this.requestExecutor = new RequestExecutor(
+                shardMapCache, nodePool, failureTracker, shardRoutingFailureTracker, retryPolicy, 5000);
 
-		// Create the service with retry-enabled executor
-		KvGatewayServiceImpl gatewayService = new KvGatewayServiceImpl(shardMapCache, requestExecutor);
-		ServerServiceDefinition interceptedService = ServerInterceptors.intercept(gatewayService,
-				new GlobalExceptionInterceptor());
+        // Create streaming client for real-time shard map updates
+        // The ShardMapCache implements Consumer<ShardMapDelta> to receive updates
+        this.watchShardMapClient = new WatchShardMapClient(coordinatorHost, coordinatorPort, shardMapCache);
 
-		// Build the gRPC server
-		this.grpcServer = NettyServerBuilder.forPort(port)
-				.addService(interceptedService)
-				.build();
+        // Create the service with retry-enabled executor
+        KvGatewayServiceImpl gatewayService = new KvGatewayServiceImpl(shardMapCache, requestExecutor);
+        ServerServiceDefinition interceptedService =
+                ServerInterceptors.intercept(gatewayService, new GlobalExceptionInterceptor());
 
-		logger.info("GatewayServer initialized on port {}, coordinator: {}:{}", port, coordinatorHost, coordinatorPort);
-	}
+        // Build the gRPC server
+        this.grpcServer =
+                NettyServerBuilder.forPort(port).addService(interceptedService).build();
 
-	/**
-	 * Starts the gateway server.
-	 * Fetches the initial shard map, starts streaming updates, and starts the gRPC
-	 * server.
-	 */
-	public void start() throws IOException {
-		logger.info("Starting GatewayServer...");
+        logger.info("GatewayServer initialized on port {}, coordinator: {}:{}", port, coordinatorHost, coordinatorPort);
+    }
 
-		// Fetch initial shard map from coordinator via polling
-		long initialVersion = 0;
-		try {
-			boolean refreshed = shardMapCache.refresh();
-			if (refreshed) {
-				initialVersion = shardMapCache.getMapVersion();
-				logger.info("Initial shard map loaded successfully, version: {}", initialVersion);
-			} else {
-				logger.warn("Could not load initial shard map from coordinator. "
-						+ "Gateway will start but may fail requests until coordinator is available.");
-			}
-		} catch (Exception e) {
-			logger.warn("Failed to load initial shard map, continuing anyway", e);
-		}
+    /**
+     * Starts the gateway server. Fetches the initial shard map, starts streaming updates, and starts the gRPC server.
+     */
+    public void start() throws IOException {
+        logger.info("Starting GatewayServer...");
 
-		// Start streaming client for real-time updates
-		// Pass the initial version so we don't re-fetch what we already have
-		try {
-			watchShardMapClient.start(initialVersion);
-			logger.info("Started WatchShardMap streaming client from version {}", initialVersion);
-		} catch (Exception e) {
-			logger.warn("Failed to start WatchShardMap client, will rely on polling", e);
-		}
+        // Fetch initial shard map from coordinator via polling
+        long initialVersion = 0;
+        try {
+            boolean refreshed = shardMapCache.refresh();
+            if (refreshed) {
+                initialVersion = shardMapCache.getMapVersion();
+                logger.info("Initial shard map loaded successfully, version: {}", initialVersion);
+            } else {
+                logger.warn("Could not load initial shard map from coordinator. "
+                        + "Gateway will start but may fail requests until coordinator is available.");
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to load initial shard map, continuing anyway", e);
+        }
 
-		// Start gRPC server
-		grpcServer.start();
-		logger.info("GatewayServer started on port {}", port);
-	}
+        // Start streaming client for real-time updates
+        // Pass the initial version so we don't re-fetch what we already have
+        try {
+            watchShardMapClient.start(initialVersion);
+            logger.info("Started WatchShardMap streaming client from version {}", initialVersion);
+        } catch (Exception e) {
+            logger.warn("Failed to start WatchShardMap client, will rely on polling", e);
+        }
 
-	/**
-	 * Blocks until the server shuts down.
-	 */
-	public void awaitTermination() throws InterruptedException {
-		grpcServer.awaitTermination();
-	}
+        // Start gRPC server
+        grpcServer.start();
+        logger.info("GatewayServer started on port {}", port);
+    }
 
-	/**
-	 * Shuts down the gateway server gracefully.
-	 */
-	public void shutdown() throws InterruptedException {
-		logger.info("Shutting down GatewayServer...");
+    /**
+     * Blocks until the server shuts down.
+     */
+    public void awaitTermination() throws InterruptedException {
+        grpcServer.awaitTermination();
+    }
 
-		// Stop streaming client first (prevents new updates during shutdown)
-		watchShardMapClient.shutdown();
+    /**
+     * Shuts down the gateway server gracefully.
+     */
+    public void shutdown() throws InterruptedException {
+        logger.info("Shutting down GatewayServer...");
 
-		// Shutdown gRPC server
-		grpcServer.shutdown();
-		if (!grpcServer.awaitTermination(10, TimeUnit.SECONDS)) {
-			logger.warn("gRPC server did not terminate in time, forcing shutdown");
-			grpcServer.shutdownNow();
-		}
+        // Stop streaming client first (prevents new updates during shutdown)
+        watchShardMapClient.shutdown();
 
-		// Close node connections
-		nodePool.closeAll();
+        // Shutdown gRPC server
+        grpcServer.shutdown();
+        if (!grpcServer.awaitTermination(10, TimeUnit.SECONDS)) {
+            logger.warn("gRPC server did not terminate in time, forcing shutdown");
+            grpcServer.shutdownNow();
+        }
 
-		// Close coordinator client
-		coordinatorClient.shutdown();
+        // Close node connections
+        nodePool.closeAll();
 
-		logger.info("GatewayServer shutdown complete");
-	}
+        // Close coordinator client
+        coordinatorClient.shutdown();
 
-	/**
-	 * Checks if the streaming client is connected to the coordinator.
-	 *
-	 * @return true if connected to coordinator streaming
-	 */
-	public boolean isStreamingConnected() {
-		return watchShardMapClient.isConnected();
-	}
+        logger.info("GatewayServer shutdown complete");
+    }
 
+    /**
+     * Checks if the streaming client is connected to the coordinator.
+     *
+     * @return true if connected to coordinator streaming
+     */
+    public boolean isStreamingConnected() {
+        return watchShardMapClient.isConnected();
+    }
 }

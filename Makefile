@@ -67,15 +67,6 @@ wipe-data:
 
 
 # -----------------
-# docker commands
-# -----------------
-
-docker-build:
-    docker build -t kvcoordinator:latest -f docker/Coordinator.Dockerfile .
-    docker build -t kvnode:latest -f docker/Node.Dockerfile .
-    docker build -t kvgateway:latest -f docker/Gateway.Dockerfile .
-
-# -----------------
 # Format and lint
 # -----------------
 format:

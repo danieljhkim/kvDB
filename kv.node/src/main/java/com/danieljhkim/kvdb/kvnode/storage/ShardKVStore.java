@@ -106,7 +106,8 @@ public class ShardKVStore {
 
 	public Map<String, String> getMultiple(List<String> keys) {
 		Objects.requireNonNull(keys, "keys");
-		Map<String, String> result = new HashMap<>(keys.size());
+		// Pre-size HashMap to avoid rehashing - account for load factor
+		Map<String, String> result = new HashMap<>((int) (keys.size() / 0.75f) + 1);
 		for (String key : keys) {
 			String value = store.get(key);
 			if (value != null) {

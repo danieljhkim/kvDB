@@ -1,5 +1,7 @@
 package com.danieljhkim.kvdb.kvadmin.client;
 
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 import org.slf4j.Logger;
@@ -21,6 +23,7 @@ public class NodeAdminClient {
 	private static final Logger logger = LoggerFactory.getLogger(NodeAdminClient.class);
 
 	private final long timeoutSeconds;
+	private final Map<String, ManagedChannel> channels = new ConcurrentHashMap<>();
 
 	public NodeAdminClient(long timeout, TimeUnit timeUnit) {
 		this.timeoutSeconds = timeUnit.toSeconds(timeout);
@@ -34,17 +37,28 @@ public class NodeAdminClient {
 	 * @return true if node responds, false otherwise
 	 */
 	public boolean ping(String nodeAddress) {
-		String[] parts = nodeAddress.split(":");
-		if (parts.length != 2) {
-			throw new IllegalArgumentException("Invalid node address format: " + nodeAddress);
-		}
-
-		String host = parts[0];
-		int port = Integer.parseInt(parts[1]);
-
-		ManagedChannel channel = ManagedChannelBuilder.forAddress(host, port)
-				.usePlaintext()
-				.build();
+		// Reuse channel instead of creating new one on each ping
+		ManagedChannel channel = channels.computeIfAbsent(nodeAddress, addr -> {
+			// Parse host and port inside lambda to avoid race conditions
+			int colonIndex = addr.indexOf(':');
+			if (colonIndex == -1) {
+				throw new IllegalArgumentException("Invalid node address format (missing ':'): " + addr);
+			}
+			
+			String host = addr.substring(0, colonIndex);
+			String portStr = addr.substring(colonIndex + 1);
+			int port;
+			try {
+				port = Integer.parseInt(portStr);
+			} catch (NumberFormatException e) {
+				throw new IllegalArgumentException("Invalid port in node address: " + addr, e);
+			}
+			
+			logger.debug("Creating gRPC channel to node: {}", addr);
+			return ManagedChannelBuilder.forAddress(host, port)
+					.usePlaintext()
+					.build();
+		});
 
 		try {
 			KVServiceGrpc.KVServiceBlockingStub stub = KVServiceGrpc.newBlockingStub(channel);
@@ -56,8 +70,6 @@ public class NodeAdminClient {
 		} catch (StatusRuntimeException e) {
 			logger.warn("Failed to ping node: {}", nodeAddress, e);
 			return false;
-		} finally {
-			channel.shutdown();
 		}
 	}
 
@@ -70,5 +82,23 @@ public class NodeAdminClient {
 	public void triggerCompaction(String nodeAddress) {
 		// TODO: Implement compaction RPC when available in kvstore.proto
 		logger.info("Triggering compaction on node: {}", nodeAddress);
+	}
+
+	/**
+	 * Close all channels gracefully. Should be called on shutdown.
+	 */
+	public void close() {
+		logger.info("Closing all node admin client channels");
+		for (Map.Entry<String, ManagedChannel> entry : channels.entrySet()) {
+			try {
+				entry.getValue().shutdown().awaitTermination(5, TimeUnit.SECONDS);
+				logger.debug("Closed channel to {}", entry.getKey());
+			} catch (InterruptedException e) {
+				logger.warn("Interrupted while closing channel to {}", entry.getKey());
+				entry.getValue().shutdownNow();
+				Thread.currentThread().interrupt();
+			}
+		}
+		channels.clear();
 	}
 }

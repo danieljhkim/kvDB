@@ -7,6 +7,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -329,11 +330,7 @@ public class ShardMapCache implements Consumer<ShardMapDelta> {
 		if (key == null || key.length == 0) {
 			return 0;
 		}
-		// Simple hash using Arrays.hashCode equivalent
-		int result = 1;
-		for (byte b : key) {
-			result = 31 * result + b;
-		}
-		return result;
+		// Use Arrays.hashCode for better performance and standard implementation
+		return Arrays.hashCode(key);
 	}
 }

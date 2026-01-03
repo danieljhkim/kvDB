@@ -40,9 +40,20 @@ public class NodeConnectionPool {
 
 	private ManagedChannel getOrCreateChannel(String nodeAddress) {
 		return channels.computeIfAbsent(nodeAddress, addr -> {
-			String[] parts = addr.split(":");
-			String host = parts[0];
-			int port = Integer.parseInt(parts[1]);
+			// Use indexOf instead of split for better performance
+			int colonIndex = addr.indexOf(':');
+			if (colonIndex == -1) {
+				throw new IllegalArgumentException("Invalid node address format (missing ':'): " + addr);
+			}
+			
+			String host = addr.substring(0, colonIndex);
+			String portStr = addr.substring(colonIndex + 1);
+			int port;
+			try {
+				port = Integer.parseInt(portStr);
+			} catch (NumberFormatException e) {
+				throw new IllegalArgumentException("Invalid port in node address: " + addr, e);
+			}
 
 			// Register DNS resolver to bypass the resolver selection issue
 			io.grpc.internal.DnsNameResolverProvider provider = new io.grpc.internal.DnsNameResolverProvider();

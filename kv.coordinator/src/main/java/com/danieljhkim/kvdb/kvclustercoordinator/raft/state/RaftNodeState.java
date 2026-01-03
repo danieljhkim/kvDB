@@ -169,12 +169,30 @@ public class RaftNodeState {
     }
 
     /**
+     * Advances the commit index. Alias for updateCommitIndex.
+     *
+     * @param newCommitIndex the new commit index
+     */
+    public void advanceCommitIndex(long newCommitIndex) {
+        updateCommitIndex(newCommitIndex);
+    }
+
+    /**
      * Updates the last applied index.
      *
      * @param newLastApplied the new last applied index
      */
     public void updateLastApplied(long newLastApplied) {
         lastApplied.set(newLastApplied);
+    }
+
+    /**
+     * Advances the last applied index. Alias for updateLastApplied.
+     *
+     * @param newLastApplied the new last applied index
+     */
+    public void advanceLastApplied(long newLastApplied) {
+        updateLastApplied(newLastApplied);
     }
 
     /**
@@ -202,6 +220,15 @@ public class RaftNodeState {
             log.info("[{}] Transitioned from {} to FOLLOWER in term {} (leader: {})", nodeId, oldRole, term, leaderId);
             clearLeaderState();
         }
+    }
+
+    /**
+     * Transitions to FOLLOWER state. Alias for becomeFollower with current term.
+     *
+     * @param leaderId the current leader (may be null)
+     */
+    public void transitionToFollower(String leaderId) {
+        becomeFollower(currentTerm.get(), leaderId);
     }
 
     /**
@@ -253,6 +280,16 @@ public class RaftNodeState {
      */
     public void setMatchIndex(String followerId, long newMatchIndex) {
         leaderState.setMatchIndex(followerId, newMatchIndex);
+    }
+
+    /**
+     * Computes the highest log index replicated on a majority of servers.
+     *
+     * @param clusterSize the total number of nodes in the cluster
+     * @return the highest index replicated on majority
+     */
+    public long computeMajorityMatchIndex(int clusterSize) {
+        return leaderState.computeMajorityMatchIndex(clusterSize);
     }
 
     @Override

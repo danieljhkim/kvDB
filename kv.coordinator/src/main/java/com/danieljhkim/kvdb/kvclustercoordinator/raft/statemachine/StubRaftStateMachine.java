@@ -1,5 +1,6 @@
-package com.danieljhkim.kvdb.kvclustercoordinator.raft;
+package com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine;
 
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftCommand;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ClusterState;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapDelta;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;

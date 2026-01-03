@@ -2,7 +2,7 @@ package com.danieljhkim.kvdb.kvclustercoordinator.service;
 
 import com.danieljhkim.kvdb.kvclustercoordinator.converter.ProtoConverter;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftCommand;
-import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftStateMachine;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine.RaftStateMachine;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.NodeRecord;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardRecord;

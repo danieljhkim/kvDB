@@ -1,7 +1,7 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.health;
 
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftCommand;
-import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftStateMachine;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine.RaftStateMachine;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.NodeRecord;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
 import com.kvdb.proto.kvstore.KVServiceGrpc;

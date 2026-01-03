@@ -1,6 +1,6 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.server;
 
-import com.danieljhkim.kvdb.kvclustercoordinator.raft.StubRaftStateMachine;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine.StubRaftStateMachine;
 import com.danieljhkim.kvdb.kvclustercoordinator.service.CoordinatorServiceImpl;
 import com.danieljhkim.kvdb.kvclustercoordinator.service.WatcherManager;
 import com.danieljhkim.kvdb.kvcommon.grpc.GlobalExceptionInterceptor;

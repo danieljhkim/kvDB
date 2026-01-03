@@ -23,6 +23,9 @@ public class WALManager {
 	/** Path to the WAL file. */
 	private Path walFile;
 
+	/** Reusable writer for better performance - avoids opening/closing on every write */
+	private BufferedWriter writer;
+
 	public WALManager(String fileName) {
 		setWalFileInternal(fileName);
 		logger.info("WALManager initialized with file: {}", fileName);
@@ -41,19 +44,23 @@ public class WALManager {
 		}
 		try {
 			ensureParentDirectoryExists();
-			try (BufferedWriter writer = Files.newBufferedWriter(
-					walFile, StandardOpenOption.CREATE, StandardOpenOption.APPEND)) {
-				writer.write(operation);
-				writer.write(' ');
-				writer.write(key);
-				writer.write(' ');
-				writer.write(value != null ? value : "");
-				writer.write('\n');
-
-				logger.debug("Operation logged: {} {} {}", operation, key, value);
+			if (writer == null) {
+				writer = Files.newBufferedWriter(
+						walFile, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
 			}
+			writer.write(operation);
+			writer.write(' ');
+			writer.write(key);
+			writer.write(' ');
+			writer.write(value != null ? value : "");
+			writer.write('\n');
+			writer.flush(); // Flush to ensure durability
+
+			logger.debug("Operation logged: {} {} {}", operation, key, value);
 		} catch (IOException e) {
 			logger.error("Failed to log operation: {} {} {}", operation, key, value, e);
+			// Close and null out the writer on error so it can be recreated on next attempt
+			closeWriter();
 		}
 	}
 
@@ -80,7 +87,7 @@ public class WALManager {
 			String line;
 			int count = 0;
 			while ((line = reader.readLine()) != null) {
-				String[] parts = line.trim().split(" ", 3);
+				String[] parts = parseLine(line.trim());
 				ops.add(parts);
 				count++;
 			}
@@ -90,6 +97,31 @@ public class WALManager {
 		}
 
 		return ops;
+	}
+
+	/**
+	 * Parse a WAL line more efficiently than String.split().
+	 * Format: "OP KEY VALUE"
+	 */
+	private String[] parseLine(String line) {
+		int firstSpace = line.indexOf(' ');
+		if (firstSpace == -1) {
+			return new String[] { line };
+		}
+		
+		int secondSpace = line.indexOf(' ', firstSpace + 1);
+		if (secondSpace == -1) {
+			return new String[] { 
+				line.substring(0, firstSpace),
+				line.substring(firstSpace + 1)
+			};
+		}
+		
+		return new String[] {
+			line.substring(0, firstSpace),
+			line.substring(firstSpace + 1, secondSpace),
+			line.substring(secondSpace + 1)
+		};
 	}
 
 	/**
@@ -109,7 +141,7 @@ public class WALManager {
 			String line;
 			int count = 0;
 			while ((line = reader.readLine()) != null) {
-				String[] parts = line.trim().split(" ", 3);
+				String[] parts = parseLine(line.trim());
 				if (parts.length < 2) {
 					continue;
 				}
@@ -129,6 +161,8 @@ public class WALManager {
 
 	/** Delete the WAL file from disk. */
 	public synchronized void clear() {
+		// Close writer before clearing
+		closeWriter();
 		try {
 			if (Files.deleteIfExists(walFile)) {
 				logger.info("WAL file cleared: {}", walFile);
@@ -146,6 +180,8 @@ public class WALManager {
 	 * simply points to a new file.
 	 */
 	public synchronized void setWalFile(String fileName) {
+		// Close existing writer before changing file
+		closeWriter();
 		setWalFileInternal(fileName);
 		logger.info("WALManager file set to: {}", fileName);
 	}
@@ -167,11 +203,25 @@ public class WALManager {
 	}
 
 	/**
-	 * For symmetry with other persistence components; currently a no-op. Callers
-	 * may invoke this
-	 * during shutdown.
+	 * For symmetry with other persistence components. Closes the writer if open.
+	 * Callers should invoke this during shutdown.
 	 */
-	public void close() {
-		// No long-lived resources to close; kept for future extensibility.
+	public synchronized void close() {
+		closeWriter();
+	}
+
+	/**
+	 * Helper to close the writer safely.
+	 */
+	private void closeWriter() {
+		if (writer != null) {
+			try {
+				writer.close();
+			} catch (IOException e) {
+				logger.warn("Error closing WAL writer", e);
+			} finally {
+				writer = null;
+			}
+		}
 	}
 }

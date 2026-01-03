@@ -37,12 +37,16 @@ public class Validation {
 	 */
 	public static void validateNodeAddress(String address) {
 		requireNonEmpty(address, "address");
-		String[] parts = address.split(":");
-		if (parts.length != 2) {
-			throw new IllegalArgumentException("Invalid node address format: " + address);
+		
+		// Use indexOf instead of split for better performance
+		int colonIndex = address.indexOf(':');
+		if (colonIndex == -1) {
+			throw new IllegalArgumentException("Invalid node address format (missing ':'): " + address);
 		}
+		
+		String portStr = address.substring(colonIndex + 1);
 		try {
-			int port = Integer.parseInt(parts[1]);
+			int port = Integer.parseInt(portStr);
 			if (port <= 0 || port > 65535) {
 				throw new IllegalArgumentException("Invalid port: " + port);
 			}

@@ -37,13 +37,13 @@ public class Validation {
 	 */
 	public static void validateNodeAddress(String address) {
 		requireNonEmpty(address, "address");
-		
+
 		// Use indexOf instead of split for better performance
 		int colonIndex = address.indexOf(':');
 		if (colonIndex == -1) {
 			throw new IllegalArgumentException("Invalid node address format (missing ':'): " + address);
 		}
-		
+
 		String portStr = address.substring(colonIndex + 1);
 		try {
 			int port = Integer.parseInt(portStr);

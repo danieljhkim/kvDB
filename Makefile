@@ -75,9 +75,6 @@ docker-build:
     docker build -t kvnode:latest -f docker/Node.Dockerfile .
     docker build -t kvgateway:latest -f docker/Gateway.Dockerfile .
 
-docker-compose:
-    docker-compose up --build
-
 # -----------------
 # Format and lint
 # -----------------

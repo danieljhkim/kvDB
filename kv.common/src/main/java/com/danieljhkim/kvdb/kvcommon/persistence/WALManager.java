@@ -23,7 +23,10 @@ public class WALManager {
 	/** Path to the WAL file. */
 	private Path walFile;
 
-	/** Reusable writer for better performance - avoids opening/closing on every write */
+	/**
+	 * Reusable writer for better performance - avoids opening/closing on every
+	 * write
+	 */
 	private BufferedWriter writer;
 
 	public WALManager(String fileName) {
@@ -103,28 +106,28 @@ public class WALManager {
 	 * Parse a WAL line more efficiently than String.split().
 	 * Format: "OP KEY VALUE" where VALUE may be empty.
 	 * Returns: String array with 1, 2, or 3 elements depending on the line content:
-	 *   - [OP] if no spaces
-	 *   - [OP, KEY] if one space
-	 *   - [OP, KEY, VALUE] if two or more spaces (VALUE may contain spaces)
+	 * - [OP] if no spaces
+	 * - [OP, KEY] if one space
+	 * - [OP, KEY, VALUE] if two or more spaces (VALUE may contain spaces)
 	 */
 	private String[] parseLine(String line) {
 		int firstSpace = line.indexOf(' ');
 		if (firstSpace == -1) {
 			return new String[] { line };
 		}
-		
+
 		int secondSpace = line.indexOf(' ', firstSpace + 1);
 		if (secondSpace == -1) {
-			return new String[] { 
-				line.substring(0, firstSpace),
-				line.substring(firstSpace + 1)
+			return new String[] {
+					line.substring(0, firstSpace),
+					line.substring(firstSpace + 1)
 			};
 		}
-		
+
 		return new String[] {
-			line.substring(0, firstSpace),
-			line.substring(firstSpace + 1, secondSpace),
-			line.substring(secondSpace + 1)
+				line.substring(0, firstSpace),
+				line.substring(firstSpace + 1, secondSpace),
+				line.substring(secondSpace + 1)
 		};
 	}
 

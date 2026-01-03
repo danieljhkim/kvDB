@@ -45,7 +45,7 @@ public class NodeConnectionPool {
 			if (colonIndex == -1) {
 				throw new IllegalArgumentException("Invalid node address format (missing ':'): " + addr);
 			}
-			
+
 			String host = addr.substring(0, colonIndex);
 			String portStr = addr.substring(colonIndex + 1);
 			int port;

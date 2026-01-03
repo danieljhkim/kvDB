@@ -15,6 +15,7 @@ import com.danieljhkim.kvdb.proto.raft.AppendEntriesRequest;
 import com.danieljhkim.kvdb.proto.raft.AppendEntriesResponse;
 import com.danieljhkim.kvdb.proto.raft.RequestVoteRequest;
 import com.danieljhkim.kvdb.proto.raft.RequestVoteResponse;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
@@ -42,6 +43,8 @@ public class RaftNode {
 
     private final String nodeId;
     private final RaftConfiguration config;
+
+    @Getter
     private final RaftNodeState state;
     private final RaftPersistentStateStore persistentStore;
     private final RaftStateMachine stateMachine;
@@ -73,7 +76,7 @@ public class RaftNode {
      *
      * @param nodeId the ID of this node
      * @param config the Raft configuration
-     * @param log the Raft log implementation
+     * @param raftLog the Raft log implementation
      * @param persistentStore the persistent state store
      * @param stateMachine the state machine to apply committed entries to
      * @param voteRpcClient function to send RequestVote RPCs
@@ -82,7 +85,7 @@ public class RaftNode {
     public RaftNode(
             String nodeId,
             RaftConfiguration config,
-            RaftLog log,
+            RaftLog raftLog,
             RaftPersistentStateStore persistentStore,
             RaftStateMachine stateMachine,
             BiFunction<String, RequestVoteRequest, CompletableFuture<RequestVoteResponse>> voteRpcClient,
@@ -96,7 +99,7 @@ public class RaftNode {
         this.appendEntriesRpcClient = appendEntriesRpcClient;
 
         // Initialize state
-        this.state = loadOrCreateState(log, persistentStore);
+        this.state = loadOrCreateState(raftLog, persistentStore);
 
         // Create executor
         this.scheduler = Executors.newScheduledThreadPool(
@@ -295,13 +298,6 @@ public class RaftNode {
     }
 
     /**
-     * Gets the Raft node state (for testing/monitoring).
-     */
-    public RaftNodeState getState() {
-        return state;
-    }
-
-    /**
      * Called when election timeout expires.
      */
     private void onElectionTimeout() {
@@ -397,18 +393,18 @@ public class RaftNode {
     /**
      * Loads state from persistent storage or creates new state.
      */
-    private RaftNodeState loadOrCreateState(RaftLog log, RaftPersistentStateStore store) {
+    private RaftNodeState loadOrCreateState(RaftLog raftLog, RaftPersistentStateStore store) {
         try {
             var persistedState = store.load();
             return new RaftNodeState(
                     nodeId,
-                    log,
-                    persistedState.currentTerm(),
-                    persistedState.votedFor()
+                    raftLog,
+                    persistedState.getCurrentTerm(),
+                    persistedState.getVotedFor()
             );
         } catch (IOException e) {
             log.warn("[{}] Failed to load persistent state, starting fresh: {}", nodeId, e.getMessage());
-            return new RaftNodeState(nodeId, log);
+            return new RaftNodeState(nodeId, raftLog);
         }
     }
 }

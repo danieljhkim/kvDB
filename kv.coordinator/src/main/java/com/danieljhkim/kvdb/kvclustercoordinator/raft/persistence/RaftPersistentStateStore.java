@@ -1,5 +1,6 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence;
 
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
@@ -100,6 +101,7 @@ public class RaftPersistentStateStore {
     /**
      * Represents the persistent Raft state loaded from disk.
      */
+    @Getter
     public static class PersistentState {
 
         private final long currentTerm;
@@ -108,14 +110,6 @@ public class RaftPersistentStateStore {
         public PersistentState(long currentTerm, String votedFor) {
             this.currentTerm = currentTerm;
             this.votedFor = votedFor;
-        }
-
-        public long getCurrentTerm() {
-            return currentTerm;
-        }
-
-        public String getVotedFor() {
-            return votedFor;
         }
 
         @Override

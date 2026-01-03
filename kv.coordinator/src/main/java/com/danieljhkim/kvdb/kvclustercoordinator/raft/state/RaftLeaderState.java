@@ -1,9 +1,8 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.raft.state;
 
-import lombok.extern.slf4j.Slf4j;
-
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Manages leader-specific volatile state.

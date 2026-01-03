@@ -29,10 +29,6 @@ public class RaftStateMachineApplier {
     private final RaftStateMachine stateMachine;
     private final Executor applyExecutor;
 
-    /**
-     * -- GETTER --
-     *  Returns true if the applier is running.
-     */
     @Getter
     private volatile boolean running = false;
 
@@ -98,10 +94,8 @@ public class RaftStateMachineApplier {
             }
 
             RaftLog raftLog = state.getLog();
-
             try {
                 List<RaftLogEntry> entriesToApply = getEntriesToApply(raftLog, lastApplied + 1, commitIndex);
-
                 for (RaftLogEntry entry : entriesToApply) {
                     applyEntry(entry);
                 }

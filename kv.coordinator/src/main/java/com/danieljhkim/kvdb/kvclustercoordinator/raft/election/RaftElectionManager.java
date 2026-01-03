@@ -5,9 +5,6 @@ import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftPersistent
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.state.RaftNodeState;
 import com.danieljhkim.kvdb.proto.raft.RequestVoteRequest;
 import com.danieljhkim.kvdb.proto.raft.RequestVoteResponse;
-import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
-
 import java.io.IOException;
 import java.util.Map;
 import java.util.Objects;
@@ -16,6 +13,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiFunction;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Manages the election process for Raft consensus.

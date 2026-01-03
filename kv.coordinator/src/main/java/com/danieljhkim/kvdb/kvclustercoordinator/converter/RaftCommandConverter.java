@@ -1,5 +1,6 @@
-package com.danieljhkim.kvdb.kvclustercoordinator.raft;
+package com.danieljhkim.kvdb.kvclustercoordinator.converter;
 
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftCommand;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.NodeRecord;
 import com.google.protobuf.InvalidProtocolBufferException;
 

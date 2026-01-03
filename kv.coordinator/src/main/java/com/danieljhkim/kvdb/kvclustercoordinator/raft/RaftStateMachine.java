@@ -1,5 +1,6 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.raft;
 
+import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapDelta;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;

@@ -1,5 +1,7 @@
-package com.danieljhkim.kvdb.kvclustercoordinator.raft;
+package com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence;
 
+import com.danieljhkim.kvdb.kvclustercoordinator.converter.RaftCommandConverter;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftCommand;
 import com.google.protobuf.InvalidProtocolBufferException;
 
 public record RaftLogEntry(long index, long term, long timestamp, RaftCommand command) {

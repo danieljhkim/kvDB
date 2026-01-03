@@ -1,6 +1,10 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.raft;
 
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.FileBasedRaftLog;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLog;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLogEntry;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ClusterState;
+import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapDelta;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,7 +30,6 @@ public class RaftStateMachineImpl implements RaftStateMachine {
     private final AtomicLong currentIndex = new AtomicLong(0);
     private final AtomicLong currentTerm = new AtomicLong(0);
 
-
     public RaftStateMachineImpl(Path logPath) throws IOException {
         this.state = new ClusterState();
         this.snapshotRef = new AtomicReference<>(ShardMapSnapshot.empty());
@@ -42,11 +45,8 @@ public class RaftStateMachineImpl implements RaftStateMachine {
             synchronized (writeLock) {
                 try {
                     // Persist to log first
-                    RaftLogEntry entry = RaftLogEntry.create(
-                        currentIndex.incrementAndGet(),
-                        currentTerm.get(),
-                        command
-                    );
+                    RaftLogEntry entry =
+                            RaftLogEntry.create(currentIndex.incrementAndGet(), currentTerm.get(), command);
                     raftLog.append(entry);
 
                     // Then apply to state machine

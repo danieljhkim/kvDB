@@ -1,0 +1,142 @@
+syntax = "proto3";
+
+package kvdb.raft;
+
+option java_package = "com.danieljhkim.kvdb.proto.raft";
+option java_outer_classname = "RaftRpcProto";
+option java_multiple_files = true;
+
+import "raft/raft_command.proto";
+
+
+// ========================================
+// Request Vote RPC (Leader Election)
+// ========================================
+
+message RequestVoteRequest {
+  int64 term = 1;                    // Candidate's term
+  string candidate_id = 2;           // Candidate requesting vote
+  int64 last_log_index = 3;          // Index of candidate's last log entry
+  int64 last_log_term = 4;           // Term of candidate's last log entry
+}
+
+message RequestVoteResponse {
+  int64 term = 1;                    // Current term, for candidate to update itself
+  bool vote_granted = 2;             // True means candidate received vote
+  string voter_id = 3;               // ID of the node that voted (for debugging)
+}
+
+// ========================================
+// AppendEntries RPC (Heartbeat & Log Replication)
+// ========================================
+
+message AppendEntriesRequest {
+  int64 term = 1;                    // Leader's term
+  string leader_id = 2;              // So follower can redirect clients
+  int64 prev_log_index = 3;          // Index of log entry immediately preceding new ones
+  int64 prev_log_term = 4;           // Term of prev_log_index entry
+  repeated RaftLogEntry entries = 5; // Log entries to store (empty for heartbeat)
+  int64 leader_commit = 6;           // Leader's commit index
+}
+
+message AppendEntriesResponse {
+  int64 term = 1;                    // Current term, for leader to update itself
+  bool success = 2;                  // True if follower contained entry matching prev_log_index and prev_log_term
+  int64 match_index = 3;             // Highest log index known to be replicated (for leader tracking)
+  int64 conflict_index = 4;          // For fast log backtracking on conflict
+  int64 conflict_term = 5;           // Term of conflicting entry (if success = false)
+  string follower_id = 6;            // ID of the follower (for debugging)
+}
+
+// ========================================
+// Install Snapshot RPC (For lagging followers)
+// ========================================
+
+message InstallSnapshotRequest {
+  int64 term = 1;                    // Leader's term
+  string leader_id = 2;              // So follower can redirect clients
+  int64 last_included_index = 3;     // Snapshot replaces all entries up through this index
+  int64 last_included_term = 4;      // Term of last_included_index
+  bytes data = 5;                    // Raw bytes of the snapshot chunk
+  bool done = 6;                     // True if this is the last chunk
+  int64 offset = 7;                  // Byte offset where chunk is positioned in snapshot file
+}
+
+message InstallSnapshotResponse {
+  int64 term = 1;                    // Current term, for leader to update itself
+  bool success = 2;                  // True if snapshot was successfully installed
+  string follower_id = 3;            // ID of the follower
+}
+
+// ========================================
+// Commit Acknowledgement (Optional - for faster commit propagation)
+// ========================================
+
+message CommitNotification {
+  int64 term = 1;                    // Leader's term
+  string leader_id = 2;              // Leader sending notification
+  int64 commit_index = 3;            // New commit index to apply
+  int64 timestamp = 4;               // When commit happened (for metrics)
+}
+
+message CommitAcknowledgement {
+  int64 term = 1;                    // Follower's term
+  string follower_id = 2;            // Follower acknowledging
+  int64 last_applied = 3;            // Last index follower has applied to state machine
+  bool success = 4;                  // True if follower successfully applied
+}
+
+// ========================================
+// Cluster Membership Change (Optional but recommended)
+// ========================================
+
+message AddServerRequest {
+  string server_id = 1;              // ID of new server to add
+  string address = 2;                // Address of new server
+}
+
+message AddServerResponse {
+  enum Status {
+    OK = 0;
+    NOT_LEADER = 1;
+    TIMEOUT = 2;
+    ALREADY_MEMBER = 3;
+  }
+  Status status = 1;
+  string leader_hint = 2;            // Current leader if NOT_LEADER
+}
+
+message RemoveServerRequest {
+  string server_id = 1;              // ID of server to remove
+}
+
+message RemoveServerResponse {
+  enum Status {
+    OK = 0;
+    NOT_LEADER = 1;
+    NOT_MEMBER = 2;
+  }
+  Status status = 1;
+  string leader_hint = 2;            // Current leader if NOT_LEADER
+}
+
+// ========================================
+// Wrapper for all RPC types (for generic handling)
+// ========================================
+
+message RaftRpc {
+  oneof rpc {
+    RequestVoteRequest request_vote_req = 1;
+    RequestVoteResponse request_vote_resp = 2;
+    AppendEntriesRequest append_entries_req = 3;
+    AppendEntriesResponse append_entries_resp = 4;
+    InstallSnapshotRequest install_snapshot_req = 5;
+    InstallSnapshotResponse install_snapshot_resp = 6;
+    CommitNotification commit_notification = 7;
+    CommitAcknowledgement commit_ack = 8;
+    AddServerRequest add_server_req = 9;
+    AddServerResponse add_server_resp = 10;
+    RemoveServerRequest remove_server_req = 11;
+    RemoveServerResponse remove_server_resp = 12;
+  }
+}

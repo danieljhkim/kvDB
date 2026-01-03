@@ -1,6 +1,5 @@
-package com.danieljhkim.kvdb.kvclustercoordinator.raft;
+package com.danieljhkim.kvdb.kvclustercoordinator.state;
 
-import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
 import java.util.List;
 
 /**

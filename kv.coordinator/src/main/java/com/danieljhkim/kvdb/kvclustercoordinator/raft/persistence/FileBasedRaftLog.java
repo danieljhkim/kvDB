@@ -1,8 +1,7 @@
-package com.danieljhkim.kvdb.kvclustercoordinator.raft;
+package com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence;
 
 import com.google.protobuf.InvalidProtocolBufferException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
 
 import java.io.*;
 import java.nio.file.Files;
@@ -20,9 +19,9 @@ import java.util.Optional;
  *
  * <p>This implementation maintains an in-memory index of byte offsets for fast random access.
  */
+@Slf4j
 public class FileBasedRaftLog implements RaftLog {
 
-    private static final Logger logger = LoggerFactory.getLogger(FileBasedRaftLog.class);
     private final Path logFile;
     private final List<Long> indexOffsets; // Byte offset for each entry
 
@@ -33,7 +32,7 @@ public class FileBasedRaftLog implements RaftLog {
         if (!Files.exists(logFile)) {
             Files.createDirectories(logFile.getParent());
             Files.createFile(logFile);
-            logger.info("Created new Raft log file: {}", logFile);
+            log.info("Created new Raft log file: {}", logFile);
         } else {
             buildIndex();
         }
@@ -54,7 +53,7 @@ public class FileBasedRaftLog implements RaftLog {
                 dis.skipBytes(entrySize);
             }
         }
-        logger.info("Built index with {} entries from {}", indexOffsets.size(), logFile);
+        log.info("Built index with {} entries from {}", indexOffsets.size(), logFile);
     }
 
     @Override
@@ -73,7 +72,7 @@ public class FileBasedRaftLog implements RaftLog {
                     : indexOffsets.get(indexOffsets.size() - 1) + getEntrySize(indexOffsets.size() - 1);
             indexOffsets.add(offset);
 
-            logger.debug("Appended entry at index {} (offset={})", entry.index(), offset);
+            log.debug("Appended entry at index {} (offset={})", entry.index(), offset);
         }
     }
 
@@ -109,7 +108,7 @@ public class FileBasedRaftLog implements RaftLog {
             raf.readFully(data);
             return Optional.of(RaftLogEntry.fromBytes(data));
         } catch (InvalidProtocolBufferException e) {
-            logger.error("Failed to deserialize entry at index {}", index, e);
+            log.error("Failed to deserialize entry at index {}", index, e);
             throw new IOException("Failed to deserialize log entry", e);
         }
     }
@@ -148,12 +147,12 @@ public class FileBasedRaftLog implements RaftLog {
         }
 
         indexOffsets.subList((int) index, indexOffsets.size()).clear();
-        logger.info("Truncated log after index {}, new size: {}", index, indexOffsets.size());
+        log.info("Truncated log after index {}, new size: {}", index, indexOffsets.size());
     }
 
     @Override
     public void close() throws IOException {
-        logger.info("Closing Raft log with {} entries", indexOffsets.size());
+        log.info("Closing Raft log with {} entries", indexOffsets.size());
         // No resources to clean up in current implementation
     }
 }

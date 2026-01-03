@@ -1,4 +1,4 @@
-package com.danieljhkim.kvdb.kvclustercoordinator.raft;
+package com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence;
 
 import java.io.IOException;
 import java.util.List;

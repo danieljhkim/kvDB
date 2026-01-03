@@ -1,6 +1,6 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.converter;
 
-import com.danieljhkim.kvdb.kvclustercoordinator.raft.ShardMapDelta;
+import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapDelta;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.NodeRecord;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardRecord;

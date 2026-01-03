@@ -1,7 +1,7 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.service;
 
 import com.danieljhkim.kvdb.kvclustercoordinator.converter.ProtoConverter;
-import com.danieljhkim.kvdb.kvclustercoordinator.raft.ShardMapDelta;
+import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapDelta;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
 import io.grpc.stub.StreamObserver;
 import java.util.Map;

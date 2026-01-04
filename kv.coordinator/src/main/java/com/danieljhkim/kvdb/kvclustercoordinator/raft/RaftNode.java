@@ -16,14 +16,14 @@ import com.danieljhkim.kvdb.proto.raft.AppendEntriesRequest;
 import com.danieljhkim.kvdb.proto.raft.AppendEntriesResponse;
 import com.danieljhkim.kvdb.proto.raft.RequestVoteRequest;
 import com.danieljhkim.kvdb.proto.raft.RequestVoteResponse;
-import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
-
 import java.io.IOException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.BiFunction;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Main Raft node that orchestrates all Raft components.
@@ -77,6 +77,7 @@ public class RaftNode {
     private volatile boolean started = false;
 
     // Callback for when this node steps down from leader
+    @Setter
     private volatile Runnable onStepDownFromLeader;
 
     /**
@@ -355,14 +356,6 @@ public class RaftNode {
         } else {
             electionTimer.reset();
         }
-    }
-
-    /**
-     * Sets a callback to be invoked when this node steps down from leader.
-     * This is useful for closing client connections that should reconnect to the new leader.
-     */
-    public void setOnStepDownFromLeader(Runnable callback) {
-        this.onStepDownFromLeader = callback;
     }
 
     /**

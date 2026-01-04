@@ -1,12 +1,12 @@
 package com.danieljhkim.kvdb.kvgateway.service;
 
+import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
 import com.danieljhkim.kvdb.kvcommon.exception.InvalidRequestException;
 import com.danieljhkim.kvdb.kvcommon.exception.KeyNotFoundException;
 import com.danieljhkim.kvdb.kvcommon.exception.KvException;
 import com.danieljhkim.kvdb.kvcommon.exception.NodeOperationException;
 import com.danieljhkim.kvdb.kvcommon.exception.NodeUnavailableException;
 import com.danieljhkim.kvdb.kvcommon.exception.ShardMapUnavailableException;
-import com.danieljhkim.kvdb.kvgateway.cache.ShardMapCache;
 import com.danieljhkim.kvdb.kvgateway.retry.RequestExecutor;
 import com.danieljhkim.kvdb.kvgateway.retry.RequestExecutor.ExecutionResult;
 import com.danieljhkim.kvdb.proto.coordinator.NodeRecord;
@@ -47,36 +47,24 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
     @Override
     public void get(GetRequest request, StreamObserver<GetResponse> responseObserver) {
         try {
-            // Validate request
             if (request.getKey().isEmpty()) {
                 throw new InvalidRequestException("Key cannot be empty");
             }
-
             byte[] keyBytes = request.getKey().toByteArray();
             String keyStr = new String(keyBytes, StandardCharsets.UTF_8);
-
-            // Resolve shard
             final String shardId = resolveShardId(keyBytes);
             Consistency consistency = request.getOptions().getConsistency();
-
-            // Build the node request
             KeyRequest nodeRequest = KeyRequest.newBuilder().setKey(keyStr).build();
 
-            // Execute with retry
             ExecutionResult<ValueResponse> result = requestExecutor.executeWithRetry(
                     shardId, false, stub -> stub.get(nodeRequest), () -> getNodesForRead(shardId, consistency));
-
-            // Handle result
             if (!result.isSuccess()) {
                 throw new NodeUnavailableException(result.getErrorMessage(), shardId, result.getErrorCode());
             }
-
             ValueResponse nodeResponse = result.getResponse();
             if (nodeResponse.getValue().isEmpty()) {
                 throw new KeyNotFoundException(keyStr, shardId);
             }
-
-            // Success response
             responseObserver.onNext(GetResponse.newBuilder()
                     .setStatus(okStatus(shardId))
                     .setKv(KeyValue.newBuilder()
@@ -96,39 +84,26 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
     @Override
     public void put(PutRequest request, StreamObserver<PutResponse> responseObserver) {
         try {
-            // Validate request
             if (request.getKey().isEmpty()) {
                 throw new InvalidRequestException("Key cannot be empty");
             }
-
             byte[] keyBytes = request.getKey().toByteArray();
             String keyStr = new String(keyBytes, StandardCharsets.UTF_8);
             String valueStr = request.getValue().toStringUtf8();
-
-            // Resolve shard
             final String shardId = resolveShardId(keyBytes);
-
-            // Build the node request
             KeyValueRequest nodeRequest = KeyValueRequest.newBuilder()
                     .setKey(keyStr)
                     .setValue(valueStr)
                     .build();
-
-            // Execute with retry
             ExecutionResult<SetResponse> result = requestExecutor.executeWithRetry(
                     shardId, true, stub -> stub.set(nodeRequest), () -> getNodesForWrite(shardId));
-
-            // Handle result
             if (!result.isSuccess()) {
                 throw new NodeUnavailableException(result.getErrorMessage(), shardId, result.getErrorCode());
             }
-
             SetResponse nodeResponse = result.getResponse();
             if (!nodeResponse.getSuccess()) {
                 throw new NodeOperationException("Put operation failed on storage node", shardId);
             }
-
-            // Success response
             responseObserver.onNext(PutResponse.newBuilder()
                     .setStatus(okStatus(shardId))
                     .setVersion(1)
@@ -145,37 +120,26 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
     @Override
     public void delete(DeleteRequest request, StreamObserver<DeleteResponse> responseObserver) {
         try {
-            // Validate request
             if (request.getKey().isEmpty()) {
                 throw new InvalidRequestException("Key cannot be empty");
             }
-
             byte[] keyBytes = request.getKey().toByteArray();
             String keyStr = new String(keyBytes, StandardCharsets.UTF_8);
-
-            // Resolve shard
             final String shardId = resolveShardId(keyBytes);
-
-            // Build the node request
             com.kvdb.proto.kvstore.DeleteRequest nodeRequest = com.kvdb.proto.kvstore.DeleteRequest.newBuilder()
                     .setKey(keyStr)
                     .build();
-
-            // Execute with retry
             ExecutionResult<com.kvdb.proto.kvstore.DeleteResponse> result = requestExecutor.executeWithRetry(
                     shardId, true, stub -> stub.delete(nodeRequest), () -> getNodesForWrite(shardId));
 
-            // Handle result
             if (!result.isSuccess()) {
                 throw new NodeUnavailableException(result.getErrorMessage(), shardId, result.getErrorCode());
             }
-
             com.kvdb.proto.kvstore.DeleteResponse nodeResponse = result.getResponse();
             if (!nodeResponse.getSuccess()) {
                 throw new KeyNotFoundException(keyStr, shardId);
             }
 
-            // Success response
             responseObserver.onNext(DeleteResponse.newBuilder()
                     .setStatus(okStatus(shardId))
                     .setVersion(1)
@@ -255,29 +219,32 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
     private List<NodeRecord> getNodesForRead(String shardId, Consistency consistency) {
         List<NodeRecord> candidates = new ArrayList<>();
 
+        NodeRecord leader = shardMapCache.getLeaderNode(shardId);
+        List<NodeRecord> replicas = shardMapCache.getReplicaNodes(shardId);
+
         if (consistency == Consistency.STRONG) {
-            NodeRecord leader = shardMapCache.getLeader(shardId);
-            if (leader != null && leader.getStatus() == NodeStatus.ALIVE) {
-                candidates.add(leader);
-            }
-            for (NodeRecord replica : shardMapCache.getReplicas(shardId)) {
-                if (replica.getStatus() == NodeStatus.ALIVE && !candidates.contains(replica)) {
-                    candidates.add(replica);
-                }
-            }
+            // Leader first for strong consistency
+            addIfAlive(candidates, leader);
+            addAllIfAlive(candidates, replicas);
         } else {
-            for (NodeRecord replica : shardMapCache.getReplicas(shardId)) {
-                if (replica.getStatus() == NodeStatus.ALIVE) {
-                    candidates.add(replica);
-                }
-            }
-            NodeRecord leader = shardMapCache.getLeader(shardId);
-            if (leader != null && leader.getStatus() == NodeStatus.ALIVE && !candidates.contains(leader)) {
-                candidates.add(leader);
-            }
+            // Any replica first for eventual consistency (load balancing)
+            addAllIfAlive(candidates, replicas);
+            addIfAlive(candidates, leader);
         }
 
         return candidates;
+    }
+
+    private void addIfAlive(List<NodeRecord> list, NodeRecord node) {
+        if (node != null && node.getStatus() == NodeStatus.ALIVE && !list.contains(node)) {
+            list.add(node);
+        }
+    }
+
+    private void addAllIfAlive(List<NodeRecord> list, List<NodeRecord> nodes) {
+        for (NodeRecord node : nodes) {
+            addIfAlive(list, node);
+        }
     }
 
     /**
@@ -286,13 +253,12 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
     private List<NodeRecord> getNodesForWrite(String shardId) {
         List<NodeRecord> candidates = new ArrayList<>();
 
-        NodeRecord leader = shardMapCache.getLeader(shardId);
+        NodeRecord leader = shardMapCache.getLeaderNode(shardId);
         if (leader != null) {
             candidates.add(leader);
         }
-
         if (candidates.isEmpty()) {
-            for (NodeRecord replica : shardMapCache.getReplicas(shardId)) {
+            for (NodeRecord replica : shardMapCache.getReplicaNodes(shardId)) {
                 if (replica.getStatus() == NodeStatus.ALIVE) {
                     candidates.add(replica);
                 }

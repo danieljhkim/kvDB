@@ -1,11 +1,11 @@
 package com.danieljhkim.kvdb.kvnode.server;
 
+import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
 import com.danieljhkim.kvdb.kvcommon.config.AppConfig;
+import com.danieljhkim.kvdb.kvcommon.grpc.CoordinatorClientManager;
 import com.danieljhkim.kvdb.kvcommon.grpc.GlobalExceptionInterceptor;
-import com.danieljhkim.kvdb.kvnode.cache.ShardMapCache;
-import com.danieljhkim.kvdb.kvnode.client.CoordinatorShardMapClient;
+import com.danieljhkim.kvdb.kvcommon.grpc.WatchShardMapClient;
 import com.danieljhkim.kvdb.kvnode.client.ReplicaWriteClient;
-import com.danieljhkim.kvdb.kvnode.client.WatchShardMapClient;
 import com.danieljhkim.kvdb.kvnode.service.KVServiceImpl;
 import com.danieljhkim.kvdb.kvnode.storage.ShardStoreRegistry;
 import io.grpc.Server;
@@ -23,7 +23,7 @@ public class NodeServer {
 
     private final Server server;
     private final ShardMapCache shardMapCache;
-    private final CoordinatorShardMapClient coordinatorClient;
+    private final CoordinatorClientManager coordinatorClientManager;
     private final WatchShardMapClient watchShardMapClient;
     private final ShardStoreRegistry shardStores;
     private final ReplicaWriteClient replicaWriteClient;
@@ -35,15 +35,7 @@ public class NodeServer {
             throw new IllegalArgumentException("Node configuration not found for nodeId: " + nodeId);
         }
 
-        // Get coordinator configuration
-        String coordinatorHost = "localhost";
-        int coordinatorPort = 9000;
-        if (appConfig.getStorageNodes() != null && appConfig.getStorageNodes().getCoordinator() != null) {
-            coordinatorHost = appConfig.getStorageNodes().getCoordinator().getHost();
-            coordinatorPort = appConfig.getStorageNodes().getCoordinator().getPort();
-        }
-
-        this.coordinatorClient = new CoordinatorShardMapClient(coordinatorHost, coordinatorPort);
+        this.coordinatorClientManager = new CoordinatorClientManager(appConfig);
         this.shardMapCache = new ShardMapCache();
 
         // Get persistence configuration with defaults
@@ -66,11 +58,7 @@ public class NodeServer {
                 new ShardStoreRegistry(baseDir, snapshotFileName, walFileName, flushInterval, enableAutoFlush);
         this.replicaWriteClient = new ReplicaWriteClient(Duration.ofMillis(replicationTimeoutMs));
 
-        this.watchShardMapClient = new WatchShardMapClient(
-                coordinatorHost,
-                coordinatorPort,
-                shardMapCache,
-                () -> Thread.startVirtualThread(this::refreshShardMapIfPossible));
+        this.watchShardMapClient = new WatchShardMapClient(shardMapCache, coordinatorClientManager);
 
         KVServiceImpl kvservice = new KVServiceImpl(
                 nodeId, shardMapCache, shardStores, replicaWriteClient, Duration.ofMillis(replicationTimeoutMs));
@@ -97,9 +85,7 @@ public class NodeServer {
 
     public void start() throws IOException, InterruptedException {
         // Best-effort initial shard map fetch before accepting writes
-        refreshShardMapIfPossible();
         watchShardMapClient.start(shardMapCache.getMapVersion());
-
         server.start();
         server.awaitTermination();
     }
@@ -111,9 +97,9 @@ public class NodeServer {
             logger.warn("Failed to shutdown WatchShardMapClient", e);
         }
         try {
-            coordinatorClient.shutdown();
+            coordinatorClientManager.shutdown();
         } catch (Exception e) {
-            logger.warn("Failed to shutdown CoordinatorShardMapClient", e);
+            logger.warn("Failed to shutdown ShardMapClient", e);
         }
         try {
             replicaWriteClient.shutdown();
@@ -129,18 +115,6 @@ public class NodeServer {
         if (server != null) {
             server.shutdown().awaitTermination(3, TimeUnit.SECONDS);
             logger.info("NodeServer stopped");
-        }
-    }
-
-    private void refreshShardMapIfPossible() {
-        try {
-            long current = shardMapCache.getMapVersion();
-            var state = coordinatorClient.fetchShardMap(current);
-            if (state != null) {
-                shardMapCache.refreshFromFullState(state);
-            }
-        } catch (Exception e) {
-            logger.debug("Initial shard map fetch failed (continuing)", e);
         }
     }
 }

@@ -1,9 +1,10 @@
-package com.danieljhkim.kvdb.kvnode.cache;
+package com.danieljhkim.kvdb.kvcommon.cache;
 
 import com.danieljhkim.kvdb.proto.coordinator.ClusterState;
 import com.danieljhkim.kvdb.proto.coordinator.NodeRecord;
 import com.danieljhkim.kvdb.proto.coordinator.ShardMapDelta;
 import com.danieljhkim.kvdb.proto.coordinator.ShardRecord;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -19,7 +20,6 @@ import org.slf4j.LoggerFactory;
 public class ShardMapCache implements Consumer<ShardMapDelta> {
 
     private static final Logger logger = LoggerFactory.getLogger(ShardMapCache.class);
-
     private final AtomicReference<ClusterState> stateRef = new AtomicReference<>();
 
     public boolean refreshFromFullState(ClusterState state) {
@@ -103,15 +103,7 @@ public class ShardMapCache implements Consumer<ShardMapDelta> {
     }
 
     public Optional<String> getLeaderAddress(String shardId) {
-        ClusterState state = stateRef.get();
-        if (state == null) {
-            return Optional.empty();
-        }
-        Optional<String> leaderId = getLeaderNodeId(shardId);
-        if (leaderId.isEmpty()) {
-            return Optional.empty();
-        }
-        NodeRecord leaderNode = state.getNodesMap().get(leaderId.get());
+        NodeRecord leaderNode = getLeaderNode(shardId);
         if (leaderNode == null || leaderNode.getAddress().isEmpty()) {
             return Optional.empty();
         }
@@ -119,23 +111,41 @@ public class ShardMapCache implements Consumer<ShardMapDelta> {
     }
 
     public Optional<String> getAnyReplicaAddress(String shardId) {
-        ClusterState state = stateRef.get();
-        ShardRecord shard = getShard(shardId);
-        if (state == null || shard == null) {
-            return Optional.empty();
-        }
-        for (String replicaId : shard.getReplicasList()) {
-            NodeRecord replica = state.getNodesMap().get(replicaId);
-            if (replica != null && !replica.getAddress().isEmpty()) {
+        List<NodeRecord> replicas = getReplicaNodes(shardId);
+        for (NodeRecord replica : replicas) {
+            replica.getAddress();
+            if (!replica.getAddress().isEmpty()) {
                 return Optional.of(replica.getAddress());
             }
         }
         return Optional.empty();
     }
 
+    public NodeRecord getLeaderNode(String shardId) {
+        ClusterState state = stateRef.get();
+        ShardRecord shard = getShard(shardId);
+        if (state == null || shard == null || shard.getLeader().isEmpty()) {
+            return null;
+        }
+        NodeRecord leaderNode = state.getNodesMap().get(shard.getLeader());
+        return leaderNode;
+    }
+
+    public List<NodeRecord> getReplicaNodes(String shardId) {
+        ClusterState state = stateRef.get();
+        ShardRecord shard = getShard(shardId);
+        if (state == null || shard == null) {
+            return List.of();
+        }
+        return shard.getReplicasList().stream()
+                .map(replicaId -> state.getNodesMap().get(replicaId))
+                .filter(node -> node != null)
+                .toList();
+    }
+
     public Optional<String> getNodeAddress(String nodeId) {
         ClusterState state = stateRef.get();
-        if (state == null || nodeId == null || nodeId.isEmpty()) {
+        if (state == null) {
             return Optional.empty();
         }
         NodeRecord node = state.getNodesMap().get(nodeId);

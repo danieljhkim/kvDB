@@ -24,6 +24,9 @@ service Coordinator {
   rpc GetNode(GetNodeRequest) returns (GetNodeResponse);
   rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
   
+  // Get current coordinator (Raft) leader
+  rpc GetCoordinatorLeader(GetCoordinatorLeaderRequest) returns (GetCoordinatorLeaderResponse);
+
   // ---- Non-Raft Operational RPCs ----
   
   // Heartbeat from storage nodes (high-frequency, not replicated)
@@ -251,3 +254,17 @@ message SetShardLeaderResponse {
   uint64 map_version = 3;
 }
 
+// ============================
+// Coordinator Leader Discovery
+// ============================
+
+message GetCoordinatorLeaderRequest {
+  // Empty - no parameters needed
+}
+
+message GetCoordinatorLeaderResponse {
+  bool is_leader = 1;           // true if responding node is the leader
+  string leader_id = 2;         // node ID of the current leader (if known)
+  string leader_address = 3;    // RPC address of the current leader (if known)
+  int64 term = 4;               // current Raft term
+}

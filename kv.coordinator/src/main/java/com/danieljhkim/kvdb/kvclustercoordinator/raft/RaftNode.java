@@ -16,13 +16,14 @@ import com.danieljhkim.kvdb.proto.raft.AppendEntriesRequest;
 import com.danieljhkim.kvdb.proto.raft.AppendEntriesResponse;
 import com.danieljhkim.kvdb.proto.raft.RequestVoteRequest;
 import com.danieljhkim.kvdb.proto.raft.RequestVoteResponse;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
+
 import java.io.IOException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.BiFunction;
-import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
 
 /**
  * Main Raft node that orchestrates all Raft components.
@@ -74,6 +75,9 @@ public class RaftNode {
     private final ScheduledExecutorService scheduler;
 
     private volatile boolean started = false;
+
+    // Callback for when this node steps down from leader
+    private volatile Runnable onStepDownFromLeader;
 
     /**
      * Creates a new Raft node.
@@ -279,6 +283,14 @@ public class RaftNode {
     }
 
     /**
+     * Gets the node ID of the current leader.
+     * Returns null if leader is unknown.
+     */
+    public String getLeaderId() {
+        return state.getCurrentLeader();
+    }
+
+    /**
      * Called when election timeout expires.
      */
     private void onElectionTimeout() {
@@ -327,12 +339,30 @@ public class RaftNode {
         // Clear replication state
         replicationManager.clear();
 
+        // Notify external components that we stepped down from leader
+        Runnable callback = onStepDownFromLeader;
+        if (callback != null) {
+            try {
+                callback.run();
+            } catch (Exception e) {
+                log.warn("[{}] Error in onStepDownFromLeader callback", nodeId, e);
+            }
+        }
+
         // Start/restart election timer
         if (!electionTimer.isRunning()) {
             electionTimer.start();
         } else {
             electionTimer.reset();
         }
+    }
+
+    /**
+     * Sets a callback to be invoked when this node steps down from leader.
+     * This is useful for closing client connections that should reconnect to the new leader.
+     */
+    public void setOnStepDownFromLeader(Runnable callback) {
+        this.onStepDownFromLeader = callback;
     }
 
     /**

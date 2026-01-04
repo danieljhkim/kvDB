@@ -1,6 +1,6 @@
 package com.danieljhkim.kvdb.kvnode.service;
 
-import com.danieljhkim.kvdb.kvnode.cache.ShardMapCache;
+import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
 import com.danieljhkim.kvdb.kvnode.client.ReplicaWriteClient;
 import com.danieljhkim.kvdb.kvnode.cluster.ReplicationManager;
 import com.danieljhkim.kvdb.kvnode.cluster.ShardLeadershipValidator;

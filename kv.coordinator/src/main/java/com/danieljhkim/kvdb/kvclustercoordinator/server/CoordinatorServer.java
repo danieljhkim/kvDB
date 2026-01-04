@@ -17,6 +17,10 @@ import io.grpc.Server;
 import io.grpc.ServerInterceptors;
 import io.grpc.ServerServiceDefinition;
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
+import lombok.Getter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -24,9 +28,6 @@ import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
-import lombok.Getter;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 public class CoordinatorServer {
     private static final Logger logger = LoggerFactory.getLogger(CoordinatorServer.class);
@@ -79,6 +80,10 @@ public class CoordinatorServer {
                 raftStateMachine,
                 raftGrpcClient::sendRequestVote,
                 raftGrpcClient::sendAppendEntries);
+
+        // When stepping down from leader, close all watcher connections
+        // so clients reconnect to the new leader
+        this.raftNode.setOnStepDownFromLeader(watcherManager::closeAllWatchers);
 
         // Create Raft gRPC service
         RaftGrpcService raftGrpcService = new RaftGrpcService(

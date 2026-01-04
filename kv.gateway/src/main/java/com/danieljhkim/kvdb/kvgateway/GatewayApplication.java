@@ -27,19 +27,6 @@ public class GatewayApplication {
             AppConfig appConfig = ConfigLoader.load();
             logger.info("Loaded application configuration");
             AppConfig.GatewayConfig gatewayConfig = appConfig.getGateway();
-            if (gatewayConfig == null) {
-                gatewayConfig = new AppConfig.GatewayConfig();
-            }
-
-            int port = gatewayConfig.getPort();
-            String coordinatorHost = gatewayConfig.getCoordinator() != null
-                    ? gatewayConfig.getCoordinator().getHost()
-                    : "localhost";
-            int coordinatorPort = gatewayConfig.getCoordinator() != null
-                    ? gatewayConfig.getCoordinator().getPort()
-                    : 9000;
-
-            logger.info("Gateway will connect to coordinator at {}:{}", coordinatorHost, coordinatorPort);
             GatewayServer gatewayServer = new GatewayServer(appConfig);
 
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -53,7 +40,7 @@ public class GatewayApplication {
             }));
 
             gatewayServer.start();
-            logger.info("KvGateway gRPC server started on port {}", port);
+            logger.info("KvGateway gRPC server started on port {}", gatewayConfig.getPort());
             gatewayServer.awaitTermination();
 
         } catch (Exception e) {

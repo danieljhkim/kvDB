@@ -9,9 +9,6 @@ coordinatorNodes:
 # Storage nodes (kv.node)
 storageNodes:
   componentLabel: "kv-storage-node"
-  coordinator:
-    host: "coordinator"
-    port: 9000
   nodes:
     - id: "node-1"
       host: "node1"
@@ -25,9 +22,6 @@ storageNodes:
 # Gateway configuration
 gateway:
   port: 7000
-  coordinator:
-    host: "coordinator"
-    port: 9000
 
 # Storage node persistence configuration
 persistence:

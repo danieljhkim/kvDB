@@ -1,8 +1,8 @@
 package com.danieljhkim.kvdb.kvnode.cluster;
 
+import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
 import com.danieljhkim.kvdb.kvcommon.exception.NotLeaderException;
 import com.danieljhkim.kvdb.kvcommon.exception.ShardMovedException;
-import com.danieljhkim.kvdb.kvnode.cache.ShardMapCache;
 
 /**
  * Validates leadership and replica membership for shard operations.

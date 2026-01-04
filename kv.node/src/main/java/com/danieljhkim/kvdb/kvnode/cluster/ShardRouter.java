@@ -1,9 +1,9 @@
 package com.danieljhkim.kvdb.kvnode.cluster;
 
+import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
 import com.danieljhkim.kvdb.kvcommon.exception.InvalidRequestException;
 import com.danieljhkim.kvdb.kvcommon.exception.ShardMapUnavailableException;
 import com.danieljhkim.kvdb.kvcommon.exception.ShardMovedException;
-import com.danieljhkim.kvdb.kvnode.cache.ShardMapCache;
 import com.danieljhkim.kvdb.proto.coordinator.ShardRecord;
 import java.nio.charset.StandardCharsets;
 

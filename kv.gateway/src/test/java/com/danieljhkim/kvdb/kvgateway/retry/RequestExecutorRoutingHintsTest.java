@@ -1,24 +1,17 @@
 package com.danieljhkim.kvdb.kvgateway.retry;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.danieljhkim.kvdb.kvcommon.grpc.GlobalExceptionInterceptor;
 import com.danieljhkim.kvdb.kvgateway.cache.NodeFailureTracker;
-import com.danieljhkim.kvdb.kvgateway.cache.ShardMapCache;
-import com.danieljhkim.kvdb.kvgateway.cache.ShardRoutingFailureTracker;
 import com.danieljhkim.kvdb.kvgateway.client.NodeConnectionPool;
 import com.danieljhkim.kvdb.kvgateway.retry.RequestExecutor.ExecutionResult;
 import com.danieljhkim.kvdb.proto.coordinator.NodeRecord;
 import com.danieljhkim.kvdb.proto.coordinator.NodeStatus;
 import com.kvdb.proto.kvstore.KVServiceGrpc;
-import io.grpc.CallOptions;
-import io.grpc.Channel;
-import io.grpc.ClientCall;
-import io.grpc.Metadata;
-import io.grpc.MethodDescriptor;
-import io.grpc.Status;
-import io.grpc.StatusRuntimeException;
+import io.grpc.*;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -26,25 +19,6 @@ import java.util.function.Function;
 import org.junit.jupiter.api.Test;
 
 class RequestExecutorRoutingHintsTest {
-
-    private static final class FakeShardMapCache extends ShardMapCache {
-        volatile boolean forcedRefreshCalled = false;
-        volatile boolean gatedRefreshCalled = false;
-
-        private FakeShardMapCache() {
-            super(null);
-        }
-
-        @Override
-        public void scheduleRefreshIfStale() {
-            gatedRefreshCalled = true;
-        }
-
-        @Override
-        public void forceRefreshAsync() {
-            forcedRefreshCalled = true;
-        }
-    }
 
     private static final class NoopChannel extends Channel {
         @Override
@@ -70,17 +44,14 @@ class RequestExecutorRoutingHintsTest {
 
     @Test
     void notLeader_withLeaderHint_retriesHintedLeaderOnce() {
-        FakeShardMapCache shardMapCache = new FakeShardMapCache();
         FakeNodeConnectionPool nodePool = new FakeNodeConnectionPool();
         NodeFailureTracker nodeFailureTracker = new NodeFailureTracker(5000);
-        ShardRoutingFailureTracker shardFailureTracker = new ShardRoutingFailureTracker(5000);
         RetryPolicy retryPolicy = RetryPolicy.builder()
                 .maxAttempts(1)
                 .retryableStatusCodes(Set.of())
                 .build();
 
-        RequestExecutor executor =
-                new RequestExecutor(shardMapCache, nodePool, nodeFailureTracker, shardFailureTracker, retryPolicy, 50);
+        RequestExecutor executor = new RequestExecutor(nodePool, nodeFailureTracker, retryPolicy, 50);
 
         NodeRecord nodeA = NodeRecord.newBuilder()
                 .setNodeId("node-a")
@@ -106,18 +77,15 @@ class RequestExecutorRoutingHintsTest {
     }
 
     @Test
-    void shardMoved_withNewNodeHint_forcesRefresh() {
-        FakeShardMapCache shardMapCache = new FakeShardMapCache();
+    void shardMoved_withNewNodeHint_returnsFailure() {
         FakeNodeConnectionPool nodePool = new FakeNodeConnectionPool();
         NodeFailureTracker nodeFailureTracker = new NodeFailureTracker(5000);
-        ShardRoutingFailureTracker shardFailureTracker = new ShardRoutingFailureTracker(5000);
         RetryPolicy retryPolicy = RetryPolicy.builder()
                 .maxAttempts(1)
                 .retryableStatusCodes(Set.of())
                 .build();
 
-        RequestExecutor executor =
-                new RequestExecutor(shardMapCache, nodePool, nodeFailureTracker, shardFailureTracker, retryPolicy, 50);
+        RequestExecutor executor = new RequestExecutor(nodePool, nodeFailureTracker, retryPolicy, 50);
 
         NodeRecord nodeA = NodeRecord.newBuilder()
                 .setNodeId("node-a")
@@ -134,7 +102,7 @@ class RequestExecutorRoutingHintsTest {
 
         ExecutionResult<String> result = executor.executeWithRetry("shard-1", true, op, () -> List.of(nodeA));
 
-        assertTrue(!result.isSuccess());
-        assertTrue(shardMapCache.forcedRefreshCalled);
+        // SHARD_MOVED should result in failure since we have maxAttempts=1
+        assertFalse(result.isSuccess());
     }
 }

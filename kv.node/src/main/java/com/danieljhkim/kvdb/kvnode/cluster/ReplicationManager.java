@@ -1,7 +1,7 @@
 package com.danieljhkim.kvdb.kvnode.cluster;
 
+import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
 import com.danieljhkim.kvdb.kvcommon.exception.NodeUnavailableException;
-import com.danieljhkim.kvdb.kvnode.cache.ShardMapCache;
 import com.danieljhkim.kvdb.kvnode.client.ReplicaWriteClient;
 import com.danieljhkim.kvdb.proto.coordinator.ShardRecord;
 import com.kvdb.proto.kvstore.ReplicateDeleteRequest;

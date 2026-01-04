@@ -32,26 +32,13 @@ public class AppConfig {
     public static class StorageNodeGroupConfig {
         private List<NodeConfig> nodes;
         private String componentLabel;
-        private CoordinatorConfig coordinator;
 
         @Override
         public String toString() {
             return "StorageNodeGroupConfig{" + "nodes="
                     + nodes + ", componentLabel='"
                     + componentLabel + '\'' + ", coordinator="
-                    + coordinator + '}';
-        }
-    }
-
-    @Setter
-    @Getter
-    public static class CoordinatorConfig {
-        private String host;
-        private int port;
-
-        @Override
-        public String toString() {
-            return "CoordinatorConfig{" + "host='" + host + '\'' + ", port=" + port + '}';
+                    + '}';
         }
     }
 
@@ -128,11 +115,10 @@ public class AppConfig {
     @Getter
     public static class GatewayConfig {
         private int port = 7000;
-        private CoordinatorConfig coordinator;
 
         @Override
         public String toString() {
-            return "GatewayConfig{" + "port=" + port + ", coordinator=" + coordinator + '}';
+            return "GatewayConfig{" + "port=" + port + '}';
         }
     }
 }

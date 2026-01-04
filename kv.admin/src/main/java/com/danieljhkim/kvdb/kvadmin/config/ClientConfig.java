@@ -45,7 +45,8 @@ public class ClientConfig {
         @Data
         public static class Grpc {
             /**
-             * Coordinator endpoint in host:port form.
+             * Coordinator endpoints in host:port form, comma-separated for multiple coordinators.
+             * Example: "localhost:9001,localhost:9002,localhost:9003"
              */
             private String address = "localhost:9090";
 
@@ -53,6 +54,16 @@ public class ClientConfig {
              * Per-RPC deadline for coordinator calls in milliseconds.
              */
             private long deadlineMs = 1500;
+
+            /**
+             * Returns list of coordinator addresses.
+             */
+            public java.util.List<String> getAddresses() {
+                return java.util.Arrays.stream(address.split(","))
+                        .map(String::trim)
+                        .filter(s -> !s.isEmpty())
+                        .toList();
+            }
         }
     }
 
@@ -117,16 +128,16 @@ public class ClientConfig {
 
     @Bean
     public CoordinatorAdminClient coordinatorAdminClient() {
-        HostPort hp = HostPort.parse(coordinator.getGrpc().getAddress(), "kvdb.coordinator.grpc.address");
+        java.util.List<String> addresses = coordinator.getGrpc().getAddresses();
         long deadlineMs = coordinator.getGrpc().getDeadlineMs();
-        return new CoordinatorAdminClient(hp.host(), hp.port(), deadlineMs, TimeUnit.MILLISECONDS);
+        return new CoordinatorAdminClient(addresses, deadlineMs, TimeUnit.MILLISECONDS);
     }
 
     @Bean
     public CoordinatorReadClient coordinatorReadClient() {
-        HostPort hp = HostPort.parse(coordinator.getGrpc().getAddress(), "kvdb.coordinator.grpc.address");
+        java.util.List<String> addresses = coordinator.getGrpc().getAddresses();
         long deadlineMs = coordinator.getGrpc().getDeadlineMs();
-        return new CoordinatorReadClient(hp.host(), hp.port(), deadlineMs, TimeUnit.MILLISECONDS);
+        return new CoordinatorReadClient(addresses, deadlineMs, TimeUnit.MILLISECONDS);
     }
 
     @Bean

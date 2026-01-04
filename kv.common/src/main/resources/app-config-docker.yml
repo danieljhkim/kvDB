@@ -1,0 +1,43 @@
+coordinatorNodes:
+  componentLabel: "kv-coordinator-node"
+  nodes:
+    - id: "coordinator-1"
+      host: "coordinator"
+      port: 9000
+      dataDir: "/app/data/raft/coordinator-1"
+
+# Storage nodes (kv.node)
+storageNodes:
+  componentLabel: "kv-storage-node"
+  nodes:
+    - id: "node-1"
+      host: "node1"
+      port: 8001
+      dataDir: "/app/data/node-1"
+    - id: "node-2"
+      host: "node2"
+      port: 8002
+      dataDir: "/app/data/node-2"
+
+# Gateway configuration
+gateway:
+  port: 7000
+
+# Storage node persistence configuration
+persistence:
+  enableAutoFlush: true
+  autoFlushIntervalMs: 2000
+  snapshotFileName: "kvstore.dat"
+  walFileName: "kvstore.wal"
+
+# Replication configuration
+replication:
+  timeoutMs: 500
+
+# Raft Configuration
+raft:
+  heartbeatIntervalMs: 100
+  electionTimeoutMinMs: 1000
+  electionTimeoutMaxMs: 2000
+  maxEntriesPerRequest: 100
+

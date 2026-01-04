@@ -5,16 +5,14 @@ import com.danieljhkim.kvdb.kvcommon.config.SystemConfig;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Scheduler for performing periodic health checks on storage nodes. Manages its own ScheduledExecutorService and
  * delegates to NodeHealthChecker.
  */
+@Slf4j
 public class HealthCheckScheduler {
-
-    private static final Logger logger = LoggerFactory.getLogger(HealthCheckScheduler.class);
 
     private final ScheduledExecutorService clusterHealthScheduler;
     private final NodeHealthChecker healthChecker;
@@ -34,19 +32,19 @@ public class HealthCheckScheduler {
 
     public void start() {
         if (!enabled) {
-            logger.info("Health check scheduler is disabled.");
+            log.info("Health check scheduler is disabled.");
             return;
         }
-        logger.info("Starting health check scheduler with interval {} seconds", refreshIntervalSeconds);
+        log.info("Starting health check scheduler with interval {} seconds", refreshIntervalSeconds);
         this.clusterHealthScheduler.scheduleAtFixedRate(
                 this::checkClusterHealth, refreshIntervalSeconds, refreshIntervalSeconds, TimeUnit.SECONDS);
     }
 
     public void shutdown() throws InterruptedException {
-        logger.info("Shutting down health check scheduler...");
+        log.info("Shutting down health check scheduler...");
         this.clusterHealthScheduler.shutdown();
         if (!this.clusterHealthScheduler.awaitTermination(5, TimeUnit.SECONDS)) {
-            logger.warn("Health check scheduler did not terminate in time; forcing shutdown");
+            log.warn("Health check scheduler did not terminate in time; forcing shutdown");
             this.clusterHealthScheduler.shutdownNow();
         }
         // Shutdown health checker to clean up cached channels
@@ -55,10 +53,10 @@ public class HealthCheckScheduler {
 
     private void checkClusterHealth() {
         try {
-            logger.debug("Performing scheduled health check on storage nodes");
+            log.debug("Performing scheduled health check on storage nodes");
             healthChecker.checkAllNodes();
         } catch (Exception e) {
-            logger.warn("Error during scheduled health check", e);
+            log.warn("Error during scheduled health check", e);
         }
     }
 }

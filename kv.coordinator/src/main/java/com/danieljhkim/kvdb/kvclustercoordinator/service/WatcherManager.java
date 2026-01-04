@@ -1,7 +1,7 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.service;
 
 import com.danieljhkim.kvdb.kvclustercoordinator.converter.ProtoConverter;
-import com.danieljhkim.kvdb.kvclustercoordinator.raft.ShardMapDelta;
+import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapDelta;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
 import io.grpc.stub.StreamObserver;
 import java.util.Map;
@@ -72,16 +72,32 @@ public class WatcherManager implements Consumer<ShardMapDelta> {
             Thread.currentThread().interrupt();
         }
 
-        // Complete all watchers
+        closeAllWatchers();
+        logger.info("WatcherManager stopped");
+    }
+
+    /**
+     * Closes all watcher connections with a FAILED_PRECONDITION error to force clients to reconnect.
+     * Called when this coordinator steps down from leader.
+     */
+    public void closeAllWatchers() {
+        if (watchers.isEmpty()) {
+            return;
+        }
+
+        logger.info("Closing {} watchers (no longer leader)", watchers.size());
         for (var entry : watchers.entrySet()) {
             try {
-                entry.getKey().onCompleted();
+                // Send error to force client to reconnect to new leader
+                entry.getKey()
+                        .onError(io.grpc.Status.FAILED_PRECONDITION
+                                .withDescription("Coordinator stepped down from leader")
+                                .asRuntimeException());
             } catch (Exception e) {
-                logger.warn("Error completing watcher on shutdown", e);
+                logger.debug("Error closing watcher", e);
             }
         }
         watchers.clear();
-        logger.info("WatcherManager stopped");
     }
 
     /**
@@ -100,8 +116,10 @@ public class WatcherManager implements Consumer<ShardMapDelta> {
         watchers.put(observer, context);
         logger.info("Registered watcher (fromVersion={}), total watchers: {}", fromVersion, watchers.size());
 
-        // Send initial full state if snapshot is newer than fromVersion
-        if (snapshot.getMapVersion() > fromVersion) {
+        // Send initial full state if:
+        // 1. Client is requesting from version 0 (needs full state)
+        // 2. Snapshot is newer than client's version
+        if (fromVersion == 0 || snapshot.getMapVersion() > fromVersion) {
             try {
                 var protoState = ProtoConverter.toProto(snapshot);
                 var delta = com.danieljhkim.kvdb.proto.coordinator.ShardMapDelta.newBuilder()
@@ -109,11 +127,20 @@ public class WatcherManager implements Consumer<ShardMapDelta> {
                         .setFullState(protoState)
                         .build();
                 observer.onNext(delta);
-                logger.debug("Sent initial state to watcher (version={})", snapshot.getMapVersion());
+                logger.info(
+                        "Sent initial state to watcher (version={}, shards={}, nodes={})",
+                        snapshot.getMapVersion(),
+                        snapshot.getShards().size(),
+                        snapshot.getNodes().size());
             } catch (Exception e) {
                 logger.warn("Failed to send initial state to watcher", e);
                 unregisterWatcher(observer);
             }
+        } else {
+            logger.info(
+                    "Watcher fromVersion={} is up to date with snapshot version={}",
+                    fromVersion,
+                    snapshot.getMapVersion());
         }
     }
 
@@ -134,9 +161,11 @@ public class WatcherManager implements Consumer<ShardMapDelta> {
     @Override
     public void accept(ShardMapDelta delta) {
         if (watchers.isEmpty()) {
+            logger.debug("No watchers to broadcast delta (version={})", delta.newMapVersion());
             return;
         }
 
+        logger.info("Broadcasting delta (version={}) to {} watchers", delta.newMapVersion(), watchers.size());
         var protoDelta = ProtoConverter.toProto(delta);
         broadcastDelta(protoDelta);
     }
@@ -145,15 +174,31 @@ public class WatcherManager implements Consumer<ShardMapDelta> {
      * Broadcasts a proto delta to all registered watchers.
      */
     private void broadcastDelta(com.danieljhkim.kvdb.proto.coordinator.ShardMapDelta delta) {
+        int successCount = 0;
         for (var entry : watchers.entrySet()) {
             try {
                 entry.getKey().onNext(delta);
+                successCount++;
+            } catch (io.grpc.StatusRuntimeException e) {
+                // Handle client disconnections gracefully
+                if (e.getStatus().getCode() == io.grpc.Status.Code.CANCELLED) {
+                    logger.debug("Watcher cancelled/disconnected, removing");
+                } else {
+                    logger.warn(
+                            "Failed to send delta to watcher ({}), removing",
+                            e.getStatus().getCode());
+                }
+                watchers.remove(entry.getKey());
             } catch (Exception e) {
-                logger.warn("Failed to send delta to watcher, removing", e);
+                logger.warn("Unexpected error sending delta to watcher, removing", e);
                 watchers.remove(entry.getKey());
             }
         }
-        logger.debug("Broadcast delta (version={}) to {} watchers", delta.getNewMapVersion(), watchers.size());
+        logger.info(
+                "Broadcast delta (version={}) sent to {}/{} watchers",
+                delta.getNewMapVersion(),
+                successCount,
+                watchers.size());
     }
 
     /**
@@ -166,19 +211,24 @@ public class WatcherManager implements Consumer<ShardMapDelta> {
 
         // Send an empty delta as a heartbeat (version 0 indicates heartbeat)
         var heartbeat = com.danieljhkim.kvdb.proto.coordinator.ShardMapDelta.newBuilder()
-                .setNewMapVersion(0) // 0
-                // indicates
-                // heartbeat,
-                // not a
-                // real
-                // update
+                .setNewMapVersion(0)
                 .build();
 
         for (var entry : watchers.entrySet()) {
             try {
                 entry.getKey().onNext(heartbeat);
+            } catch (io.grpc.StatusRuntimeException e) {
+                // Handle client disconnections gracefully
+                if (e.getStatus().getCode() == io.grpc.Status.Code.CANCELLED) {
+                    logger.debug("Watcher cancelled/disconnected during heartbeat, removing");
+                } else {
+                    logger.warn(
+                            "Heartbeat failed for watcher ({}), removing",
+                            e.getStatus().getCode());
+                }
+                watchers.remove(entry.getKey());
             } catch (Exception e) {
-                logger.warn("Heartbeat failed for watcher, removing", e);
+                logger.warn("Unexpected error during heartbeat, removing watcher", e);
                 watchers.remove(entry.getKey());
             }
         }

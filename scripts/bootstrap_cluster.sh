@@ -11,7 +11,7 @@ set -euo pipefail
 
 BASE_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/.."
 
-COORDINATOR_ADDR="${COORDINATOR_ADDR:-localhost:9000}"
+COORDINATOR_ADDR="${COORDINATOR_ADDR:-localhost:9002}"
 N_NODES="${N_NODES:-2}"
 FIRST_NODE_PORT="${FIRST_NODE_PORT:-8001}"
 NODE_HOST="${NODE_HOST:-localhost}"

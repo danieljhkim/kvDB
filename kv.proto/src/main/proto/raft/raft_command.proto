@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package kvdb.raft;
+
+option java_package = "com.danieljhkim.kvdb.proto.raft";
+option java_outer_classname = "RaftCommandProto";
+option java_multiple_files = true;
+
+// Wrapper for all command types
+message RaftCommand {
+  oneof command {
+    InitShards init_shards = 1;
+    RegisterNode register_node = 2;
+    SetNodeStatus set_node_status = 3;
+    SetShardReplicas set_shard_replicas = 4;
+    SetShardLeader set_shard_leader = 5;
+  }
+}
+
+message InitShards {
+  int32 num_shards = 1;
+  int32 replication_factor = 2;
+}
+
+message RegisterNode {
+  string node_id = 1;
+  string address = 2;
+  string zone = 3;
+}
+
+message SetNodeStatus {
+  string node_id = 1;
+  string status = 2;  // or use enum
+}
+
+message SetShardReplicas {
+  string shard_id = 1;
+  repeated string replicas = 2;
+}
+
+message SetShardLeader {
+  string shard_id = 1;
+  int64 epoch = 2;
+  string leader_node_id = 3;
+}
+
+// Log entry wrapper
+message RaftLogEntry {
+  int64 index = 1;
+  int64 term = 2;
+  int64 timestamp = 3;
+  RaftCommand command = 4;
+}

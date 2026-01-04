@@ -3,6 +3,8 @@ package com.danieljhkim.kvdb.kvclustercoordinator;
 import com.danieljhkim.kvdb.kvclustercoordinator.health.NodeHealthChecker;
 import com.danieljhkim.kvdb.kvclustercoordinator.scheduler.HealthCheckScheduler;
 import com.danieljhkim.kvdb.kvclustercoordinator.server.CoordinatorServer;
+import com.danieljhkim.kvdb.kvcommon.config.AppConfig;
+import com.danieljhkim.kvdb.kvcommon.config.ConfigLoader;
 import com.danieljhkim.kvdb.kvcommon.config.SystemConfig;
 import java.io.IOException;
 import org.slf4j.Logger;
@@ -16,26 +18,17 @@ public class ClusterServerApplication {
 
     private static final Logger logger = LoggerFactory.getLogger(ClusterServerApplication.class);
     private static final SystemConfig CONFIG = SystemConfig.getInstance("coordinator");
-    private static final int DEFAULT_PORT = 9000;
 
     public static void main(String[] args) throws IOException, InterruptedException {
         logger.info("Starting Coordinator server...");
 
-        int port = DEFAULT_PORT;
-        String portStr = CONFIG.getProperty("kvdb.coordinator.port");
-        if (portStr != null && !portStr.isEmpty()) {
-            port = Integer.parseInt(portStr);
-        }
+        String nodeId = System.getenv().getOrDefault("COORDINATOR_NODE_ID", "coordinator-1");
+        logger.info("Starting coordinator with nodeId: {}", nodeId);
 
-        if (args.length > 0) {
-            try {
-                port = Integer.parseInt(args[0]);
-                logger.info("Port overridden from args: {}", port);
-            } catch (NumberFormatException e) {
-                logger.warn("Invalid port argument, using: {}", port);
-            }
-        }
-        CoordinatorServer coordServer = new CoordinatorServer(port);
+        AppConfig appConfig = ConfigLoader.load();
+        logger.info("Loaded application configuration: {}", appConfig);
+
+        CoordinatorServer coordServer = new CoordinatorServer(nodeId, appConfig);
         NodeHealthChecker healthChecker = new NodeHealthChecker(coordServer.getRaftStateMachine());
         HealthCheckScheduler healthCheckScheduler = new HealthCheckScheduler(healthChecker, CONFIG);
 
@@ -50,7 +43,7 @@ public class ClusterServerApplication {
             }
         }));
 
-        logger.info("Coordinator gRPC server started on port {}", port);
+        logger.info("Coordinator gRPC server starting for node: {}", nodeId);
         healthCheckScheduler.start();
         coordServer.start();
     }

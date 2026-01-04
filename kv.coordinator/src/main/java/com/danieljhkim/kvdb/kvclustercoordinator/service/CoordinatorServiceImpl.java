@@ -2,35 +2,13 @@ package com.danieljhkim.kvdb.kvclustercoordinator.service;
 
 import com.danieljhkim.kvdb.kvclustercoordinator.converter.ProtoConverter;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftCommand;
-import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftStateMachine;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftNode;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine.RaftStateMachine;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.NodeRecord;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardRecord;
 import com.danieljhkim.kvdb.kvcommon.exception.NotLeaderException;
-import com.danieljhkim.kvdb.proto.coordinator.CoordinatorGrpc;
-import com.danieljhkim.kvdb.proto.coordinator.GetNodeRequest;
-import com.danieljhkim.kvdb.proto.coordinator.GetNodeResponse;
-import com.danieljhkim.kvdb.proto.coordinator.GetShardMapRequest;
-import com.danieljhkim.kvdb.proto.coordinator.GetShardMapResponse;
-import com.danieljhkim.kvdb.proto.coordinator.HeartbeatRequest;
-import com.danieljhkim.kvdb.proto.coordinator.HeartbeatResponse;
-import com.danieljhkim.kvdb.proto.coordinator.InitShardsRequest;
-import com.danieljhkim.kvdb.proto.coordinator.InitShardsResponse;
-import com.danieljhkim.kvdb.proto.coordinator.ListNodesRequest;
-import com.danieljhkim.kvdb.proto.coordinator.ListNodesResponse;
-import com.danieljhkim.kvdb.proto.coordinator.RegisterNodeRequest;
-import com.danieljhkim.kvdb.proto.coordinator.RegisterNodeResponse;
-import com.danieljhkim.kvdb.proto.coordinator.ReportShardLeaderRequest;
-import com.danieljhkim.kvdb.proto.coordinator.ReportShardLeaderResponse;
-import com.danieljhkim.kvdb.proto.coordinator.ResolveShardRequest;
-import com.danieljhkim.kvdb.proto.coordinator.ResolveShardResponse;
-import com.danieljhkim.kvdb.proto.coordinator.SetNodeStatusRequest;
-import com.danieljhkim.kvdb.proto.coordinator.SetNodeStatusResponse;
-import com.danieljhkim.kvdb.proto.coordinator.SetShardLeaderRequest;
-import com.danieljhkim.kvdb.proto.coordinator.SetShardLeaderResponse;
-import com.danieljhkim.kvdb.proto.coordinator.SetShardReplicasRequest;
-import com.danieljhkim.kvdb.proto.coordinator.SetShardReplicasResponse;
-import com.danieljhkim.kvdb.proto.coordinator.WatchShardMapRequest;
+import com.danieljhkim.kvdb.proto.coordinator.*;
 import io.grpc.stub.StreamObserver;
 import java.util.List;
 import org.slf4j.Logger;
@@ -44,10 +22,12 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
 
     private static final Logger logger = LoggerFactory.getLogger(CoordinatorServiceImpl.class);
 
+    private final RaftNode raftNode;
     private final RaftStateMachine raftStateMachine;
     private final WatcherManager watcherManager;
 
-    public CoordinatorServiceImpl(RaftStateMachine raftStateMachine, WatcherManager watcherManager) {
+    public CoordinatorServiceImpl(RaftNode raftNode, RaftStateMachine raftStateMachine, WatcherManager watcherManager) {
+        this.raftNode = raftNode;
         this.raftStateMachine = raftStateMachine;
         this.watcherManager = watcherManager;
     }
@@ -58,11 +38,10 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
 
     @Override
     public void getShardMap(GetShardMapRequest request, StreamObserver<GetShardMapResponse> responseObserver) {
+        requireLeader();
         ShardMapSnapshot snapshot = raftStateMachine.getSnapshot();
         long clientVersion = request.getIfVersionGt();
-
         GetShardMapResponse.Builder response = GetShardMapResponse.newBuilder();
-
         if (snapshot.getMapVersion() > clientVersion) {
             response.setState(ProtoConverter.toProto(snapshot)).setNotModified(false);
         } else {
@@ -78,6 +57,7 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
     public void watchShardMap(
             WatchShardMapRequest request,
             StreamObserver<com.danieljhkim.kvdb.proto.coordinator.ShardMapDelta> responseObserver) {
+        requireLeader();
         long fromVersion = request.getFromVersion();
         ShardMapSnapshot snapshot = raftStateMachine.getSnapshot();
 
@@ -91,6 +71,7 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
 
     @Override
     public void resolveShard(ResolveShardRequest request, StreamObserver<ResolveShardResponse> responseObserver) {
+        requireLeader();
         ShardMapSnapshot snapshot = raftStateMachine.getSnapshot();
         byte[] key = request.getKey().toByteArray();
 
@@ -107,6 +88,7 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
 
     @Override
     public void getNode(GetNodeRequest request, StreamObserver<GetNodeResponse> responseObserver) {
+        requireLeader();
         ShardMapSnapshot snapshot = raftStateMachine.getSnapshot();
         NodeRecord node = snapshot.getNode(request.getNodeId());
 
@@ -121,6 +103,7 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
 
     @Override
     public void listNodes(ListNodesRequest request, StreamObserver<ListNodesResponse> responseObserver) {
+        requireLeader();
         ShardMapSnapshot snapshot = raftStateMachine.getSnapshot();
 
         ListNodesResponse.Builder response = ListNodesResponse.newBuilder();
@@ -130,6 +113,27 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
 
         responseObserver.onNext(response.build());
         responseObserver.onCompleted();
+    }
+
+    @Override
+    public void getCoordinatorLeader(
+            GetCoordinatorLeaderRequest request, StreamObserver<GetCoordinatorLeaderResponse> responseObserver) {
+        // This method doesn't require leader - it's used for leader discovery
+        boolean isLeader = raftNode.isLeader();
+        String leaderId = raftNode.getLeaderId();
+        String leaderAddress = raftNode.getLeaderAddress();
+        long term = raftNode.getCurrentTerm();
+
+        GetCoordinatorLeaderResponse response = GetCoordinatorLeaderResponse.newBuilder()
+                .setIsLeader(isLeader)
+                .setLeaderId(leaderId != null ? leaderId : "")
+                .setLeaderAddress(leaderAddress != null ? leaderAddress : "")
+                .setTerm(term)
+                .build();
+
+        responseObserver.onNext(response);
+        responseObserver.onCompleted();
+        logger.debug("GetCoordinatorLeader: isLeader={}, leaderId={}, term={}", isLeader, leaderId, term);
     }
 
     // ============================
@@ -347,11 +351,12 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
     // ============================
 
     /**
-     * Throws NotLeaderException if this node is not the leader.
+     * Throws NotLeaderException with leader hint if this node is not the leader.
      */
     private void requireLeader() {
-        if (!raftStateMachine.isLeader()) {
-            throw new NotLeaderException();
+        if (!raftNode.isLeader()) {
+            String leaderAddress = raftNode.getLeaderAddress();
+            throw new NotLeaderException(leaderAddress);
         }
     }
 }

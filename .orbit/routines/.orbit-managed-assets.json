@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "assetKind": "routine",
+  "assets": {
+    "auto_task_scheduler": "365fe76b95fa7568b799a4b45bec22443b2ab1e307505feb9cd519cd82df8d51",
+    "ship_sweep": "45828ec56fbef0be55ce22dca65d624682286da08e14a9883ef8751dee2819ff",
+    "task_pilot": "4adcb23aebef44947fc1500f07b1aeb9cf554ca6d8db4c17cd1ee1c1e5994f8f",
+    "task_triage": "c096c90a7b9de82f84ce3ed01837a54b16da3ec1869e583c1ae82943e2b974fa",
+    "worktree_gc": "e844790c6294d9a77c3a0ae850f1c16bdb0f829a95ee8ed2c8f31b7929b4867c"
+  }
+}

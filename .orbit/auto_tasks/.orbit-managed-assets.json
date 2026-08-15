@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "assetKind": "auto_task",
+  "assets": {
+    "friction-curation": "ba524b2444063c6733e9d8d45bf4dfb19386909a4af0ee36c0a329903e607661",
+    "qa-sweep": "aa991077580c058677b5d847d423152c375d85b17c46bf101bc57bd332d85e5c"
+  }
+}

@@ -17,7 +17,7 @@ description: >
   with a diagnosis attached.
 enabled: false
 hosts:
-  - daniel.mac.local
+  - Daniels-Mac-mini.local
 trigger:
   cron: "15 * * * *"
   missed_run: skip

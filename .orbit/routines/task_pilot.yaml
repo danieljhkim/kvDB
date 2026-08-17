@@ -9,8 +9,9 @@
 # runs remain available for any workspace task and do not use this gate.
 #
 # The four-hour cadence bounds unattended agent work. At most 50 tasks form
-# five-task partitions; five Luna reviewers run concurrently, so two 30-minute
-# waves plus deterministic preparation/apply fit inside the 90-minute timeout.
+# five-task partitions; five reviewers on the `system` crew
+# run concurrently, so two 30-minute waves plus deterministic preparation/apply
+# fit inside the 90-minute timeout.
 schemaVersion: 1
 name: task-pilot-kvdb
 description: >
@@ -19,7 +20,7 @@ description: >
   definition to opt this workspace into scheduled task preflight.
 enabled: false
 hosts:
-  - daniel.mac.local
+  - Daniels-Mac-mini.local
 trigger:
   cron: "45 */4 * * *"
   missed_run: skip

@@ -7,7 +7,7 @@ description: >
   rejected, archived, or done.
 enabled: false
 hosts:
-  - daniel.mac.local
+  - Daniels-Mac-mini.local
 trigger:
   cron: "35 * * * *"
   missed_run: skip

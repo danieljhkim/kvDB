@@ -15,7 +15,7 @@ description: >
   opt this workspace into scheduled shipment.
 enabled: false
 hosts:
-  - daniel.mac.local
+  - Daniels-Mac-mini.local
 trigger:
   cron: "*/20 * * * *"
   missed_run: skip

@@ -25,7 +25,7 @@ description: >
   governs its cadence.
 enabled: false
 hosts:
-  - daniel.mac.local
+  - Daniels-Mac-mini.local
 trigger:
   cron: "* * * * *"
   missed_run: skip

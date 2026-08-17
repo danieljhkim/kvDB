@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "assetKind": "routine",
   "assets": {
-    "auto_task_scheduler": "365fe76b95fa7568b799a4b45bec22443b2ab1e307505feb9cd519cd82df8d51",
-    "ship_sweep": "45828ec56fbef0be55ce22dca65d624682286da08e14a9883ef8751dee2819ff",
-    "task_pilot": "4adcb23aebef44947fc1500f07b1aeb9cf554ca6d8db4c17cd1ee1c1e5994f8f",
-    "task_triage": "c096c90a7b9de82f84ce3ed01837a54b16da3ec1869e583c1ae82943e2b974fa",
-    "worktree_gc": "e844790c6294d9a77c3a0ae850f1c16bdb0f829a95ee8ed2c8f31b7929b4867c"
+    "auto_task_scheduler": "52bd814fd24d60e221f1f4db05c96ad3093cabb7c08a88a4afd778e80d71e831",
+    "ship_sweep": "8331d9800935e0f17101bb6b8aa0331a9d713e4fc6ca78b4ffa4864ea0a999f4",
+    "task_pilot": "6b674c3bc29b6bb4fb6459fc6795d227195f2c41dfd746053d7c4b068b20679f",
+    "task_triage": "7d98309494370836c0faabed10cd5c3eb2ea4ea0a8b40dda1b49fdefefcec7cf",
+    "worktree_gc": "b3cf844b983d0cd7612b78c738adb9185bf57034e43d0ef11d817fddf90ad8ce"
   }
 }

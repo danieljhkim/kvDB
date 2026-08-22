@@ -41,7 +41,9 @@ services:
       # Security settings (can be overridden)
       - KVDB_ADMIN_SECURITY_ENABLED=false
       - KVDB_ADMIN_SECURITY_ALLOWED_IPS=127.0.0.1/32,::1/128,172.16.0.0/12,10.0.0.0/8,192.168.0.0/16
-      - KVDB_ADMIN_SECURITY_API_KEY=dev-secret
+      # No default: export KVDB_ADMIN_SECURITY_API_KEY (or set it in a .env file) before
+      # enabling the dev API-key filter. Left blank here on purpose.
+      - KVDB_ADMIN_SECURITY_API_KEY=${KVDB_ADMIN_SECURITY_API_KEY:-}
 
   node1:
     build:

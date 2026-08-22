@@ -4,29 +4,22 @@ import com.danieljhkim.kvdb.kvadmin.security.AdminApiKeyFilter;
 import com.danieljhkim.kvdb.kvadmin.security.AdminIpAllowlistFilter;
 import java.util.List;
 import lombok.Data;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.context.annotation.Profile;
 
 /**
  * Security configuration for admin API (authn/authz, IP allowlist, mTLS).
  *
  * <p>
- * This is a placeholder configuration. In production, implement: - Authentication (JWT, OAuth2, mTLS) - Authorization
- * (RBAC) - IP allowlist/denylist - Rate limiting
+ * The admin API always requires an API key and an IP allowlist. Future production authentication
+ * mechanisms may replace the API key, but must not make the control plane unauthenticated.
  */
 @Configuration
 @ConfigurationProperties(prefix = "kvdb.admin.security")
 @Data
 public class SecurityConfig {
-
-    /**
-     * Enable security features.
-     */
-    private boolean enabled = false;
 
     /**
      * Allowed IP addresses (CIDR notation).
@@ -54,7 +47,7 @@ public class SecurityConfig {
     private String apiKey;
 
     /**
-     * IP allowlist filter. Enforces {@code allowedIps} when {@code enabled=true}.
+     * IP allowlist filter for every admin request.
      *
      * <p>
      * Note: JWT/mTLS are not implemented yet. This module currently supports:
@@ -65,7 +58,6 @@ public class SecurityConfig {
      * </p>
      */
     @Bean
-    @ConditionalOnProperty(prefix = "kvdb.admin.security", name = "enabled", havingValue = "true")
     public FilterRegistrationBean<jakarta.servlet.Filter> adminIpAllowlistFilter() {
         FilterRegistrationBean<jakarta.servlet.Filter> bean = new FilterRegistrationBean<>();
         bean.setFilter(new AdminIpAllowlistFilter(allowedIps));
@@ -75,15 +67,13 @@ public class SecurityConfig {
     }
 
     /**
-     * Dev-only API key filter. Enforces X-Admin-Api-Key when configured.
+     * API key filter for every admin request. A missing key fails startup rather than exposing the
+     * control plane without authentication.
      */
     @Bean
-    @Profile("dev")
-    @ConditionalOnProperty(prefix = "kvdb.admin.security", name = "api-key")
     public FilterRegistrationBean<jakarta.servlet.Filter> adminApiKeyFilter() {
         if (apiKey == null || apiKey.isBlank()) {
-            throw new IllegalArgumentException(
-                    "kvdb.admin.security.api-key must not be blank when security is enabled (dev profile)");
+            throw new IllegalArgumentException("kvdb.admin.security.api-key must not be blank");
         }
         FilterRegistrationBean<jakarta.servlet.Filter> bean = new FilterRegistrationBean<>();
         bean.setFilter(new AdminApiKeyFilter(apiKey));

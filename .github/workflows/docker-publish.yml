@@ -63,6 +63,30 @@ jobs:
             echo "EOF" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Verify Docker base images are pinned
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          while IFS= read -r -d '' dockerfile; do
+            if ! awk '
+              toupper($1) == "FROM" {
+                image_field = 2
+                while (image_field <= NF && $image_field ~ /^--/) {
+                  image_field++
+                }
+                if ($image_field !~ /@sha256:[[:xdigit:]]{64}$/) {
+                  print FILENAME ":" FNR ": mutable or missing Docker base-image digest: " $0
+                  invalid = 1
+                }
+              }
+              END { exit invalid }
+            ' "$dockerfile"; then
+              status=1
+            fi
+          done < <(git ls-files -z -- '*Dockerfile*')
+          exit "$status"
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:

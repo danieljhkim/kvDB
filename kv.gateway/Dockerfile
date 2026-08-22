@@ -1,5 +1,5 @@
-# Multi-stage build for Gateway
-FROM maven:3.9-eclipse-temurin-21 AS builder
+# Multi-stage build for Gateway. Maven 3.9.16 / Temurin 21 (pinned 2026-08-22).
+FROM maven:3.9.16-eclipse-temurin-21-noble@sha256:613124833fa6718ded9d655a2ebfab6425818c178f899116b93560b6f1c9ffe9 AS builder
 
 WORKDIR /build
 
@@ -9,8 +9,8 @@ COPY . .
 # Build the project and package the gateway module
 RUN mvn clean package -DskipTests -pl kv.gateway -am
 
-# Runtime stage
-FROM eclipse-temurin:21-jre
+# Runtime stage. Temurin 21.0.12_8 JRE (pinned 2026-08-22).
+FROM eclipse-temurin:21.0.12_8-jre-resolute@sha256:097b5c0e8b5c9cc402e871a87a35f20e9413af9159410db2b1bdd8b78dcca7ed
 
 WORKDIR /app
 

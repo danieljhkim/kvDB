@@ -4,6 +4,8 @@ import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
 import com.danieljhkim.kvdb.kvcommon.config.AppConfig;
 import com.danieljhkim.kvdb.kvcommon.grpc.CoordinatorClientManager;
 import com.danieljhkim.kvdb.kvcommon.grpc.GlobalExceptionInterceptor;
+import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthServerInterceptor;
+import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthToken;
 import com.danieljhkim.kvdb.kvcommon.grpc.WatchShardMapClient;
 import com.danieljhkim.kvdb.kvnode.client.ReplicaWriteClient;
 import com.danieljhkim.kvdb.kvnode.service.KVServiceImpl;
@@ -34,6 +36,7 @@ public class NodeServer {
         if (thisNode == null) {
             throw new IllegalArgumentException("Node configuration not found for nodeId: " + nodeId);
         }
+        String internalToken = InternalAuthToken.require(appConfig);
 
         this.coordinatorClientManager = new CoordinatorClientManager(appConfig);
         this.shardMapCache = new ShardMapCache();
@@ -56,14 +59,14 @@ public class NodeServer {
 
         this.shardStores =
                 new ShardStoreRegistry(baseDir, snapshotFileName, walFileName, flushInterval, enableAutoFlush);
-        this.replicaWriteClient = new ReplicaWriteClient(Duration.ofMillis(replicationTimeoutMs));
+        this.replicaWriteClient = new ReplicaWriteClient(Duration.ofMillis(replicationTimeoutMs), internalToken);
 
         this.watchShardMapClient = new WatchShardMapClient(shardMapCache, coordinatorClientManager);
 
         KVServiceImpl kvservice = new KVServiceImpl(
                 nodeId, shardMapCache, shardStores, replicaWriteClient, Duration.ofMillis(replicationTimeoutMs));
-        ServerServiceDefinition interceptedService =
-                ServerInterceptors.intercept(kvservice, new GlobalExceptionInterceptor());
+        ServerServiceDefinition interceptedService = ServerInterceptors.intercept(
+                kvservice, new InternalAuthServerInterceptor(internalToken), new GlobalExceptionInterceptor());
 
         this.server = NettyServerBuilder.forPort(thisNode.getPort())
                 .addService(interceptedService)

@@ -129,6 +129,12 @@ Note: the Admin API forwards mutations to the Coordinator (Raft-backed state mac
 
 Consult the `Makefile` for common developer commands.
 
+Internal gRPC (coordinator, storage nodes, Raft) requires
+`KVDB_INTERNAL_GRPC_TOKEN`. `make run-cluster` generates an ephemeral token in
+`data/.internal-grpc-token` when unset. Docker Compose does **not** publish
+coordinator/node ports; set the token before `docker compose up`. See
+[SECURITY.md](SECURITY.md).
+
 Typical flow:
 1. Build:
    ```bash

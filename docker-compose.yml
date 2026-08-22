@@ -8,14 +8,14 @@ services:
       context: .
       dockerfile: kv.coordinator/Dockerfile
     container_name: kvdb-coordinator
-    ports:
-      - "9000:9000"
+    # Coordinator gRPC stays on kvdb-net only. Do not publish 9000 to the host.
     networks:
       - kvdb-net
     environment:
       - KVDB_ENV=docker
       - APP_CONFIG_PATH=app-config-docker.yml
       - COORDINATOR_NODE_ID=coordinator-1
+      - KVDB_INTERNAL_GRPC_TOKEN=${KVDB_INTERNAL_GRPC_TOKEN:?Set KVDB_INTERNAL_GRPC_TOKEN}
     healthcheck:
       test: ["CMD-SHELL", "timeout 1 bash -c '</dev/tcp/localhost/9000' || exit 1"]
       interval: 10s
@@ -44,14 +44,14 @@ services:
       # No default: export KVDB_ADMIN_SECURITY_API_KEY (or set it in a .env file) before
       # enabling the dev API-key filter. Left blank here on purpose.
       - KVDB_ADMIN_SECURITY_API_KEY=${KVDB_ADMIN_SECURITY_API_KEY:-}
+      - KVDB_INTERNAL_GRPC_TOKEN=${KVDB_INTERNAL_GRPC_TOKEN:?Set KVDB_INTERNAL_GRPC_TOKEN}
 
   node1:
     build:
       context: .
       dockerfile: kv.node/Dockerfile
     container_name: kvdb-node1
-    ports:
-      - "8001:8001"
+    # Storage-node gRPC stays on kvdb-net only. Do not publish 8001 to the host.
     networks:
       - kvdb-net
     depends_on:
@@ -61,6 +61,7 @@ services:
       - KVDB_ENV=docker
       - APP_CONFIG_PATH=app-config-docker.yml
       - STORAGE_NODE_ID=node-1
+      - KVDB_INTERNAL_GRPC_TOKEN=${KVDB_INTERNAL_GRPC_TOKEN:?Set KVDB_INTERNAL_GRPC_TOKEN}
     volumes:
       - node1-data:/app/data
 
@@ -69,8 +70,7 @@ services:
       context: .
       dockerfile: kv.node/Dockerfile
     container_name: kvdb-node2
-    ports:
-      - "8002:8002"
+    # Storage-node gRPC stays on kvdb-net only. Do not publish 8002 to the host.
     networks:
       - kvdb-net
     depends_on:
@@ -80,6 +80,7 @@ services:
       - KVDB_ENV=docker
       - APP_CONFIG_PATH=app-config-docker.yml
       - STORAGE_NODE_ID=node-2
+      - KVDB_INTERNAL_GRPC_TOKEN=${KVDB_INTERNAL_GRPC_TOKEN:?Set KVDB_INTERNAL_GRPC_TOKEN}
     volumes:
       - node2-data:/app/data
 
@@ -102,6 +103,7 @@ services:
     environment:
       - KVDB_ENV=docker
       - APP_CONFIG_PATH=app-config-docker.yml
+      - KVDB_INTERNAL_GRPC_TOKEN=${KVDB_INTERNAL_GRPC_TOKEN:?Set KVDB_INTERNAL_GRPC_TOKEN}
 
 networks:
   kvdb-net:

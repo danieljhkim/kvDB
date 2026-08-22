@@ -13,6 +13,8 @@ import com.danieljhkim.kvdb.kvclustercoordinator.service.CoordinatorServiceImpl;
 import com.danieljhkim.kvdb.kvclustercoordinator.service.WatcherManager;
 import com.danieljhkim.kvdb.kvcommon.config.AppConfig;
 import com.danieljhkim.kvdb.kvcommon.grpc.GlobalExceptionInterceptor;
+import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthServerInterceptor;
+import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthToken;
 import io.grpc.Server;
 import io.grpc.ServerInterceptors;
 import io.grpc.ServerServiceDefinition;
@@ -46,6 +48,7 @@ public class CoordinatorServer {
         if (thisNode == null) {
             throw new IllegalArgumentException("Node configuration not found for nodeId: " + nodeId);
         }
+        String internalToken = InternalAuthToken.require(appConfig);
 
         // Create Raft configuration
         RaftConfiguration raftConfig = createRaftConfiguration(nodeId, appConfig);
@@ -68,7 +71,7 @@ public class CoordinatorServer {
 
         // Initialize gRPC client for peer communication
         Map<String, String> peers = raftConfig.getPeers();
-        this.raftGrpcClient = new RaftGrpcClient(nodeId, peers);
+        this.raftGrpcClient = new RaftGrpcClient(nodeId, peers, internalToken);
 
         // Initialize RaftNode
         this.raftNode = new RaftNode(
@@ -95,13 +98,17 @@ public class CoordinatorServer {
         // Create coordinator service
         CoordinatorServiceImpl coordinatorService =
                 new CoordinatorServiceImpl(raftNode, raftStateMachine, watcherManager);
+        InternalAuthServerInterceptor authInterceptor = new InternalAuthServerInterceptor(internalToken);
+        GlobalExceptionInterceptor exceptionInterceptor = new GlobalExceptionInterceptor();
         ServerServiceDefinition interceptedCoordService =
-                ServerInterceptors.intercept(coordinatorService, new GlobalExceptionInterceptor());
+                ServerInterceptors.intercept(coordinatorService, authInterceptor, exceptionInterceptor);
+        ServerServiceDefinition interceptedRaftService =
+                ServerInterceptors.intercept(raftGrpcService, authInterceptor, exceptionInterceptor);
 
         // Build gRPC server with both services
         this.server = NettyServerBuilder.forPort(thisNode.getPort())
                 .addService(interceptedCoordService)
-                .addService(raftGrpcService)
+                .addService(interceptedRaftService)
                 .build();
 
         logger.info("Initialized CoordinatorServer with RaftNode: nodeId={}, port={}", nodeId, thisNode.getPort());

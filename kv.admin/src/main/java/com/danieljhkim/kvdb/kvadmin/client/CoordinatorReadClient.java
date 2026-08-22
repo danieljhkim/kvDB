@@ -1,9 +1,10 @@
 package com.danieljhkim.kvdb.kvadmin.client;
 
 import com.danieljhkim.kvdb.kvadmin.api.dto.*;
+import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthChannels;
+import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthToken;
 import com.danieljhkim.kvdb.proto.coordinator.*;
 import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import java.util.ArrayList;
@@ -45,9 +46,8 @@ public class CoordinatorReadClient {
         return stubs.computeIfAbsent(address, addr -> {
                     ManagedChannel channel = channels.computeIfAbsent(addr, a -> {
                         String[] parts = a.split(":");
-                        return ManagedChannelBuilder.forAddress(parts[0], Integer.parseInt(parts[1]))
-                                .usePlaintext()
-                                .build();
+                        return InternalAuthChannels.plaintext(
+                                parts[0], Integer.parseInt(parts[1]), InternalAuthToken.resolve());
                     });
                     return CoordinatorGrpc.newBlockingStub(channel);
                 })

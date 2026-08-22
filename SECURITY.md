@@ -80,11 +80,35 @@ Timelines may vary depending on complexity and severity.
 kvDB is a **distributed systems learning and research project** and currently:
 
 - Does **not** provide built-in encryption at rest
-- Does **not** provide built-in authentication or authorization
-- Assumes **trusted internal networks** by default
+- Does **not** provide TLS for gRPC (plaintext inside the deployment boundary)
 - Is **not yet production-hardened**
 
-Running kvDB in hostile or untrusted environments is **not recommended** at this stage.
+### Internal gRPC authentication
+
+Coordinator and storage-node gRPC listeners require a cluster-wide token on
+control-plane mutations, data-plane writes, replication, shutdown, and Raft RPCs.
+Clients send it as metadata header `x-kvdb-internal-token`.
+
+Set the same value on every internal process:
+
+```bash
+export KVDB_INTERNAL_GRPC_TOKEN=$(openssl rand -hex 32)
+```
+
+- **Docker Compose:** coordinator `:9000` and node `:8001`/`:8002` are **not**
+  published to the host. They are reachable only on the `kvdb-net` bridge.
+  Compose refuses to start unless `KVDB_INTERNAL_GRPC_TOKEN` is set (no
+  committed default). Public entry points remain gateway `:7000` and admin `:8089`.
+- **Local `scripts/run_cluster.sh`:** an ephemeral token is written to
+  `data/.internal-grpc-token` (covered by `data/*` in `.gitignore`) and exported
+  to coordinator, node, gateway, and admin processes. Do not publish
+  coordinator/node ports on untrusted networks.
+- **Gateway client API** (`Get`/`Put`/`Delete`) is the public data plane and is
+  not gated by this token. Do not publish coordinator/node ports in production.
+
+The node `Shutdown` RPC is retained for operator use and is rejected without a
+valid token. mTLS is a follow-up; token + private network is the current
+authenticated boundary.
 
 ---
 

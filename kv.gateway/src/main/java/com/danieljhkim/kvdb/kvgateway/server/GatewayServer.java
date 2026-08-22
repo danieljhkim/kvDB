@@ -4,6 +4,7 @@ import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
 import com.danieljhkim.kvdb.kvcommon.config.AppConfig;
 import com.danieljhkim.kvdb.kvcommon.grpc.CoordinatorClientManager;
 import com.danieljhkim.kvdb.kvcommon.grpc.GlobalExceptionInterceptor;
+import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthToken;
 import com.danieljhkim.kvdb.kvcommon.grpc.WatchShardMapClient;
 import com.danieljhkim.kvdb.kvgateway.cache.NodeFailureTracker;
 import com.danieljhkim.kvdb.kvgateway.client.NodeConnectionPool;
@@ -46,10 +47,11 @@ public class GatewayServer {
         }
 
         this.port = gatewayConfig.getPort();
+        String internalToken = InternalAuthToken.require(appConfig);
 
         // Initialize core components
         this.coordinatorClientManager = new CoordinatorClientManager(appConfig);
-        this.nodePool = new NodeConnectionPool();
+        this.nodePool = new NodeConnectionPool(internalToken);
         this.shardMapCache = new ShardMapCache();
 
         // Initialize retry infrastructure

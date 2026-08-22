@@ -2,7 +2,6 @@ package com.danieljhkim.kvdb.kvcommon.grpc;
 
 import com.danieljhkim.kvdb.proto.coordinator.*;
 import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 import io.grpc.StatusRuntimeException;
 import java.util.concurrent.TimeUnit;
 import lombok.Getter;
@@ -30,9 +29,12 @@ public class CoordinatorClient {
     private final CoordinatorGrpc.CoordinatorStub asyncStub;
 
     public CoordinatorClient(String host, int port) {
+        this(host, port, InternalAuthToken.resolve());
+    }
+
+    public CoordinatorClient(String host, int port, String token) {
         this.address = host + ":" + port;
-        this.channel =
-                ManagedChannelBuilder.forAddress(host, port).usePlaintext().build();
+        this.channel = InternalAuthChannels.plaintext(host, port, token);
         this.blockingStub = CoordinatorGrpc.newBlockingStub(channel);
         this.asyncStub = CoordinatorGrpc.newStub(channel);
         logger.info("CoordinatorClient created for {}", address);

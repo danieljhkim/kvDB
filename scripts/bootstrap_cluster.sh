@@ -17,6 +17,11 @@ FIRST_NODE_PORT="${FIRST_NODE_PORT:-8001}"
 NODE_HOST="${NODE_HOST:-localhost}"
 RF="${RF:-$N_NODES}"
 NUM_SHARDS="${NUM_SHARDS:-8}"
+TOKEN_FILE="$BASE_DIR/data/.internal-grpc-token"
+if [ -z "${KVDB_INTERNAL_GRPC_TOKEN:-}" ] && [ -f "$TOKEN_FILE" ]; then
+  KVDB_INTERNAL_GRPC_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
+fi
+: "${KVDB_INTERNAL_GRPC_TOKEN:?Set KVDB_INTERNAL_GRPC_TOKEN or start the cluster with scripts/run_cluster.sh first}"
 
 if ! command -v grpcurl >/dev/null 2>&1; then
   echo "grpcurl is required but not installed."
@@ -35,6 +40,7 @@ for ((i=1; i<= N_NODES; i++)); do
   node_addr="${NODE_HOST}:${node_port}"
 
   grpcurl -plaintext \
+    -H "x-kvdb-internal-token: ${KVDB_INTERNAL_GRPC_TOKEN}" \
     -import-path "${PROTO_DIR}" \
     -proto coordinator.proto \
     -d "{\"node_id\":\"${node_id}\",\"address\":\"${node_addr}\",\"zone\":\"local\"}" \
@@ -51,6 +57,7 @@ fi
 
 echo "Initializing shards: num_shards=${NUM_SHARDS}, replication_factor=${RF}"
 grpcurl -plaintext \
+  -H "x-kvdb-internal-token: ${KVDB_INTERNAL_GRPC_TOKEN}" \
   -import-path "${PROTO_DIR}" \
   -proto coordinator.proto \
   -d "{\"num_shards\":${NUM_SHARDS},\"replication_factor\":${RF}}" \

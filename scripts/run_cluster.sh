@@ -18,6 +18,7 @@ DATA_DIR="$BASE_DIR/data"
 
 mkdir -p "$LOG_DIR"
 mkdir -p "$DATA_DIR"
+INTERNAL_TOKEN_FILE="$DATA_DIR/.internal-grpc-token"
 
 # Fail fast if build artifacts are missing (otherwise java will exit immediately and you won't see server logs).
 require_file() {
@@ -220,6 +221,19 @@ if [[ "$1" == "status" ]]; then
   exit 0
 fi
 
+if [ -z "${KVDB_INTERNAL_GRPC_TOKEN:-}" ]; then
+  if [ -f "$INTERNAL_TOKEN_FILE" ]; then
+    KVDB_INTERNAL_GRPC_TOKEN="$(tr -d '[:space:]' < "$INTERNAL_TOKEN_FILE")"
+  elif command -v openssl >/dev/null 2>&1; then
+    KVDB_INTERNAL_GRPC_TOKEN="$(openssl rand -hex 16)"
+  else
+    KVDB_INTERNAL_GRPC_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
+  fi
+fi
+export KVDB_INTERNAL_GRPC_TOKEN
+umask 077
+printf '%s\n' "$KVDB_INTERNAL_GRPC_TOKEN" > "$INTERNAL_TOKEN_FILE"
+
 echo "================================================="
 echo " Spinning up Distributed kvdb Cluster"
 echo "================================================="
@@ -265,5 +279,6 @@ if [ "$START_ADMIN" = "true" ]; then
 fi
 echo "Logs  : $LOG_DIR"
 echo "Data  : $DATA_DIR"
+echo "Internal gRPC token file: $INTERNAL_TOKEN_FILE"
 echo "Stop  : ./scripts/run_cluster.sh stop"
 echo "================================================="

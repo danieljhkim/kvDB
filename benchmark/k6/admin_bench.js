@@ -21,7 +21,10 @@ export const options = {
 };
 
 const BASE_URL = __ENV.ADMIN_BASE_URL || __ENV.BASE_URL || "http://localhost:8089";
-const API_KEY = __ENV.K6_API_KEY || "dev-secret";
+const API_KEY = __ENV.K6_API_KEY;
+if (!API_KEY) {
+  throw new Error("K6_API_KEY env var is required, e.g. K6_API_KEY=<secret> k6 run admin_bench.js");
+}
 
 // Typically shard-init is a one-time bootstrap; leave off for load runs.
 const RUN_SHARD_INIT = (__ENV.RUN_SHARD_INIT || "true").toLowerCase() === "true";

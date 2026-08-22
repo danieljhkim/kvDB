@@ -7,14 +7,15 @@ set -euo pipefail
 #   benchmark/results/admin/vegeta/<datetime>.log
 #
 # Usage:
-#   ./benchmark/scripts/run_vegeta_admin.sh
+#   API_KEY=<secret> ./benchmark/scripts/run_vegeta_admin.sh
 #
 # Common overrides:
-#   ADMIN_BASE_URL=http://localhost:8089 RATE=500 DURATION=30s ./benchmark/scripts/run_vegeta_admin.sh
-#   BOOTSTRAP=true NUM_SHARDS=8 RF=2 N_NODES=2 ./benchmark/scripts/run_vegeta_admin.sh
+#   API_KEY=<secret> ADMIN_BASE_URL=http://localhost:8089 RATE=500 DURATION=30s ./benchmark/scripts/run_vegeta_admin.sh
+#   API_KEY=<secret> BOOTSTRAP=true NUM_SHARDS=8 RF=2 N_NODES=2 ./benchmark/scripts/run_vegeta_admin.sh
 #
 # Requirements:
 #   - vegeta installed: https://github.com/tsenart/vegeta
+#   - API_KEY env var set to the admin's configured X-Admin-Api-Key value (no default)
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
@@ -26,7 +27,7 @@ TIMESTAMP="$(date +"%Y%m%d_%H%M%S")"
 OUT_FILE="${SERVICE_DIR}/${TIMESTAMP}.log"
 
 ADMIN_BASE_URL="${ADMIN_BASE_URL:-http://localhost:8089}"
-API_KEY="${API_KEY:-dev-secret}"
+: "${API_KEY:?API_KEY must be set, e.g. API_KEY=<secret> ./benchmark/scripts/run_vegeta_admin.sh}"
 
 # Load parameters
 RATE="${RATE:-300}"              # requests per second

@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
+import com.danieljhkim.kvdb.kvcommon.grpc.GrpcIdentity;
+import com.danieljhkim.kvdb.kvcommon.grpc.GrpcPeerIdentity;
 import com.danieljhkim.kvdb.kvgateway.cache.NodeFailureTracker;
 import com.danieljhkim.kvdb.kvgateway.client.NodeConnectionPool;
 import com.danieljhkim.kvdb.kvgateway.retry.RequestExecutor;
@@ -27,6 +29,7 @@ import com.google.protobuf.ByteString;
 import com.kvdb.proto.kvstore.KVServiceGrpc;
 import com.kvdb.proto.kvstore.SetResponse;
 import com.kvdb.proto.kvstore.ValueResponse;
+import io.grpc.Context;
 import io.grpc.stub.StreamObserver;
 import java.util.List;
 import java.util.function.Function;
@@ -55,7 +58,8 @@ class KvGatewayConsistencyTest {
         CapturingExecutor executor = new CapturingExecutor();
         executor.nextResult = RequestExecutor.ExecutionResult.success(
                 ValueResponse.newBuilder()
-                        .setValue("value")
+                        .setValue(ByteString.copyFromUtf8("value"))
+                        .setFound(true)
                         .setVersion(7)
                         .setAppliedVersion(11)
                         .build(),
@@ -104,14 +108,14 @@ class KvGatewayConsistencyTest {
         KvGatewayServiceImpl service = new KvGatewayServiceImpl(cache(), executor);
         CapturingObserver<PutResponse> observer = new CapturingObserver<>();
 
-        service.put(
+        runAsClient(() -> service.put(
                 PutRequest.newBuilder()
                         .setCtx(RequestContext.newBuilder().setRequestId("stable-id"))
                         .setKey(ByteString.copyFromUtf8("key"))
                         .setValue(ByteString.copyFromUtf8("value"))
                         .setOptions(WriteOptions.newBuilder().setRequireIdempotency(false))
                         .build(),
-                observer);
+                observer));
 
         assertEquals(
                 Status.Code.WRITE_OUTCOME_UNKNOWN, observer.value.getStatus().getCode());
@@ -127,14 +131,14 @@ class KvGatewayConsistencyTest {
         KvGatewayServiceImpl service = new KvGatewayServiceImpl(cache(), executor);
         CapturingObserver<PutResponse> observer = new CapturingObserver<>();
 
-        service.put(
+        runAsClient(() -> service.put(
                 PutRequest.newBuilder()
                         .setCtx(RequestContext.newBuilder().setRequestId("stable-id"))
                         .setKey(ByteString.copyFromUtf8("key"))
                         .setValue(ByteString.copyFromUtf8("value"))
                         .setOptions(WriteOptions.newBuilder().setRequireIdempotency(true))
                         .build(),
-                observer);
+                observer));
 
         assertEquals(Status.Code.OK, observer.value.getStatus().getCode());
         assertTrue(executor.replaySafe);
@@ -166,6 +170,14 @@ class KvGatewayConsistencyTest {
                 .setAddress(address)
                 .setStatus(NodeStatus.ALIVE)
                 .build();
+    }
+
+    private static void runAsClient(Runnable operation) {
+        Context.current()
+                .withValue(
+                        GrpcPeerIdentity.CURRENT,
+                        new GrpcIdentity(GrpcIdentity.Role.EXTERNAL_CLIENT, "tenant", "alice"))
+                .run(operation);
     }
 
     private static final class CapturingObserver<T> implements StreamObserver<T> {

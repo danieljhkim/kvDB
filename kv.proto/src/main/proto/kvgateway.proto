@@ -81,7 +81,9 @@ message WriteOptions {
 
   // Optional: require expected version (optimistic concurrency).
   // If set, write only succeeds if current version matches.
-  uint64 if_version_equals = 4;
+  // Presence is significant: an absent condition is different from expecting
+  // legacy version 0. Adding presence does not change the field's wire shape.
+  optional uint64 if_version_equals = 4;
 
   // Optional: require key does not exist (create-only).
   bool if_not_exists = 5;

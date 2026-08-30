@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.google.protobuf.ByteString;
 import com.kvdb.proto.kvstore.MutationKind;
 import com.kvdb.proto.kvstore.ReplicatedMutation;
 import java.nio.file.Path;
@@ -50,8 +51,8 @@ class VersionedShardMutationTest {
                 .setEpoch(1)
                 .setVersion(2)
                 .setKind(MutationKind.SET)
-                .setKey("key-2")
-                .setValue("two")
+                .setKey(ByteString.copyFromUtf8("key-2"))
+                .setValue(ByteString.copyFromUtf8("two"))
                 .setOriginNodeId("leader")
                 .build();
 
@@ -63,7 +64,7 @@ class VersionedShardMutationTest {
         assertTrue(store.commitMutation(second).success());
 
         ReplicatedMutation conflictingDuplicate =
-                first.toBuilder().setValue("different").build();
+                first.toBuilder().setValue(ByteString.copyFromUtf8("different")).build();
         assertFalse(store.prepareMutation(conflictingDuplicate).success());
         ReplicatedMutation stale =
                 first.toBuilder().setRequestId("request-stale").build();

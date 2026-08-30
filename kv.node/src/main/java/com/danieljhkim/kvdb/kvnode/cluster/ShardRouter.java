@@ -5,6 +5,7 @@ import com.danieljhkim.kvdb.kvcommon.exception.InvalidRequestException;
 import com.danieljhkim.kvdb.kvcommon.exception.ShardMapUnavailableException;
 import com.danieljhkim.kvdb.kvcommon.exception.ShardMovedException;
 import com.danieljhkim.kvdb.proto.coordinator.ShardRecord;
+import com.google.protobuf.ByteString;
 import java.nio.charset.StandardCharsets;
 
 /**
@@ -29,8 +30,12 @@ public class ShardRouter {
      * @throws ShardMapUnavailableException if shard map is not available
      */
     public String resolveShardId(String key) {
+        return resolveShardId(ByteString.copyFrom(key, StandardCharsets.UTF_8));
+    }
+
+    public String resolveShardId(ByteString key) {
         validateShardMapAvailable();
-        return shardMapCache.resolveShardId(key.getBytes(StandardCharsets.UTF_8));
+        return shardMapCache.resolveShardId(key.toByteArray());
     }
 
     /**
@@ -72,6 +77,10 @@ public class ShardRouter {
      * @throws InvalidRequestException if they don't match
      */
     public void validateShardIdForKey(String key, String requestShardId) {
+        validateShardIdForKey(ByteString.copyFrom(key, StandardCharsets.UTF_8), requestShardId);
+    }
+
+    public void validateShardIdForKey(ByteString key, String requestShardId) {
         String expectedShard = resolveShardId(key);
         if (!expectedShard.equals(requestShardId)) {
             throw new InvalidRequestException("shard_id does not match key's resolved shard");

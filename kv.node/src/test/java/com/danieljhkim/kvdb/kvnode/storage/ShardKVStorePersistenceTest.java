@@ -31,7 +31,7 @@ class ShardKVStorePersistenceTest {
         Path walPath = tempDir.resolve("failed-append.wal");
         WALManager failedWal = new WALManager(walPath.toString()) {
             @Override
-            public synchronized void log(String operation, String key, String value) {
+            public synchronized void log(String operation, byte[] key, byte[] value) {
                 throw new UncheckedIOException("No space left on device", new IOException("disk full"));
             }
         };

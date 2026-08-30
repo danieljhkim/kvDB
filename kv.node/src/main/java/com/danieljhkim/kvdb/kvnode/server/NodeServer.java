@@ -9,6 +9,7 @@ import com.danieljhkim.kvdb.kvcommon.grpc.GrpcSecurity;
 import com.danieljhkim.kvdb.kvcommon.grpc.GrpcSecurityConfig;
 import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthServerInterceptor;
 import com.danieljhkim.kvdb.kvcommon.grpc.WatchShardMapClient;
+import com.danieljhkim.kvdb.kvcommon.limits.KvRequestLimits;
 import com.danieljhkim.kvdb.kvcommon.observability.AdmissionControlInterceptor;
 import com.danieljhkim.kvdb.kvcommon.observability.CorrelationIdInterceptor;
 import com.danieljhkim.kvdb.kvcommon.observability.HealthHttpServer;
@@ -68,6 +69,7 @@ public class NodeServer {
         // Get replication configuration with defaults
         AppConfig.ReplicationConfig replicationConfig = appConfig.getReplication();
         long replicationTimeoutMs = replicationConfig != null ? replicationConfig.getTimeoutMs() : 500;
+        KvRequestLimits requestLimits = new KvRequestLimits(appConfig.getLimits());
 
         this.shardStores =
                 new ShardStoreRegistry(baseDir, snapshotFileName, walFileName, flushInterval, enableAutoFlush);
@@ -76,7 +78,12 @@ public class NodeServer {
         this.watchShardMapClient = new WatchShardMapClient(shardMapCache, coordinatorClientManager);
 
         this.kvService = new KVServiceImpl(
-                nodeId, shardMapCache, shardStores, replicaWriteClient, Duration.ofMillis(replicationTimeoutMs));
+                nodeId,
+                shardMapCache,
+                shardStores,
+                replicaWriteClient,
+                Duration.ofMillis(replicationTimeoutMs),
+                appConfig.getLimits());
         ServerServiceDefinition interceptedService = ServerInterceptors.intercept(
                 kvService,
                 new CorrelationIdInterceptor(),
@@ -86,6 +93,8 @@ public class NodeServer {
                 new GlobalExceptionInterceptor());
 
         this.server = GrpcSecurity.configureServer(NettyServerBuilder.forPort(thisNode.getPort()), grpcSecurity)
+                .maxInboundMessageSize(requestLimits.maxMessageBytes())
+                .maxConcurrentCallsPerConnection(requestLimits.maxConcurrentRequestsPerConnection())
                 .addService(interceptedService)
                 .build();
         this.drainBudget = Duration.ofMillis(drainBudgetMillis());

@@ -13,6 +13,7 @@ public class AppConfig {
     private GatewayConfig gateway;
     private PersistenceConfig persistence;
     private ReplicationConfig replication;
+    private LimitsConfig limits;
     private RaftConfig raft;
 
     @Setter
@@ -91,6 +92,17 @@ public class AppConfig {
         public String toString() {
             return "ReplicationConfig{" + "timeoutMs=" + timeoutMs + '}';
         }
+    }
+
+    @Setter
+    @Getter
+    public static class LimitsConfig {
+        private int maxKeyBytes = 4 * 1024;
+        private int maxValueBytes = 1024 * 1024;
+        private int maxMessageBytes = 2 * 1024 * 1024;
+        private int maxBatchEntries = 128;
+        private int maxConcurrentRequestsPerConnection = 128;
+        private int maxContextFieldBytes = 512;
     }
 
     @Setter

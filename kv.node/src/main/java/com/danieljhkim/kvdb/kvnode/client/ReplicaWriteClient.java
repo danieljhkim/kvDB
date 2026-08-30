@@ -29,28 +29,41 @@ public class ReplicaWriteClient {
         this.rpcTimeout = Objects.requireNonNull(rpcTimeout, "rpcTimeout");
     }
 
-    public SetResponse replicateSet(String targetAddress, ReplicateSetRequest req) {
+    public ReplicationAck replicateMutation(String targetAddress, ReplicateMutationRequest req) {
         try {
             KVServiceGrpc.KVServiceBlockingStub stub = blockingStub(targetAddress);
-            SetResponse response = stub.withDeadlineAfter(rpcTimeout.toMillis(), TimeUnit.MILLISECONDS)
-                    .replicateSet(req);
-            Metrics.increment("kvdb_replica_rpc_total", "node", "set", "ok");
+            ReplicationAck response = stub.withDeadlineAfter(rpcTimeout.toMillis(), TimeUnit.MILLISECONDS)
+                    .replicateMutation(req);
+            Metrics.increment("kvdb_replica_rpc_total", "node", "mutation", "ok");
             return response;
         } catch (RuntimeException e) {
-            Metrics.increment("kvdb_replica_rpc_total", "node", "set", "error");
+            Metrics.increment("kvdb_replica_rpc_total", "node", "mutation", "error");
             throw e;
         }
     }
 
-    public DeleteResponse replicateDelete(String targetAddress, ReplicateDeleteRequest req) {
+    public ReplicaRepairResponse repairReplica(String targetAddress, ReplicaRepairRequest req) {
         try {
             KVServiceGrpc.KVServiceBlockingStub stub = blockingStub(targetAddress);
-            DeleteResponse response = stub.withDeadlineAfter(rpcTimeout.toMillis(), TimeUnit.MILLISECONDS)
-                    .replicateDelete(req);
-            Metrics.increment("kvdb_replica_rpc_total", "node", "delete", "ok");
+            ReplicaRepairResponse response = stub.withDeadlineAfter(rpcTimeout.toMillis(), TimeUnit.MILLISECONDS)
+                    .repairReplica(req);
+            Metrics.increment("kvdb_replica_rpc_total", "node", "repair", "ok");
             return response;
         } catch (RuntimeException e) {
-            Metrics.increment("kvdb_replica_rpc_total", "node", "delete", "error");
+            Metrics.increment("kvdb_replica_rpc_total", "node", "repair", "error");
+            throw e;
+        }
+    }
+
+    public ReplicaStateResponse fetchReplicaState(String targetAddress, ReplicaStateRequest req) {
+        try {
+            KVServiceGrpc.KVServiceBlockingStub stub = blockingStub(targetAddress);
+            ReplicaStateResponse response = stub.withDeadlineAfter(rpcTimeout.toMillis(), TimeUnit.MILLISECONDS)
+                    .fetchReplicaState(req);
+            Metrics.increment("kvdb_replica_rpc_total", "node", "fetch_state", "ok");
+            return response;
+        } catch (RuntimeException e) {
+            Metrics.increment("kvdb_replica_rpc_total", "node", "fetch_state", "error");
             throw e;
         }
     }

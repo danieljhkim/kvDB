@@ -95,6 +95,12 @@ public class ShardMapCache implements Consumer<ShardMapDelta> {
         return state.getShardsMap().get(shardId);
     }
 
+    /** Returns an immutable snapshot of the current shard records. */
+    public List<ShardRecord> getShards() {
+        ClusterState state = stateRef.get();
+        return state == null ? List.of() : List.copyOf(state.getShardsMap().values());
+    }
+
     public boolean isReplica(String shardId, String nodeId) {
         ShardRecord shard = getShard(shardId);
         if (shard == null) {

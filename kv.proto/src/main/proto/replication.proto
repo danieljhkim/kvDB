@@ -12,12 +12,25 @@ service ReplicationService {
 }
 
 message ReplicationRequest {
-  string operation = 1; // "PUT" or "DELETE"
-  string key = 2;
-  string value = 3;     // for put
-  int64 sequence = 4;   // optional: for ordering
+  string request_id = 1; // stable across retries
+  string shard_id = 2;
+  uint64 shard_epoch = 3;
+  uint64 version = 4;    // monotonic shard log position
+  string operation = 5; // "PUT" or "DELETE"
+  string key = 6;
+  string value = 7;     // for put
+  ReplicationPhase phase = 8;
 }
 
 message ReplicationResponse {
   bool success = 1;
+  bool durable = 2;
+  uint64 committed_version = 3;
+}
+
+enum ReplicationPhase {
+  REPLICATION_PHASE_UNSPECIFIED = 0;
+  PREPARE = 1;
+  COMMIT = 2;
+  ABORT = 3;
 }

@@ -11,8 +11,9 @@ service KVService {
   rpc Set (KeyValueRequest) returns (SetResponse);
   rpc Delete (DeleteRequest) returns (DeleteResponse);
   // Internal replication RPCs (node-to-node). These should not be called by clients.
-  rpc ReplicateSet (ReplicateSetRequest) returns (SetResponse);
-  rpc ReplicateDelete (ReplicateDeleteRequest) returns (DeleteResponse);
+  rpc ReplicateMutation (ReplicateMutationRequest) returns (ReplicationAck);
+  rpc RepairReplica (ReplicaRepairRequest) returns (ReplicaRepairResponse);
+  rpc FetchReplicaState (ReplicaStateRequest) returns (ReplicaStateResponse);
   rpc Ping (PingRequest) returns (PingResponse);
   rpc Shutdown (ShutdownRequest) returns (ShutdownResponse);
 }
@@ -24,6 +25,9 @@ message KeyRequest {
 message KeyValueRequest {
   string key = 1;
   string value = 2;
+  // Stable across gateway retries. The node generates one only for legacy callers.
+  string request_id = 3;
+  WriteDurability durability = 4;
 }
 
 message ValueResponse {
@@ -32,33 +36,97 @@ message ValueResponse {
 
 message SetResponse {
   bool success = 1;
+  string request_id = 2;
+  uint64 version = 3;
+  bool durable = 4;
 }
 
 message DeleteRequest {
   string key = 1;
+  string request_id = 2;
+  WriteDurability durability = 3;
 }
 
 message DeleteResponse {
   bool success = 1;
+  string request_id = 2;
+  uint64 version = 3;
+  bool durable = 4;
 }
 
 // ============================
 // Replication (internal)
 // ============================
 
-message ReplicateSetRequest {
-  string shard_id = 1;
-  uint64 epoch = 2;
-  string key = 3;
-  string value = 4;
-  string origin_node_id = 5;
+enum WriteDurability {
+  WRITE_DURABILITY_UNSPECIFIED = 0;
+  QUORUM_SYNC = 1;
+  ALL_SYNC = 2;
 }
 
-message ReplicateDeleteRequest {
+enum MutationKind {
+  MUTATION_KIND_UNSPECIFIED = 0;
+  SET = 1;
+  DELETE = 2;
+}
+
+enum ReplicationPhase {
+  REPLICATION_PHASE_UNSPECIFIED = 0;
+  PREPARE = 1;
+  COMMIT = 2;
+  ABORT = 3;
+}
+
+message ReplicatedMutation {
+  string request_id = 1;
+  string shard_id = 2;
+  uint64 epoch = 3;
+  uint64 version = 4;
+  MutationKind kind = 5;
+  string key = 6;
+  string value = 7;
+  string origin_node_id = 8;
+}
+
+message ReplicateMutationRequest {
+  ReplicatedMutation mutation = 1;
+  ReplicationPhase phase = 2;
+}
+
+message ReplicationAck {
+  bool success = 1;
+  bool durable = 2;
+  uint64 epoch = 3;
+  uint64 committed_version = 4;
+  string message = 5;
+}
+
+message ReplicaRepairRequest {
   string shard_id = 1;
   uint64 epoch = 2;
-  string key = 3;
-  string origin_node_id = 4;
+  repeated ReplicatedMutation committed_mutations = 3;
+}
+
+message ReplicaRepairResponse {
+  bool success = 1;
+  bool durable = 2;
+  uint32 applied_mutations = 3;
+  uint64 committed_version = 4;
+}
+
+message ReplicaStateRequest {
+  string shard_id = 1;
+  uint64 epoch = 2;
+  uint64 after_version = 3;
+  uint32 max_mutations = 4;
+}
+
+message ReplicaStateResponse {
+  bool success = 1;
+  bool durable = 2;
+  repeated ReplicatedMutation committed_mutations = 3;
+  bool has_more = 4;
+  uint64 committed_version = 5;
 }
 
 message PingRequest {

@@ -74,7 +74,7 @@ public class RaftStateMachineApplier {
      */
     public CompletableFuture<Void> applyCommittedEntries() {
         if (!running) {
-            return CompletableFuture.completedFuture(null);
+            return CompletableFuture.failedFuture(new IllegalStateException("State machine applier is not running"));
         }
 
         return CompletableFuture.runAsync(this::doApply, applyExecutor);
@@ -102,6 +102,7 @@ public class RaftStateMachineApplier {
 
             } catch (Exception e) {
                 log.error("[{}] Error applying committed entries: {}", nodeId, e.getMessage(), e);
+                throw new IllegalStateException("Failed to apply committed entries", e);
             }
         }
     }
@@ -139,7 +140,7 @@ public class RaftStateMachineApplier {
                     "[{}] Applying entry at index {} (term={}) to state machine", nodeId, entry.index(), entry.term());
 
             // Apply the command to state machine
-            stateMachine.apply(entry.command());
+            stateMachine.apply(entry.command()).join();
 
             // Update lastApplied
             state.advanceLastApplied(entry.index());

@@ -156,6 +156,8 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
     @Override
     public void reportShardLeader(
             ReportShardLeaderRequest request, StreamObserver<ReportShardLeaderResponse> responseObserver) {
+        requireLeader();
+
         // This triggers a Raft command to update the leader hint
         RaftCommand.SetShardLeader command =
                 new RaftCommand.SetShardLeader(request.getShardId(), request.getEpoch(), request.getLeaderNodeId());

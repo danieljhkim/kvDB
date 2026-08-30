@@ -213,7 +213,7 @@ public class RaftNode {
      * Submits a command to be replicated (only works if this node is the leader).
      *
      * @param command the command to replicate
-     * @return CompletableFuture that completes when command is committed
+     * @return CompletableFuture that completes when command is committed and applied
      */
     public CompletableFuture<Void> submitCommand(RaftCommand command) {
         if (!state.isLeader()) {

@@ -278,8 +278,9 @@ public class KVServiceImpl extends KVServiceGrpc.KVServiceImplBase {
                     case PREPARE -> store.prepareMutation(mutation);
                     case COMMIT -> store.commitMutation(mutation);
                     case ABORT -> store.abortMutation(mutation);
-                    default -> new ShardKVStore.MutationStatus(
-                            false, false, "replication phase is required", store.committedVersion());
+                    default ->
+                        new ShardKVStore.MutationStatus(
+                                false, false, "replication phase is required", store.committedVersion());
                 };
         responseObserver.onNext(ReplicationAck.newBuilder()
                 .setSuccess(status.success())

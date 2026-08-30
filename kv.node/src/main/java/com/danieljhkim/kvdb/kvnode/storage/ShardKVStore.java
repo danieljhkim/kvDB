@@ -508,14 +508,16 @@ public class ShardKVStore {
         for (WALManager.WalRecord op : ops) {
             ByteString key = ByteString.copyFrom(op.key());
             switch (op.operation()) {
-                case "SET" -> store.put(
-                        key,
-                        new StoredValue(
-                                ByteString.copyFrom(op.value() == null ? new byte[0] : op.value()), 0, 0, 0, 0));
+                case "SET" ->
+                    store.put(
+                            key,
+                            new StoredValue(
+                                    ByteString.copyFrom(op.value() == null ? new byte[0] : op.value()), 0, 0, 0, 0));
                 case "SET2" -> store.put(key, decodeStoredValue(op.value()));
                 case "DEL" -> store.remove(key);
-                default -> throw new WALManager.WALCorruptionException(
-                        "Unknown WAL operation " + op.operation() + " for shardId=" + shardId);
+                default ->
+                    throw new WALManager.WALCorruptionException(
+                            "Unknown WAL operation " + op.operation() + " for shardId=" + shardId);
             }
         }
         if (!ops.isEmpty()) {
@@ -779,8 +781,9 @@ public class ShardKVStore {
                     ReplicatedMutation mutation = parseMutation(record.value());
                     markCommitted(mutation);
                 }
-                default -> throw new WALManager.WALCorruptionException(
-                        "Unknown replication WAL operation " + record.operation());
+                default ->
+                    throw new WALManager.WALCorruptionException(
+                            "Unknown replication WAL operation " + record.operation());
             }
         }
 

@@ -47,7 +47,7 @@ N_COORDINATORS=${N_COORDINATORS:-3}
 N_NODES=${N_NODES:-2}
 
 # Base ports
-# Coordinator (gRPC) - first coordinator defaults to 9001
+# Coordinator seed endpoints match Docker Compose: localhost:9001-9003.
 COORDINATOR_BASE_PORT=${COORDINATOR_BASE_PORT:-9001}
 # Gateway (gRPC) defaults to 7000 in code
 GATEWAY_PORT=${GATEWAY_PORT:-7000}

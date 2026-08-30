@@ -131,9 +131,10 @@ Consult the `Makefile` for common developer commands.
 
 Internal gRPC (coordinator, storage nodes, Raft) requires
 `KVDB_INTERNAL_GRPC_TOKEN`. `make run-cluster` generates an ephemeral token in
-`data/.internal-grpc-token` when unset. Docker Compose does **not** publish
-coordinator/node ports; set the token before `docker compose up`. See
-[SECURITY.md](SECURITY.md).
+`data/.internal-grpc-token` when unset. Local processes and Docker Compose use
+the same coordinator seed endpoints (`localhost:9001` through
+`localhost:9003`). Compose publishes them on loopback only; storage-node ports
+remain private. See [SECURITY.md](SECURITY.md).
 
 Typical flow:
 1. Build:
@@ -152,6 +153,27 @@ Typical flow:
    ```bash
    make smoke-test
    ```
+
+For the durable three-coordinator Docker deployment:
+
+```bash
+export KVDB_INTERNAL_GRPC_TOKEN="$(openssl rand -hex 32)"
+export KVDB_ADMIN_SECURITY_API_KEY="$(openssl rand -hex 32)"
+docker compose up --build --detach
+STORAGE_NODE_ADDRS=node1:8001,node2:8002 make bootstrap-cluster
+docker compose up --detach --wait --wait-timeout 180
+STORAGE_NODE_ADDRS=node1:8001,node2:8002 make smoke-test
+docker compose down
+```
+
+Coordinator and storage-node state files live in named volumes. Use rolling
+restarts to keep quorum available without re-bootstrap, and use
+`docker compose down --volumes` only for an intentional wipe. The automated
+failover, rolling-restart, persistence, and wipe check is:
+
+```bash
+./scripts/docker_failover_test.sh
+```
 
 ---
 

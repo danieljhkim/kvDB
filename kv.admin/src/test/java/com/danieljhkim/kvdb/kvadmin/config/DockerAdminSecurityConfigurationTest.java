@@ -21,7 +21,7 @@ class DockerAdminSecurityConfigurationTest {
 
         assertTrue(compose.contains("127.0.0.1:8089:8089"));
         assertTrue(compose.contains(
-                "KVDB_ADMIN_SECURITY_API_KEY=${KVDB_ADMIN_SECURITY_API_KEY:?Set KVDB_ADMIN_SECURITY_API_KEY}"));
+                "KVDB_ADMIN_SECURITY_API_KEY: ${KVDB_ADMIN_SECURITY_API_KEY:?Set KVDB_ADMIN_SECURITY_API_KEY}"));
         assertFalse(compose.contains("KVDB_ADMIN_SECURITY_ENABLED=false"));
         assertFalse(dockerProperties.contains("kvdb.admin.security.enabled=false"));
         assertTrue(dockerProperties.contains("kvdb.admin.security.api-key=${KVDB_ADMIN_SECURITY_API_KEY}"));

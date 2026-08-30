@@ -1,5 +1,7 @@
 package com.danieljhkim.kvdb.kvnode.storage;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Map;
@@ -35,6 +37,17 @@ public class ShardStoreRegistry {
 
     public ShardKVStore getOrCreate(String shardId) {
         return stores.computeIfAbsent(shardId, this::createStore);
+    }
+
+    /** Checks the storage root before advertising the node as writable. */
+    public boolean isWritable() {
+        try {
+            Files.createDirectories(baseDir);
+            return Files.isDirectory(baseDir) && Files.isWritable(baseDir);
+        } catch (IOException | SecurityException e) {
+            logger.warn("Storage root is not writable: {}", baseDir);
+            return false;
+        }
     }
 
     private ShardKVStore createStore(String shardId) {

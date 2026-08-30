@@ -26,7 +26,7 @@ public class ClusterServerApplication {
         logger.info("Starting coordinator with nodeId: {}", nodeId);
 
         AppConfig appConfig = ConfigLoader.load();
-        logger.info("Loaded application configuration: {}", appConfig);
+        logger.info("Loaded application configuration");
 
         CoordinatorServer coordServer = new CoordinatorServer(nodeId, appConfig);
         NodeHealthChecker healthChecker = new NodeHealthChecker(coordServer.getRaftStateMachine());

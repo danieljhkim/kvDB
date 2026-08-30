@@ -1,6 +1,7 @@
 package com.danieljhkim.kvdb.kvnode.storage;
 
 import com.danieljhkim.kvdb.kvcommon.annotations.Timer;
+import com.danieljhkim.kvdb.kvcommon.observability.Metrics;
 import com.danieljhkim.kvdb.kvcommon.persistence.WALManager;
 import com.danieljhkim.kvdb.kvnode.persistence.FilePersistenceManager;
 import com.danieljhkim.kvdb.kvnode.persistence.PersistenceManager;
@@ -120,6 +121,7 @@ public class ShardKVStore {
             store.putAll(loadedData);
             logger.info("Loaded {} entries from disk for shardId={}", loadedData.size(), shardId);
         } catch (IOException e) {
+            Metrics.increment("kvdb_snapshot_failures_total", "node", "load", "error");
             logger.error("Failed to load shard snapshot from disk for shardId={}", shardId, e);
         }
     }
@@ -129,6 +131,7 @@ public class ShardKVStore {
         try {
             persistenceManager.save(store);
         } catch (IOException e) {
+            Metrics.increment("kvdb_snapshot_failures_total", "node", "save", "error");
             logger.error("Failed to save shard snapshot to disk for shardId={}", shardId, e);
         }
     }

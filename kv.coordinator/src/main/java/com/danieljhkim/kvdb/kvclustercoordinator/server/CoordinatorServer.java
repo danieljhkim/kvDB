@@ -15,6 +15,12 @@ import com.danieljhkim.kvdb.kvcommon.config.AppConfig;
 import com.danieljhkim.kvdb.kvcommon.grpc.GlobalExceptionInterceptor;
 import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthServerInterceptor;
 import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthToken;
+import com.danieljhkim.kvdb.kvcommon.observability.AdmissionControlInterceptor;
+import com.danieljhkim.kvdb.kvcommon.observability.CorrelationIdInterceptor;
+import com.danieljhkim.kvdb.kvcommon.observability.HealthHttpServer;
+import com.danieljhkim.kvdb.kvcommon.observability.Metrics;
+import com.danieljhkim.kvdb.kvcommon.observability.RequestMetricsInterceptor;
+import com.danieljhkim.kvdb.kvcommon.observability.ServiceLifecycle;
 import io.grpc.Server;
 import io.grpc.ServerInterceptors;
 import io.grpc.ServerServiceDefinition;
@@ -34,6 +40,9 @@ public class CoordinatorServer {
     private static final Logger logger = LoggerFactory.getLogger(CoordinatorServer.class);
 
     private final Server server;
+    private final HealthHttpServer healthServer;
+    private final ServiceLifecycle lifecycle = new ServiceLifecycle();
+    private final Duration drainBudget;
 
     @Getter
     private final RaftStateMachine raftStateMachine;
@@ -100,16 +109,39 @@ public class CoordinatorServer {
                 new CoordinatorServiceImpl(raftNode, raftStateMachine, watcherManager);
         InternalAuthServerInterceptor authInterceptor = new InternalAuthServerInterceptor(internalToken);
         GlobalExceptionInterceptor exceptionInterceptor = new GlobalExceptionInterceptor();
-        ServerServiceDefinition interceptedCoordService =
-                ServerInterceptors.intercept(coordinatorService, authInterceptor, exceptionInterceptor);
-        ServerServiceDefinition interceptedRaftService =
-                ServerInterceptors.intercept(raftGrpcService, authInterceptor, exceptionInterceptor);
+        ServerServiceDefinition interceptedCoordService = ServerInterceptors.intercept(
+                coordinatorService,
+                new CorrelationIdInterceptor(),
+                new AdmissionControlInterceptor(lifecycle),
+                new RequestMetricsInterceptor("coordinator", lifecycle),
+                authInterceptor,
+                exceptionInterceptor);
+        ServerServiceDefinition interceptedRaftService = ServerInterceptors.intercept(
+                raftGrpcService,
+                new CorrelationIdInterceptor(),
+                new RequestMetricsInterceptor("coordinator_raft", lifecycle),
+                authInterceptor,
+                exceptionInterceptor);
 
         // Build gRPC server with both services
         this.server = NettyServerBuilder.forPort(thisNode.getPort())
                 .addService(interceptedCoordService)
                 .addService(interceptedRaftService)
                 .build();
+        this.drainBudget = Duration.ofMillis(drainBudgetMillis());
+        this.healthServer = new HealthHttpServer(
+                healthPort(thisNode.getPort()),
+                lifecycle,
+                () -> raftNode.getCurrentLeader() != null
+                        && !raftNode.getCurrentLeader().isBlank());
+        Metrics.gauge("kvdb_raft_term", "coordinator", () -> raftNode.getCurrentTerm());
+        Metrics.gauge("kvdb_raft_is_leader", "coordinator", () -> raftNode.isLeader() ? 1 : 0);
+        Metrics.gauge("kvdb_raft_commit_index", "coordinator", () -> raftNode.getState()
+                .getCommitIndex());
+        Metrics.gauge(
+                "kvdb_raft_apply_lag",
+                "coordinator",
+                () -> raftNode.getState().getCommitIndex() - raftNode.getState().getLastApplied());
 
         logger.info("Initialized CoordinatorServer with RaftNode: nodeId={}, port={}", nodeId, thisNode.getPort());
     }
@@ -172,6 +204,7 @@ public class CoordinatorServer {
         watcherManager.start();
 
         server.start();
+        healthServer.start();
         logger.info("gRPC server started on port {}", server.getPort());
 
         server.awaitTermination();
@@ -179,6 +212,18 @@ public class CoordinatorServer {
 
     public void shutdown() throws InterruptedException {
         logger.info("Shutting down CoordinatorServer...");
+        lifecycle.beginDrain();
+        boolean drained = false;
+
+        if (server != null) {
+            server.shutdown();
+            drained = lifecycle.awaitDrain(drainBudget);
+            if (!server.awaitTermination(drainBudget.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                logger.warn("Coordinator RPC drain timed out after {} ms", drainBudget.toMillis());
+                server.shutdownNow();
+            }
+            logger.info("Coordinator RPC drain outcome: drained={}", drained);
+        }
 
         if (raftNode != null) {
             raftNode.stop();
@@ -190,16 +235,20 @@ public class CoordinatorServer {
             logger.info("RaftGrpcClient closed");
         }
 
-        if (server != null) {
-            server.shutdown().awaitTermination(3, java.util.concurrent.TimeUnit.SECONDS);
-            logger.info("gRPC server stopped");
-        }
-
         if (watcherManager != null) {
             watcherManager.stop();
             logger.info("WatcherManager stopped");
         }
+        healthServer.close();
 
         logger.info("CoordinatorServer shutdown complete");
+    }
+
+    private static int healthPort(int grpcPort) {
+        return Integer.parseInt(System.getenv().getOrDefault("KVDB_HEALTH_PORT", Integer.toString(grpcPort + 10_000)));
+    }
+
+    private static long drainBudgetMillis() {
+        return Long.parseLong(System.getenv().getOrDefault("KVDB_DRAIN_TIMEOUT_MS", "30000"));
     }
 }

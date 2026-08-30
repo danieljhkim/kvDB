@@ -1,5 +1,6 @@
 package com.danieljhkim.kvdb.kvgateway.retry;
 
+import com.danieljhkim.kvdb.kvcommon.observability.Metrics;
 import com.danieljhkim.kvdb.kvgateway.cache.NodeFailureTracker;
 import com.danieljhkim.kvdb.kvgateway.client.NodeConnectionPool;
 import com.danieljhkim.kvdb.proto.coordinator.NodeRecord;
@@ -136,11 +137,13 @@ public class RequestExecutor {
                 }
 
                 if (attempt < retryPolicy.getMaxAttempts()) {
+                    Metrics.increment("kvdb_retries_total", "gateway", "node_rpc", "retry");
                     sleepWithBackoff(attempt);
                 }
             }
         }
 
+        Metrics.increment("kvdb_retries_total", "gateway", "node_rpc", "exhausted");
         return ExecutionResult.failure(
                 lastException != null ? lastException.getStatus().getCode() : Status.Code.UNAVAILABLE,
                 lastException != null ? lastException.getStatus().getDescription() : "All retry attempts exhausted",
@@ -166,6 +169,7 @@ public class RequestExecutor {
             failureTracker.clearFailure(hintedAddress);
             return ExecutionResult.success(response, hintedAddress);
         } catch (StatusRuntimeException hintedEx) {
+            Metrics.increment("kvdb_retries_total", "gateway", "leader_hint", "failed");
             logger.warn(
                     "Leader-hint retry failed (node={}): {}",
                     hintedAddress,

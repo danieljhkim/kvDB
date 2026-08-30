@@ -2,6 +2,7 @@ package com.danieljhkim.kvdb.kvnode.cluster;
 
 import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
 import com.danieljhkim.kvdb.kvcommon.exception.NodeUnavailableException;
+import com.danieljhkim.kvdb.kvcommon.observability.Metrics;
 import com.danieljhkim.kvdb.kvnode.client.ReplicaWriteClient;
 import com.danieljhkim.kvdb.proto.coordinator.ShardRecord;
 import com.kvdb.proto.kvstore.ReplicateDeleteRequest;
@@ -77,12 +78,14 @@ public class ReplicationManager {
         });
 
         if (acks < requiredAcks) {
+            Metrics.increment("kvdb_replica_quorum_total", "node", "set", "unavailable");
             throw new NodeUnavailableException(
                     String.format(
                             "Replication quorum not reached for shard %s (acks=%d, required=%d)",
                             shardId, acks, requiredAcks),
                     shardId);
         }
+        Metrics.increment("kvdb_replica_quorum_total", "node", "set", "ok");
 
         log.debug("Successfully replicated SET to {} replicas for shard {} (quorum={})", acks, shardId, requiredAcks);
     }
@@ -124,12 +127,14 @@ public class ReplicationManager {
         });
 
         if (acks < requiredAcks) {
+            Metrics.increment("kvdb_replica_quorum_total", "node", "delete", "unavailable");
             throw new NodeUnavailableException(
                     String.format(
                             "Replication quorum not reached for shard %s (acks=%d, required=%d)",
                             shardId, acks, requiredAcks),
                     shardId);
         }
+        Metrics.increment("kvdb_replica_quorum_total", "node", "delete", "ok");
 
         log.debug(
                 "Successfully replicated DELETE to {} replicas for shard {} (quorum={})", acks, shardId, requiredAcks);

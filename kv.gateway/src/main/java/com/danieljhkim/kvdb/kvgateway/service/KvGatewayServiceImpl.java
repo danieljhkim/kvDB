@@ -29,7 +29,6 @@ import io.grpc.stub.StreamObserver;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.UUID;
 
 /**
  * gRPC service implementation for the KvGateway. Handles Get, Put, Delete operations by routing to appropriate storage
@@ -55,10 +54,13 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
             String keyStr = new String(keyBytes, StandardCharsets.UTF_8);
             final String shardId = resolveShardId(keyBytes);
             Consistency consistency = request.getOptions().getConsistency();
-            KeyRequest nodeRequest = KeyRequest.newBuilder().setKey(keyStr).build();
+            KeyRequest nodeRequest = KeyRequest.newBuilder()
+                    .setKey(keyStr)
+                    .setRequireLeader(consistency == Consistency.STRONG)
+                    .build();
 
             ExecutionResult<ValueResponse> result = requestExecutor.executeWithRetry(
-                    shardId, false, stub -> stub.get(nodeRequest), () -> getNodesForRead(shardId, consistency));
+                    shardId, false, true, stub -> stub.get(nodeRequest), () -> getNodesForRead(shardId, consistency));
             if (!result.isSuccess()) {
                 throw new NodeUnavailableException(result.getErrorMessage(), shardId, result.getErrorCode());
             }
@@ -71,7 +73,9 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
                     .setKv(KeyValue.newBuilder()
                             .setKey(request.getKey())
                             .setValue(com.google.protobuf.ByteString.copyFromUtf8(nodeResponse.getValue()))
+                            .setVersion(nodeResponse.getVersion())
                             .build())
+                    .setAppliedVersion(nodeResponse.getAppliedVersion())
                     .build());
             responseObserver.onCompleted();
 
@@ -92,15 +96,24 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
             String keyStr = new String(keyBytes, StandardCharsets.UTF_8);
             String valueStr = request.getValue().toStringUtf8();
             final String shardId = resolveShardId(keyBytes);
+            String requestId = requireWriteRequestId(request.getCtx().getRequestId());
+            boolean replaySafe = request.getOptions().getRequireIdempotency();
             KeyValueRequest nodeRequest = KeyValueRequest.newBuilder()
                     .setKey(keyStr)
                     .setValue(valueStr)
-                    .setRequestId(writeRequestId(request.getCtx().getRequestId()))
+                    .setRequestId(requestId)
                     .setDurability(com.kvdb.proto.kvstore.WriteDurability.QUORUM_SYNC)
                     .build();
             ExecutionResult<SetResponse> result = requestExecutor.executeWithRetry(
-                    shardId, true, stub -> stub.set(nodeRequest), () -> getNodesForWrite(shardId));
+                    shardId, true, replaySafe, stub -> stub.set(nodeRequest), () -> getNodesForWrite(shardId));
             if (!result.isSuccess()) {
+                if (result.isAmbiguous()) {
+                    responseObserver.onNext(PutResponse.newBuilder()
+                            .setStatus(writeOutcomeUnknownStatus(shardId, result))
+                            .build());
+                    responseObserver.onCompleted();
+                    return;
+                }
                 throw new NodeUnavailableException(result.getErrorMessage(), shardId, result.getErrorCode());
             }
             SetResponse nodeResponse = result.getResponse();
@@ -129,15 +142,24 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
             byte[] keyBytes = request.getKey().toByteArray();
             String keyStr = new String(keyBytes, StandardCharsets.UTF_8);
             final String shardId = resolveShardId(keyBytes);
+            String requestId = requireWriteRequestId(request.getCtx().getRequestId());
+            boolean replaySafe = request.getOptions().getRequireIdempotency();
             com.kvdb.proto.kvstore.DeleteRequest nodeRequest = com.kvdb.proto.kvstore.DeleteRequest.newBuilder()
                     .setKey(keyStr)
-                    .setRequestId(writeRequestId(request.getCtx().getRequestId()))
+                    .setRequestId(requestId)
                     .setDurability(com.kvdb.proto.kvstore.WriteDurability.QUORUM_SYNC)
                     .build();
             ExecutionResult<com.kvdb.proto.kvstore.DeleteResponse> result = requestExecutor.executeWithRetry(
-                    shardId, true, stub -> stub.delete(nodeRequest), () -> getNodesForWrite(shardId));
+                    shardId, true, replaySafe, stub -> stub.delete(nodeRequest), () -> getNodesForWrite(shardId));
 
             if (!result.isSuccess()) {
+                if (result.isAmbiguous()) {
+                    responseObserver.onNext(DeleteResponse.newBuilder()
+                            .setStatus(writeOutcomeUnknownStatus(shardId, result))
+                            .build());
+                    responseObserver.onCompleted();
+                    return;
+                }
                 throw new NodeUnavailableException(result.getErrorMessage(), shardId, result.getErrorCode());
             }
             com.kvdb.proto.kvstore.DeleteResponse nodeResponse = result.getResponse();
@@ -221,19 +243,22 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
     /**
      * Gets candidate nodes for a read operation.
      */
-    private List<NodeRecord> getNodesForRead(String shardId, Consistency consistency) {
+    List<NodeRecord> getNodesForRead(String shardId, Consistency consistency) {
         List<NodeRecord> candidates = new ArrayList<>();
 
         NodeRecord leader = shardMapCache.getLeaderNode(shardId);
         List<NodeRecord> replicas = shardMapCache.getReplicaNodes(shardId);
 
         if (consistency == Consistency.STRONG) {
-            // Leader first for strong consistency
+            // Never fall back: the node also validates leadership and crosses a quorum read barrier.
             addIfAlive(candidates, leader);
-            addAllIfAlive(candidates, replicas);
         } else {
-            // Any replica first for eventual consistency (load balancing)
-            addAllIfAlive(candidates, replicas);
+            // Prefer a follower explicitly; the applied version in the response exposes its staleness.
+            for (NodeRecord replica : replicas) {
+                if (!replica.equals(leader)) {
+                    addIfAlive(candidates, replica);
+                }
+            }
             addIfAlive(candidates, leader);
         }
 
@@ -273,7 +298,18 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
         return candidates;
     }
 
-    private static String writeRequestId(String candidate) {
-        return candidate == null || candidate.isBlank() ? UUID.randomUUID().toString() : candidate;
+    static String requireWriteRequestId(String requestId) {
+        if (requestId == null || requestId.isBlank()) {
+            throw new InvalidRequestException("request_id is required for writes and must be reused by retries");
+        }
+        return requestId;
+    }
+
+    private static Status writeOutcomeUnknownStatus(String shardId, ExecutionResult<?> result) {
+        return Status.newBuilder()
+                .setCode(Status.Code.WRITE_OUTCOME_UNKNOWN)
+                .setMessage(result.getErrorMessage())
+                .setShardId(shardId)
+                .build();
     }
 }

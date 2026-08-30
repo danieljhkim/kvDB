@@ -20,6 +20,9 @@ service KVService {
 
 message KeyRequest {
   string key = 1;
+  // Strong reads set this so the node must prove current leadership and
+  // reconcile with a replica quorum before returning a value.
+  bool require_leader = 2;
 }
 
 message KeyValueRequest {
@@ -32,6 +35,11 @@ message KeyValueRequest {
 
 message ValueResponse {
   string value = 1;
+  // Version of this key's last committed mutation, or 0 for legacy data.
+  uint64 version = 2;
+  // Shard-wide committed high-water mark applied by the serving node.
+  uint64 applied_version = 3;
+  uint64 shard_epoch = 4;
 }
 
 message SetResponse {

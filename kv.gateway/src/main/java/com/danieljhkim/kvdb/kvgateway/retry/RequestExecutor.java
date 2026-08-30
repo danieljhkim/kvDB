@@ -5,9 +5,12 @@ import com.danieljhkim.kvdb.kvgateway.cache.NodeFailureTracker;
 import com.danieljhkim.kvdb.kvgateway.client.NodeConnectionPool;
 import com.danieljhkim.kvdb.proto.coordinator.NodeRecord;
 import com.kvdb.proto.kvstore.KVServiceGrpc;
+import io.grpc.Context;
+import io.grpc.Deadline;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -45,20 +48,27 @@ public class RequestExecutor {
         private final Status.Code errorCode;
         private final String errorMessage;
         private final String lastNodeAddress;
+        private final boolean ambiguous;
 
-        private ExecutionResult(T response, Status.Code errorCode, String errorMessage, String lastNodeAddress) {
+        private ExecutionResult(
+                T response, Status.Code errorCode, String errorMessage, String lastNodeAddress, boolean ambiguous) {
             this.response = response;
             this.errorCode = errorCode;
             this.errorMessage = errorMessage;
             this.lastNodeAddress = lastNodeAddress;
+            this.ambiguous = ambiguous;
         }
 
         public static <T> ExecutionResult<T> success(T response, String nodeAddress) {
-            return new ExecutionResult<>(response, null, null, nodeAddress);
+            return new ExecutionResult<>(response, null, null, nodeAddress, false);
         }
 
         public static <T> ExecutionResult<T> failure(Status.Code code, String message, String nodeAddress) {
-            return new ExecutionResult<>(null, code, message, nodeAddress);
+            return new ExecutionResult<>(null, code, message, nodeAddress, false);
+        }
+
+        public static <T> ExecutionResult<T> ambiguous(Status.Code code, String message, String nodeAddress) {
+            return new ExecutionResult<>(null, code, message, nodeAddress, true);
         }
 
         public boolean isSuccess() {
@@ -80,22 +90,33 @@ public class RequestExecutor {
         public String getLastNodeAddress() {
             return lastNodeAddress;
         }
+
+        public boolean isAmbiguous() {
+            return ambiguous;
+        }
     }
 
     /**
      * Executes a request with retry logic.
      */
-    @SuppressWarnings("all")
     public <T> ExecutionResult<T> executeWithRetry(
             String shardId,
             boolean isWrite,
+            boolean replaySafe,
             Function<KVServiceGrpc.KVServiceBlockingStub, T> operation,
             Supplier<List<NodeRecord>> nodeSupplier) {
 
+        Context context = Context.current();
+        Deadline callerDeadline = context.getDeadline();
         StatusRuntimeException lastException = null;
         String lastNodeAddress = null;
 
         for (int attempt = 1; attempt <= retryPolicy.getMaxAttempts(); attempt++) {
+            ExecutionResult<T> stopped = stoppedResult(context, callerDeadline, lastNodeAddress);
+            if (stopped != null) {
+                return stopped;
+            }
+
             List<NodeRecord> candidates = nodeSupplier.get();
             if (candidates == null || candidates.isEmpty()) {
                 logger.warn("No candidate nodes available for shard: {}", shardId);
@@ -108,7 +129,7 @@ public class RequestExecutor {
 
             try {
                 KVServiceGrpc.KVServiceBlockingStub stub = nodePool.getStub(lastNodeAddress);
-                T response = operation.apply(stub.withDeadlineAfter(defaultTimeoutMs, TimeUnit.MILLISECONDS));
+                T response = operation.apply(stub.withDeadline(effectiveDeadline(callerDeadline)));
                 failureTracker.clearFailure(lastNodeAddress);
                 return ExecutionResult.success(response, lastNodeAddress);
 
@@ -123,13 +144,25 @@ public class RequestExecutor {
                         code,
                         e.getStatus().getDescription());
 
+                ExecutionResult<T> stoppedAfterCall = stoppedResult(context, callerDeadline, lastNodeAddress);
+                if (stoppedAfterCall != null) {
+                    return stoppedAfterCall;
+                }
+
                 failureTracker.recordFailure(lastNodeAddress);
                 // Try leader hint if available
                 if (code == Status.Code.FAILED_PRECONDITION) {
-                    ExecutionResult<T> hintResult = tryLeaderHint(operation, e);
+                    ExecutionResult<T> hintResult = tryLeaderHint(operation, e, replaySafe, context, callerDeadline);
                     if (hintResult != null) {
                         return hintResult;
                     }
+                }
+
+                if (isWrite && !replaySafe && isAmbiguousWriteFailure(code)) {
+                    return ExecutionResult.ambiguous(
+                            code,
+                            "Write outcome is unknown after " + code + "; request was not replayed",
+                            lastNodeAddress);
                 }
 
                 if (!retryPolicy.isRetryable(code) && code != Status.Code.FAILED_PRECONDITION) {
@@ -138,7 +171,16 @@ public class RequestExecutor {
 
                 if (attempt < retryPolicy.getMaxAttempts()) {
                     Metrics.increment("kvdb_retries_total", "gateway", "node_rpc", "retry");
-                    sleepWithBackoff(attempt);
+                    if (!sleepWithBackoff(attempt, context, callerDeadline)) {
+                        ExecutionResult<T> stoppedDuringBackoff =
+                                stoppedResult(context, callerDeadline, lastNodeAddress);
+                        return stoppedDuringBackoff != null
+                                ? stoppedDuringBackoff
+                                : ExecutionResult.failure(
+                                        Status.Code.CANCELLED,
+                                        "Request interrupted during retry backoff",
+                                        lastNodeAddress);
+                    }
                 }
             }
         }
@@ -151,7 +193,11 @@ public class RequestExecutor {
     }
 
     private <T> ExecutionResult<T> tryLeaderHint(
-            Function<KVServiceGrpc.KVServiceBlockingStub, T> operation, StatusRuntimeException e) {
+            Function<KVServiceGrpc.KVServiceBlockingStub, T> operation,
+            StatusRuntimeException e,
+            boolean replaySafe,
+            Context context,
+            Deadline callerDeadline) {
         GrpcRoutingHints.RoutingHints hints = GrpcRoutingHints.from(e);
 
         if (hints.leaderHint().isEmpty()) {
@@ -163,29 +209,91 @@ public class RequestExecutor {
             return null;
         }
 
+        ExecutionResult<T> stopped = stoppedResult(context, callerDeadline, hintedAddress);
+        if (stopped != null) {
+            return stopped;
+        }
+
         try {
             KVServiceGrpc.KVServiceBlockingStub stub = nodePool.getStub(hintedAddress);
-            T response = operation.apply(stub.withDeadlineAfter(defaultTimeoutMs, TimeUnit.MILLISECONDS));
+            T response = operation.apply(stub.withDeadline(effectiveDeadline(callerDeadline)));
             failureTracker.clearFailure(hintedAddress);
             return ExecutionResult.success(response, hintedAddress);
         } catch (StatusRuntimeException hintedEx) {
+            ExecutionResult<T> stoppedAfterCall = stoppedResult(context, callerDeadline, hintedAddress);
+            if (stoppedAfterCall != null) {
+                return stoppedAfterCall;
+            }
             Metrics.increment("kvdb_retries_total", "gateway", "leader_hint", "failed");
             logger.warn(
                     "Leader-hint retry failed (node={}): {}",
                     hintedAddress,
                     hintedEx.getStatus().getDescription());
             failureTracker.recordFailure(hintedAddress);
+            Status.Code code = hintedEx.getStatus().getCode();
+            if (!replaySafe && isAmbiguousWriteFailure(code)) {
+                return ExecutionResult.ambiguous(
+                        code,
+                        "Write outcome is unknown after leader-hint retry " + code + "; request was not replayed",
+                        hintedAddress);
+            }
+            if (!retryPolicy.isRetryable(code) && code != Status.Code.FAILED_PRECONDITION) {
+                return ExecutionResult.failure(code, hintedEx.getStatus().getDescription(), hintedAddress);
+            }
             return null;
         }
     }
 
-    private void sleepWithBackoff(int attempt) {
-        long backoffMs = retryPolicy.calculateBackoff(attempt);
+    private boolean sleepWithBackoff(int attempt, Context context, Deadline callerDeadline) {
+        long backoffNanos = TimeUnit.MILLISECONDS.toNanos(retryPolicy.calculateBackoff(attempt));
+        if (callerDeadline != null) {
+            backoffNanos = Math.min(backoffNanos, Math.max(0, callerDeadline.timeRemaining(TimeUnit.NANOSECONDS)));
+        }
+        if (context.isCancelled() || (callerDeadline != null && callerDeadline.isExpired())) {
+            return false;
+        }
+        if (backoffNanos <= 0) {
+            return true;
+        }
+
+        CountDownLatch cancelled = new CountDownLatch(1);
+        Context.CancellationListener listener = ignored -> cancelled.countDown();
+        context.addListener(listener, Runnable::run);
         try {
-            Thread.sleep(backoffMs);
+            cancelled.await(backoffNanos, TimeUnit.NANOSECONDS);
+            return !context.isCancelled() && (callerDeadline == null || !callerDeadline.isExpired());
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
+            return false;
+        } finally {
+            context.removeListener(listener);
         }
+    }
+
+    private Deadline effectiveDeadline(Deadline callerDeadline) {
+        Deadline policyDeadline = Deadline.after(defaultTimeoutMs, TimeUnit.MILLISECONDS);
+        return callerDeadline == null ? policyDeadline : policyDeadline.minimum(callerDeadline);
+    }
+
+    private static <T> ExecutionResult<T> stoppedResult(
+            Context context, Deadline callerDeadline, String lastNodeAddress) {
+        if (callerDeadline != null && callerDeadline.isExpired()) {
+            return ExecutionResult.failure(
+                    Status.Code.DEADLINE_EXCEEDED, "Inbound request deadline expired", lastNodeAddress);
+        }
+        if (context.isCancelled()) {
+            return ExecutionResult.failure(Status.Code.CANCELLED, "Inbound request was cancelled", lastNodeAddress);
+        }
+        return null;
+    }
+
+    private boolean isAmbiguousWriteFailure(Status.Code code) {
+        return retryPolicy.isRetryable(code)
+                || code == Status.Code.CANCELLED
+                || code == Status.Code.UNKNOWN
+                || code == Status.Code.DEADLINE_EXCEEDED
+                || code == Status.Code.UNAVAILABLE
+                || code == Status.Code.INTERNAL;
     }
 
     private NodeRecord selectNode(List<NodeRecord> candidates, boolean isWrite) {

@@ -135,9 +135,29 @@ class ReplicationManagerTest {
                 promotedClient,
                 Duration.ofMillis(40));
 
-        manager.ensureLeaderReconciled("shard-0", promotedShard);
+        // The direct local read models EVENTUAL behavior and is stale before promotion.
+        assertEquals("(nil)", promotedStore.get("key"));
+        // STRONG admission performs a fresh quorum pull before exposing the value.
+        manager.ensureStrongReadReady("shard-0", promotedShard);
         assertEquals("value", promotedStore.get("key"));
         assertEquals(1, promotedStore.committedVersion());
+
+        fixture.leader.shutdown();
+        fixture.followers.values().forEach(ShardKVStore::shutdown);
+    }
+
+    @Test
+    void strongReadRefusesPartitionEvenAfterEpochWasPreviouslyReconciled() {
+        Fixture fixture = fixture();
+        manager.replicateSet(
+                "shard-0", fixture.shard, "key", "value", "request-before-partition", WriteDurability.QUORUM_SYNC);
+        manager.ensureLeaderReconciled("shard-0", fixture.shard);
+        fixture.client.partitioned.addAll(Set.of("node-2:9000", "node-3:9000"));
+
+        // EVENTUAL local reads remain explicit and available during the partition.
+        assertEquals("value", fixture.leader.getOrCreate("shard-0").get("key"));
+        // STRONG cannot reuse the old reconciliation decision without a fresh quorum.
+        assertThrows(NodeUnavailableException.class, () -> manager.ensureStrongReadReady("shard-0", fixture.shard));
 
         fixture.leader.shutdown();
         fixture.followers.values().forEach(ShardKVStore::shutdown);

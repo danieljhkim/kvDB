@@ -346,8 +346,20 @@ public class ShardKVStore {
 
     @Timer
     public String get(String key) {
+        return read(key).value();
+    }
+
+    /** Returns a value and its committed version metadata from one locked shard snapshot. */
+    public ReadResult read(String key) {
         Objects.requireNonNull(key, "key");
-        return store.getOrDefault(key, NIL_RESPONSE);
+        stateLock.lock();
+        try {
+            ReplicatedMutation mutation = committedByKey.get(key);
+            long keyVersion = mutation == null ? 0 : mutation.getVersion();
+            return new ReadResult(store.getOrDefault(key, NIL_RESPONSE), keyVersion, committedVersion, shardEpoch);
+        } finally {
+            stateLock.unlock();
+        }
     }
 
     public int size() {
@@ -676,6 +688,8 @@ public class ShardKVStore {
     }
 
     public record MutationStatus(boolean success, boolean durable, String message, long committedVersion) {}
+
+    public record ReadResult(String value, long version, long appliedVersion, long shardEpoch) {}
 
     private enum MutationState {
         PREPARED,

@@ -125,10 +125,6 @@ public class RaftStateMachineApplier {
                     throw completionException;
                 }
                 throw new CompletionException("Failed to apply committed entries", error);
-
-            } catch (Exception e) {
-                log.error("[{}] Error applying committed entries: {}", nodeId, e.getMessage(), e);
-                throw new IllegalStateException("Failed to apply committed entries", e);
             }
         }
     }

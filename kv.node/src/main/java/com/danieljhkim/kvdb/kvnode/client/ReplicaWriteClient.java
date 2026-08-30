@@ -2,6 +2,7 @@ package com.danieljhkim.kvdb.kvnode.client;
 
 import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthChannels;
 import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthToken;
+import com.danieljhkim.kvdb.kvcommon.observability.Metrics;
 import com.kvdb.proto.kvstore.*;
 import io.grpc.ManagedChannel;
 import java.time.Duration;
@@ -36,15 +37,29 @@ public class ReplicaWriteClient {
     }
 
     public SetResponse replicateSet(String targetAddress, ReplicateSetRequest req) {
-        KVServiceGrpc.KVServiceBlockingStub stub = blockingStub(targetAddress);
-        return stub.withDeadlineAfter(rpcTimeout.toMillis(), TimeUnit.MILLISECONDS)
-                .replicateSet(req);
+        try {
+            KVServiceGrpc.KVServiceBlockingStub stub = blockingStub(targetAddress);
+            SetResponse response = stub.withDeadlineAfter(rpcTimeout.toMillis(), TimeUnit.MILLISECONDS)
+                    .replicateSet(req);
+            Metrics.increment("kvdb_replica_rpc_total", "node", "set", "ok");
+            return response;
+        } catch (RuntimeException e) {
+            Metrics.increment("kvdb_replica_rpc_total", "node", "set", "error");
+            throw e;
+        }
     }
 
     public DeleteResponse replicateDelete(String targetAddress, ReplicateDeleteRequest req) {
-        KVServiceGrpc.KVServiceBlockingStub stub = blockingStub(targetAddress);
-        return stub.withDeadlineAfter(rpcTimeout.toMillis(), TimeUnit.MILLISECONDS)
-                .replicateDelete(req);
+        try {
+            KVServiceGrpc.KVServiceBlockingStub stub = blockingStub(targetAddress);
+            DeleteResponse response = stub.withDeadlineAfter(rpcTimeout.toMillis(), TimeUnit.MILLISECONDS)
+                    .replicateDelete(req);
+            Metrics.increment("kvdb_replica_rpc_total", "node", "delete", "ok");
+            return response;
+        } catch (RuntimeException e) {
+            Metrics.increment("kvdb_replica_rpc_total", "node", "delete", "error");
+            throw e;
+        }
     }
 
     private KVServiceGrpc.KVServiceBlockingStub blockingStub(String address) {

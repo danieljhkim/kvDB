@@ -6,6 +6,7 @@ import com.danieljhkim.kvdb.proto.coordinator.ShardMapDelta;
 import com.danieljhkim.kvdb.proto.coordinator.ShardRecord;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import org.slf4j.Logger;
@@ -21,6 +22,7 @@ public class ShardMapCache implements Consumer<ShardMapDelta> {
 
     private static final Logger logger = LoggerFactory.getLogger(ShardMapCache.class);
     private final AtomicReference<ClusterState> stateRef = new AtomicReference<>();
+    private final AtomicLong lastRefreshNanos = new AtomicLong();
 
     public boolean refreshFromFullState(ClusterState state) {
         if (state == null) {
@@ -29,6 +31,7 @@ public class ShardMapCache implements Consumer<ShardMapDelta> {
         ClusterState old = stateRef.get();
         if (old == null || state.getMapVersion() >= old.getMapVersion()) {
             stateRef.set(state);
+            lastRefreshNanos.set(System.nanoTime());
             return true;
         }
         return false;
@@ -60,6 +63,12 @@ public class ShardMapCache implements Consumer<ShardMapDelta> {
 
     public boolean isInitialized() {
         return stateRef.get() != null;
+    }
+
+    /** Returns the age of the most recently accepted shard map, or {@code Long.MAX_VALUE} when absent. */
+    public long getAgeMillis() {
+        long refreshed = lastRefreshNanos.get();
+        return refreshed == 0 ? Long.MAX_VALUE : (System.nanoTime() - refreshed) / 1_000_000L;
     }
 
     public String resolveShardId(byte[] key) {

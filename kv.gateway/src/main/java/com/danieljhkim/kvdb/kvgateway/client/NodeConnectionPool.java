@@ -87,6 +87,10 @@ public class NodeConnectionPool {
         stubs.clear();
     }
 
+    public int size() {
+        return channels.size();
+    }
+
     /**
      * Removes a specific node from the pool (e.g., on failure).
      *

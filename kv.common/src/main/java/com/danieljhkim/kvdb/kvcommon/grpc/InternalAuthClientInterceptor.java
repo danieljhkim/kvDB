@@ -1,5 +1,7 @@
 package com.danieljhkim.kvdb.kvcommon.grpc;
 
+import com.danieljhkim.kvdb.kvcommon.observability.CorrelationIdInterceptor;
+import com.danieljhkim.kvdb.kvcommon.observability.CorrelationIds;
 import io.grpc.CallOptions;
 import io.grpc.Channel;
 import io.grpc.ClientCall;
@@ -30,6 +32,10 @@ public final class InternalAuthClientInterceptor implements ClientInterceptor {
             @Override
             public void start(Listener<RespT> responseListener, Metadata headers) {
                 headers.put(InternalAuthToken.METADATA_KEY, token);
+                String correlationId = CorrelationIds.current();
+                if (correlationId != null) {
+                    headers.put(CorrelationIdInterceptor.HEADER, correlationId);
+                }
                 super.start(responseListener, headers);
             }
         };

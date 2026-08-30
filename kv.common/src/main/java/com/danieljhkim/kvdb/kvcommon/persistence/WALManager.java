@@ -1,5 +1,6 @@
 package com.danieljhkim.kvdb.kvcommon.persistence;
 
+import com.danieljhkim.kvdb.kvcommon.observability.Metrics;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.IOException;
@@ -55,9 +56,10 @@ public class WALManager {
             writer.write('\n');
             writer.flush(); // Flush to ensure durability
 
-            logger.debug("Operation logged: {} {} {}", operation, key, value);
+            logger.debug("WAL operation logged: {}", operation);
         } catch (IOException e) {
-            logger.error("Failed to log operation: {} {} {}", operation, key, value, e);
+            Metrics.increment("kvdb_wal_failures_total", "node", "append", "error");
+            logger.error("Failed to log WAL operation: {}", operation, e);
             // Close and null out the writer on error so it can be recreated on next attempt
             closeWriter();
         }
@@ -90,6 +92,7 @@ public class WALManager {
             }
             logger.info("Replayed {} operations from WAL file: {}", count, walFile);
         } catch (IOException e) {
+            Metrics.increment("kvdb_wal_failures_total", "node", "replay", "error");
             logger.error("Failed to read WAL file: {}", walFile, e);
         }
 
@@ -144,6 +147,7 @@ public class WALManager {
             logger.info("Processed {} operations from WAL file: {}", count, walFile);
             logger.info("Returning {} unique key operations", latestOps.size());
         } catch (IOException e) {
+            Metrics.increment("kvdb_wal_failures_total", "node", "replay_map", "error");
             logger.error("Failed to read WAL file: {}", walFile, e);
         }
 
@@ -161,6 +165,7 @@ public class WALManager {
                 logger.debug("WAL file didn't exist when attempting to clear: {}", walFile);
             }
         } catch (IOException e) {
+            Metrics.increment("kvdb_wal_failures_total", "node", "clear", "error");
             logger.error("Failed to clear WAL file: {}", walFile, e);
         }
     }

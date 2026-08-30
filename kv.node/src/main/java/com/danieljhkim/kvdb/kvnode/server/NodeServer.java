@@ -7,6 +7,12 @@ import com.danieljhkim.kvdb.kvcommon.grpc.GlobalExceptionInterceptor;
 import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthServerInterceptor;
 import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthToken;
 import com.danieljhkim.kvdb.kvcommon.grpc.WatchShardMapClient;
+import com.danieljhkim.kvdb.kvcommon.observability.AdmissionControlInterceptor;
+import com.danieljhkim.kvdb.kvcommon.observability.CorrelationIdInterceptor;
+import com.danieljhkim.kvdb.kvcommon.observability.HealthHttpServer;
+import com.danieljhkim.kvdb.kvcommon.observability.Metrics;
+import com.danieljhkim.kvdb.kvcommon.observability.RequestMetricsInterceptor;
+import com.danieljhkim.kvdb.kvcommon.observability.ServiceLifecycle;
 import com.danieljhkim.kvdb.kvnode.client.ReplicaWriteClient;
 import com.danieljhkim.kvdb.kvnode.service.KVServiceImpl;
 import com.danieljhkim.kvdb.kvnode.storage.ShardStoreRegistry;
@@ -24,6 +30,9 @@ public class NodeServer {
     private static final Logger logger = LoggerFactory.getLogger(NodeServer.class);
 
     private final Server server;
+    private final HealthHttpServer healthServer;
+    private final ServiceLifecycle lifecycle = new ServiceLifecycle();
+    private final Duration drainBudget;
     private final ShardMapCache shardMapCache;
     private final CoordinatorClientManager coordinatorClientManager;
     private final WatchShardMapClient watchShardMapClient;
@@ -66,11 +75,29 @@ public class NodeServer {
         KVServiceImpl kvservice = new KVServiceImpl(
                 nodeId, shardMapCache, shardStores, replicaWriteClient, Duration.ofMillis(replicationTimeoutMs));
         ServerServiceDefinition interceptedService = ServerInterceptors.intercept(
-                kvservice, new InternalAuthServerInterceptor(internalToken), new GlobalExceptionInterceptor());
+                kvservice,
+                new CorrelationIdInterceptor(),
+                new AdmissionControlInterceptor(lifecycle),
+                new RequestMetricsInterceptor("node", lifecycle),
+                new InternalAuthServerInterceptor(internalToken),
+                new GlobalExceptionInterceptor());
 
         this.server = NettyServerBuilder.forPort(thisNode.getPort())
                 .addService(interceptedService)
                 .build();
+        this.drainBudget = Duration.ofMillis(drainBudgetMillis());
+        try {
+            this.healthServer = new HealthHttpServer(
+                    healthPort(thisNode.getPort()),
+                    lifecycle,
+                    () -> shardMapCache.isInitialized()
+                            && watchShardMapClient.isConnected()
+                            && shardStores.isWritable());
+        } catch (IOException e) {
+            throw new IllegalStateException("Unable to start node health server", e);
+        }
+        Metrics.gauge("kvdb_shard_map_age_milliseconds", "node", () -> shardMapCache.getAgeMillis());
+        Metrics.gauge("kvdb_storage_writable", "node", () -> shardStores.isWritable() ? 1 : 0);
 
         logger.info("Initialized NodeServer: nodeId={}, port={}, dataDir={}", nodeId, thisNode.getPort(), baseDir);
     }
@@ -90,10 +117,19 @@ public class NodeServer {
         // Best-effort initial shard map fetch before accepting writes
         watchShardMapClient.start(shardMapCache.getMapVersion());
         server.start();
+        healthServer.start();
         server.awaitTermination();
     }
 
     public void shutdown() throws InterruptedException {
+        lifecycle.beginDrain();
+        server.shutdown();
+        boolean drained = lifecycle.awaitDrain(drainBudget);
+        if (!server.awaitTermination(drainBudget.toMillis(), TimeUnit.MILLISECONDS)) {
+            logger.warn("Node RPC drain timed out after {} ms", drainBudget.toMillis());
+            server.shutdownNow();
+        }
+        logger.info("Node RPC drain outcome: drained={}", drained);
         try {
             watchShardMapClient.shutdown();
         } catch (Exception e) {
@@ -115,9 +151,15 @@ public class NodeServer {
             logger.warn("Failed to shutdown shard stores", e);
         }
 
-        if (server != null) {
-            server.shutdown().awaitTermination(3, TimeUnit.SECONDS);
-            logger.info("NodeServer stopped");
-        }
+        healthServer.close();
+        logger.info("NodeServer stopped");
+    }
+
+    private static int healthPort(int grpcPort) {
+        return Integer.parseInt(System.getenv().getOrDefault("KVDB_HEALTH_PORT", Integer.toString(grpcPort + 10_000)));
+    }
+
+    private static long drainBudgetMillis() {
+        return Long.parseLong(System.getenv().getOrDefault("KVDB_DRAIN_TIMEOUT_MS", "30000"));
     }
 }

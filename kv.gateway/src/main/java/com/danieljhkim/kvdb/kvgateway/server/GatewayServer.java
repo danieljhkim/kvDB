@@ -6,6 +6,12 @@ import com.danieljhkim.kvdb.kvcommon.grpc.CoordinatorClientManager;
 import com.danieljhkim.kvdb.kvcommon.grpc.GlobalExceptionInterceptor;
 import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthToken;
 import com.danieljhkim.kvdb.kvcommon.grpc.WatchShardMapClient;
+import com.danieljhkim.kvdb.kvcommon.observability.AdmissionControlInterceptor;
+import com.danieljhkim.kvdb.kvcommon.observability.CorrelationIdInterceptor;
+import com.danieljhkim.kvdb.kvcommon.observability.HealthHttpServer;
+import com.danieljhkim.kvdb.kvcommon.observability.Metrics;
+import com.danieljhkim.kvdb.kvcommon.observability.RequestMetricsInterceptor;
+import com.danieljhkim.kvdb.kvcommon.observability.ServiceLifecycle;
 import com.danieljhkim.kvdb.kvgateway.cache.NodeFailureTracker;
 import com.danieljhkim.kvdb.kvgateway.client.NodeConnectionPool;
 import com.danieljhkim.kvdb.kvgateway.retry.RequestExecutor;
@@ -33,6 +39,9 @@ public class GatewayServer {
     private final int port;
 
     private final Server grpcServer;
+    private final HealthHttpServer healthServer;
+    private final ServiceLifecycle lifecycle = new ServiceLifecycle();
+    private final long drainBudgetMillis;
     private final CoordinatorClientManager coordinatorClientManager;
     private final NodeConnectionPool nodePool;
     private final WatchShardMapClient watchShardMapClient;
@@ -64,11 +73,26 @@ public class GatewayServer {
 
         // Create the service with retry-enabled executor
         KvGatewayServiceImpl gatewayService = new KvGatewayServiceImpl(shardMapCache, requestExecutor);
-        ServerServiceDefinition interceptedService =
-                ServerInterceptors.intercept(gatewayService, new GlobalExceptionInterceptor());
+        ServerServiceDefinition interceptedService = ServerInterceptors.intercept(
+                gatewayService,
+                new CorrelationIdInterceptor(),
+                new AdmissionControlInterceptor(lifecycle),
+                new RequestMetricsInterceptor("gateway", lifecycle),
+                new GlobalExceptionInterceptor());
 
         this.grpcServer =
                 NettyServerBuilder.forPort(port).addService(interceptedService).build();
+        this.drainBudgetMillis = drainBudgetMillis();
+        try {
+            this.healthServer = new HealthHttpServer(
+                    healthPort(port),
+                    lifecycle,
+                    () -> shardMapCache.isInitialized() && watchShardMapClient.isConnected());
+        } catch (IOException e) {
+            throw new IllegalStateException("Unable to start gateway health server", e);
+        }
+        Metrics.gauge("kvdb_shard_map_age_milliseconds", "gateway", () -> shardMapCache.getAgeMillis());
+        Metrics.gauge("kvdb_connection_pool_channels", "gateway", () -> nodePool.size());
 
         logger.info("GatewayServer initialized on port {}", port);
     }
@@ -101,6 +125,7 @@ public class GatewayServer {
             logger.warn("Failed to start WatchShardMap client, will rely on polling", e);
         }
         grpcServer.start();
+        healthServer.start();
         logger.info("GatewayServer started on port {}", port);
     }
 
@@ -116,14 +141,18 @@ public class GatewayServer {
      */
     public void shutdown() throws InterruptedException {
         logger.info("Shutting down GatewayServer...");
+        lifecycle.beginDrain();
         watchShardMapClient.shutdown();
         grpcServer.shutdown();
-        if (!grpcServer.awaitTermination(10, TimeUnit.SECONDS)) {
-            logger.warn("gRPC server did not terminate in time, forcing shutdown");
+        boolean drained = lifecycle.awaitDrain(java.time.Duration.ofMillis(drainBudgetMillis));
+        if (!grpcServer.awaitTermination(drainBudgetMillis, TimeUnit.MILLISECONDS)) {
+            logger.warn("Gateway RPC drain timed out after {} ms, forcing shutdown", drainBudgetMillis);
             grpcServer.shutdownNow();
         }
+        logger.info("Gateway RPC drain outcome: drained={}", drained);
         nodePool.closeAll();
         coordinatorClientManager.shutdown();
+        healthServer.close();
         logger.info("GatewayServer shutdown complete");
     }
 
@@ -134,5 +163,13 @@ public class GatewayServer {
      */
     public boolean isStreamingConnected() {
         return watchShardMapClient.isConnected();
+    }
+
+    private static int healthPort(int grpcPort) {
+        return Integer.parseInt(System.getenv().getOrDefault("KVDB_HEALTH_PORT", Integer.toString(grpcPort + 10_000)));
+    }
+
+    private static long drainBudgetMillis() {
+        return Long.parseLong(System.getenv().getOrDefault("KVDB_DRAIN_TIMEOUT_MS", "30000"));
     }
 }

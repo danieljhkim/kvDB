@@ -1,141 +1,200 @@
-# docker-compose up --build
-# docker-compose down
+# Durable local cluster: three Raft coordinators, two storage nodes, gateway,
+# and admin API. Set both required secrets before starting the stack.
+
+x-coordinator-common: &coordinator-common
+  build:
+    context: .
+    dockerfile: kv.coordinator/Dockerfile
+  networks:
+    - kvdb-net
+  environment: &coordinator-environment
+    KVDB_ENV: docker
+    APP_CONFIG_PATH: app-config-docker.yml
+    KVDB_INTERNAL_GRPC_TOKEN: ${KVDB_INTERNAL_GRPC_TOKEN:?Set KVDB_INTERNAL_GRPC_TOKEN}
+    KVDB_HEALTH_PORT: "19000"
+  healthcheck: &coordinator-healthcheck
+    test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/19000; printf \"GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3; read -r status <&3; [[ \"$$status\" == *\" 200 \"* ]]'"]
+    interval: 5s
+    timeout: 3s
+    retries: 18
+    start_period: 10s
 
 services:
-
-  coordinator:
-    build:
-      context: .
-      dockerfile: kv.coordinator/Dockerfile
-    container_name: kvdb-coordinator
-    # Coordinator gRPC stays on kvdb-net only. Do not publish 9000 to the host.
-    networks:
-      - kvdb-net
+  coordinator1:
+    <<: *coordinator-common
+    ports:
+      - "127.0.0.1:9001:9000"
     environment:
-      - KVDB_ENV=docker
-      - APP_CONFIG_PATH=app-config-docker.yml
-      - COORDINATOR_NODE_ID=coordinator-1
-      - KVDB_INTERNAL_GRPC_TOKEN=${KVDB_INTERNAL_GRPC_TOKEN:?Set KVDB_INTERNAL_GRPC_TOKEN}
-      - KVDB_HEALTH_PORT=19000
+      <<: *coordinator-environment
+      COORDINATOR_NODE_ID: coordinator-1
+    volumes:
+      - coordinator1-data:/app/data
+
+  coordinator2:
+    <<: *coordinator-common
+    ports:
+      - "127.0.0.1:9002:9000"
+    environment:
+      <<: *coordinator-environment
+      COORDINATOR_NODE_ID: coordinator-2
+    volumes:
+      - coordinator2-data:/app/data
+
+  coordinator3:
+    <<: *coordinator-common
+    ports:
+      - "127.0.0.1:9003:9000"
+    environment:
+      <<: *coordinator-environment
+      COORDINATOR_NODE_ID: coordinator-3
+    volumes:
+      - coordinator3-data:/app/data
+
+  # Compose cannot express "any two of three dependencies are healthy". This
+  # one-shot gate implements that quorum condition without making application
+  # services depend on every coordinator remaining available.
+  coordinator-quorum:
+    <<: *coordinator-common
+    depends_on:
+      coordinator1:
+        condition: service_started
+      coordinator2:
+        condition: service_started
+      coordinator3:
+        condition: service_started
+    entrypoint: ["/bin/bash", "-ec"]
+    command:
+      - |
+        deadline=$$((SECONDS + 120))
+        while (( SECONDS < deadline )); do
+          ready=0
+          for host in coordinator1 coordinator2 coordinator3; do
+            if exec 3<>/dev/tcp/$$host/19000 2>/dev/null; then
+              printf 'GET /health/ready HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n' "$$host" >&3
+              if read -r -t 2 status <&3 && [[ "$$status" == *" 200 "* ]]; then
+                ready=$$((ready + 1))
+              fi
+              exec 3<&- 3>&-
+            fi
+          done
+          if (( ready >= 2 )); then
+            echo "Coordinator quorum is ready ($$ready/3)"
+            exit 0
+          fi
+          sleep 1
+        done
+        echo "Coordinator quorum did not become ready" >&2
+        exit 1
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/19000; printf \"GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3; read -r status <&3; [[ \"$$status\" == *\" 200 \"* ]]'"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+      disable: true
+    restart: "no"
 
   admin:
     build:
       context: .
       dockerfile: kv.admin/Dockerfile
-    container_name: kvdb-admin
     ports:
-      # Keep the control plane private to the Docker host. Put a separately
-      # authenticated reverse proxy in front of it before exposing it remotely.
       - "127.0.0.1:8089:8089"
     networks:
       - kvdb-net
     depends_on:
-      coordinator:
-        condition: service_healthy
+      coordinator-quorum:
+        condition: service_completed_successfully
     environment:
-      - KVDB_ENV=docker
-      - KVDB_COORDINATOR_GRPC_ADDRESS=coordinator:9000
-      # The admin API always enforces both the API key and the IP allowlist.
-      - KVDB_ADMIN_SECURITY_ALLOWED_IPS=127.0.0.1/32,::1/128,172.16.0.0/12,10.0.0.0/8,192.168.0.0/16
-      - KVDB_ADMIN_SECURITY_API_KEY=${KVDB_ADMIN_SECURITY_API_KEY:?Set KVDB_ADMIN_SECURITY_API_KEY}
-      - KVDB_INTERNAL_GRPC_TOKEN=${KVDB_INTERNAL_GRPC_TOKEN:?Set KVDB_INTERNAL_GRPC_TOKEN}
+      KVDB_ENV: docker
+      KVDB_COORDINATOR_GRPC_ADDRESS: coordinator1:9000,coordinator2:9000,coordinator3:9000
+      KVDB_ADMIN_SECURITY_ALLOWED_IPS: 127.0.0.1/32,::1/128,172.16.0.0/12,10.0.0.0/8,192.168.0.0/16
+      KVDB_ADMIN_SECURITY_API_KEY: ${KVDB_ADMIN_SECURITY_API_KEY:?Set KVDB_ADMIN_SECURITY_API_KEY}
+      KVDB_INTERNAL_GRPC_TOKEN: ${KVDB_INTERNAL_GRPC_TOKEN:?Set KVDB_INTERNAL_GRPC_TOKEN}
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/8089; printf \"GET /admin/actuator/health/readiness HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3; read -r status <&3; [[ \"$$status\" == *\" 200 \"* ]]'"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+      interval: 5s
+      timeout: 3s
+      retries: 18
+      start_period: 10s
 
   node1:
     build:
       context: .
       dockerfile: kv.node/Dockerfile
-    container_name: kvdb-node1
-    # Storage-node gRPC stays on kvdb-net only. Do not publish 8001 to the host.
     networks:
       - kvdb-net
     depends_on:
-      coordinator:
-        condition: service_healthy
+      coordinator-quorum:
+        condition: service_completed_successfully
     environment:
-      - KVDB_ENV=docker
-      - APP_CONFIG_PATH=app-config-docker.yml
-      - STORAGE_NODE_ID=node-1
-      - KVDB_INTERNAL_GRPC_TOKEN=${KVDB_INTERNAL_GRPC_TOKEN:?Set KVDB_INTERNAL_GRPC_TOKEN}
-      - KVDB_HEALTH_PORT=18001
+      KVDB_ENV: docker
+      APP_CONFIG_PATH: app-config-docker.yml
+      STORAGE_NODE_ID: node-1
+      KVDB_INTERNAL_GRPC_TOKEN: ${KVDB_INTERNAL_GRPC_TOKEN:?Set KVDB_INTERNAL_GRPC_TOKEN}
+      KVDB_HEALTH_PORT: "18001"
     volumes:
       - node1-data:/app/data
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/18001; printf \"GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3; read -r status <&3; [[ \"$$status\" == *\" 200 \"* ]]'"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+      interval: 5s
+      timeout: 3s
+      retries: 18
+      start_period: 10s
 
   node2:
     build:
       context: .
       dockerfile: kv.node/Dockerfile
-    container_name: kvdb-node2
-    # Storage-node gRPC stays on kvdb-net only. Do not publish 8002 to the host.
     networks:
       - kvdb-net
     depends_on:
-      coordinator:
-        condition: service_healthy
+      coordinator-quorum:
+        condition: service_completed_successfully
     environment:
-      - KVDB_ENV=docker
-      - APP_CONFIG_PATH=app-config-docker.yml
-      - STORAGE_NODE_ID=node-2
-      - KVDB_INTERNAL_GRPC_TOKEN=${KVDB_INTERNAL_GRPC_TOKEN:?Set KVDB_INTERNAL_GRPC_TOKEN}
-      - KVDB_HEALTH_PORT=18002
+      KVDB_ENV: docker
+      APP_CONFIG_PATH: app-config-docker.yml
+      STORAGE_NODE_ID: node-2
+      KVDB_INTERNAL_GRPC_TOKEN: ${KVDB_INTERNAL_GRPC_TOKEN:?Set KVDB_INTERNAL_GRPC_TOKEN}
+      KVDB_HEALTH_PORT: "18002"
     volumes:
       - node2-data:/app/data
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/18002; printf \"GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3; read -r status <&3; [[ \"$$status\" == *\" 200 \"* ]]'"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+      interval: 5s
+      timeout: 3s
+      retries: 18
+      start_period: 10s
 
   gateway:
     build:
       context: .
       dockerfile: kv.gateway/Dockerfile
-    container_name: kvdb-gateway
     ports:
-      - "7000:7000"
+      - "127.0.0.1:7000:7000"
     networks:
       - kvdb-net
     depends_on:
-      coordinator:
-        condition: service_healthy
+      coordinator-quorum:
+        condition: service_completed_successfully
       node1:
         condition: service_started
       node2:
         condition: service_started
     environment:
-      - KVDB_ENV=docker
-      - APP_CONFIG_PATH=app-config-docker.yml
-      - KVDB_INTERNAL_GRPC_TOKEN=${KVDB_INTERNAL_GRPC_TOKEN:?Set KVDB_INTERNAL_GRPC_TOKEN}
-      - KVDB_HEALTH_PORT=17000
+      KVDB_ENV: docker
+      APP_CONFIG_PATH: app-config-docker.yml
+      KVDB_INTERNAL_GRPC_TOKEN: ${KVDB_INTERNAL_GRPC_TOKEN:?Set KVDB_INTERNAL_GRPC_TOKEN}
+      KVDB_HEALTH_PORT: "17000"
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/17000; printf \"GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3; read -r status <&3; [[ \"$$status\" == *\" 200 \"* ]]'"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+      interval: 5s
+      timeout: 3s
+      retries: 18
+      start_period: 10s
 
 networks:
   kvdb-net:
     driver: bridge
 
 volumes:
+  coordinator1-data:
+  coordinator2-data:
+  coordinator3-data:
   node1-data:
   node2-data:

@@ -1,69 +1,71 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
-# Bootstraps the coordinator shard map so the gateway can route requests.
-#
-# Requires: grpcurl (recommended install: `brew install grpcurl`)
-#
-# Usage:
-#   COORDINATOR_ADDR=localhost:9000 N_NODES=2 ./scripts/bootstrap_cluster.sh
-#
+# Idempotently registers storage nodes and initializes shards through the
+# elected coordinator. Both local and Docker deployments expose the same
+# loopback seed endpoints: localhost:9001, localhost:9002, localhost:9003.
 
 BASE_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/.."
+PROTO_DIR="$BASE_DIR/kv.proto/src/main/proto"
+source "$BASE_DIR/scripts/cluster_helpers.sh"
 
-COORDINATOR_ADDR="${COORDINATOR_ADDR:-localhost:9002}"
 N_NODES="${N_NODES:-2}"
 FIRST_NODE_PORT="${FIRST_NODE_PORT:-8001}"
 NODE_HOST="${NODE_HOST:-localhost}"
+STORAGE_NODE_ADDRS="${STORAGE_NODE_ADDRS:-}"
 RF="${RF:-$N_NODES}"
 NUM_SHARDS="${NUM_SHARDS:-8}"
 TOKEN_FILE="$BASE_DIR/data/.internal-grpc-token"
-if [ -z "${KVDB_INTERNAL_GRPC_TOKEN:-}" ] && [ -f "$TOKEN_FILE" ]; then
+
+if [[ -z "${KVDB_INTERNAL_GRPC_TOKEN:-}" && -f "$TOKEN_FILE" ]]; then
   KVDB_INTERNAL_GRPC_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
 fi
-: "${KVDB_INTERNAL_GRPC_TOKEN:?Set KVDB_INTERNAL_GRPC_TOKEN or start the cluster with scripts/run_cluster.sh first}"
+: "${KVDB_INTERNAL_GRPC_TOKEN:?Set KVDB_INTERNAL_GRPC_TOKEN or start the local cluster first}"
 
-if ! command -v grpcurl >/dev/null 2>&1; then
-  echo "grpcurl is required but not installed."
-  echo "Install via Homebrew: brew install grpcurl"
-  exit 1
+require_grpcurl
+
+leader="$(discover_coordinator_leader)"
+echo "Bootstrapping through elected coordinator at ${leader}"
+if [[ -n "$STORAGE_NODE_ADDRS" ]]; then
+  IFS=',' read -r -a node_addresses <<< "$STORAGE_NODE_ADDRS"
+  if (( ${#node_addresses[@]} != N_NODES )); then
+    echo "STORAGE_NODE_ADDRS must contain exactly ${N_NODES} addresses" >&2
+    exit 1
+  fi
+  echo "Registering ${N_NODES} node(s) at ${STORAGE_NODE_ADDRS}"
+else
+  echo "Registering ${N_NODES} node(s) starting at ${NODE_HOST}:${FIRST_NODE_PORT}"
 fi
 
-PROTO_DIR="$BASE_DIR/kv.proto/src/main/proto"
-
-echo "Bootstrapping coordinator at ${COORDINATOR_ADDR}"
-echo "Registering ${N_NODES} node(s) starting at ${NODE_HOST}:${FIRST_NODE_PORT}"
-
-for ((i=1; i<= N_NODES; i++)); do
+for ((i=1; i<=N_NODES; i++)); do
   node_id="node-$i"
-  node_port=$((FIRST_NODE_PORT + i - 1))
-  node_addr="${NODE_HOST}:${node_port}"
-
-  grpcurl -plaintext \
-    -H "x-kvdb-internal-token: ${KVDB_INTERNAL_GRPC_TOKEN}" \
-    -import-path "${PROTO_DIR}" \
-    -proto coordinator.proto \
-    -d "{\"node_id\":\"${node_id}\",\"address\":\"${node_addr}\",\"zone\":\"local\"}" \
-    "${COORDINATOR_ADDR}" \
-    kvdb.coordinator.Coordinator/RegisterNode >/dev/null
-
+  if [[ -n "$STORAGE_NODE_ADDRS" ]]; then
+    node_addr="${node_addresses[$((i - 1))]//[[:space:]]/}"
+  else
+    node_port=$((FIRST_NODE_PORT + i - 1))
+    node_addr="${NODE_HOST}:${node_port}"
+  fi
+  response="$(coordinator_call \
+    kvdb.coordinator.Coordinator/RegisterNode \
+    "{\"node_id\":\"${node_id}\",\"address\":\"${node_addr}\",\"zone\":\"local\"}")"
+  if ! grep -Eq '"success"[[:space:]]*:[[:space:]]*true' <<< "$response"; then
+    echo "Failed to register ${node_id}: ${response}" >&2
+    exit 1
+  fi
   echo "Registered ${node_id} @ ${node_addr}"
 done
 
-# Cap RF to N_NODES if user passed something larger.
-if [ "${RF}" -gt "${N_NODES}" ]; then
-  RF="${N_NODES}"
+if (( RF > N_NODES )); then
+  RF="$N_NODES"
 fi
 
 echo "Initializing shards: num_shards=${NUM_SHARDS}, replication_factor=${RF}"
-grpcurl -plaintext \
-  -H "x-kvdb-internal-token: ${KVDB_INTERNAL_GRPC_TOKEN}" \
-  -import-path "${PROTO_DIR}" \
-  -proto coordinator.proto \
-  -d "{\"num_shards\":${NUM_SHARDS},\"replication_factor\":${RF}}" \
-  "${COORDINATOR_ADDR}" \
-  kvdb.coordinator.Coordinator/InitShards
+response="$(coordinator_call \
+  kvdb.coordinator.Coordinator/InitShards \
+  "{\"num_shards\":${NUM_SHARDS},\"replication_factor\":${RF}}")"
+if ! grep -Eq '"success"[[:space:]]*:[[:space:]]*true' <<< "$response"; then
+  echo "Failed to initialize shards: ${response}" >&2
+  exit 1
+fi
 
 echo "Bootstrap complete."
-
-

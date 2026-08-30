@@ -95,10 +95,12 @@ Set the same value on every internal process:
 export KVDB_INTERNAL_GRPC_TOKEN=$(openssl rand -hex 32)
 ```
 
-- **Docker Compose:** coordinator `:9000` and node `:8001`/`:8002` are **not**
-  published to the host. They are reachable only on the `kvdb-net` bridge.
-  Compose refuses to start unless `KVDB_INTERNAL_GRPC_TOKEN` is set (no
-  committed default). Public entry points remain gateway `:7000` and admin `:8089`.
+- **Docker Compose:** coordinator seeds are published only on loopback as
+  `127.0.0.1:9001` through `:9003` for authenticated bootstrap and failover
+  diagnostics. Storage-node `:8001`/`:8002` and the internal Raft addresses
+  remain reachable only on the `kvdb-net` bridge. Compose refuses to start
+  unless `KVDB_INTERNAL_GRPC_TOKEN` is set (no committed default). Gateway
+  `:7000` and admin `:8089` are also bound to loopback by default.
 - **Local `scripts/run_cluster.sh`:** an ephemeral token is written to
   `data/.internal-grpc-token` (covered by `data/*` in `.gitignore`) and exported
   to coordinator, node, gateway, and admin processes. Do not publish

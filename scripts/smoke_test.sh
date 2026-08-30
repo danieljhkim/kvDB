@@ -13,7 +13,7 @@ set -euo pipefail
 #   ./scripts/smoke_test.sh
 #
 # Optional env:
-#   COORDINATOR_ADDR=localhost:9000
+#   COORDINATOR_ADDRS=localhost:9001,localhost:9002,localhost:9003
 #   GATEWAY_ADDR=localhost:7000
 #   N_NODES=2
 #   NUM_SHARDS=8
@@ -22,19 +22,14 @@ set -euo pipefail
 
 BASE_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/.."
 
-COORDINATOR_ADDR="${COORDINATOR_ADDR:-localhost:9000}"
 GATEWAY_ADDR="${GATEWAY_ADDR:-localhost:7000}"
 N_NODES="${N_NODES:-2}"
 NUM_SHARDS="${NUM_SHARDS:-8}"
 RF="${RF:-$N_NODES}"
 
-if ! command -v grpcurl >/dev/null 2>&1; then
-  echo "grpcurl is required but not installed."
-  echo "Install via Homebrew: brew install grpcurl"
-  exit 1
-fi
-
 PROTO_DIR="$BASE_DIR/kv.proto/src/main/proto"
+
+"$BASE_DIR/scripts/bootstrap_cluster.sh"
 
 echo "== Put/Get smoke test via gateway =="
 
@@ -74,5 +69,4 @@ fi
 
 echo "❌ Smoke test failed: expected value base64 ${val_b64} not found in GetResponse"
 exit 1
-
 

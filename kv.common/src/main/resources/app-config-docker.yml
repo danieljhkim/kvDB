@@ -2,9 +2,17 @@ coordinatorNodes:
   componentLabel: "kv-coordinator-node"
   nodes:
     - id: "coordinator-1"
-      host: "coordinator"
+      host: "coordinator1"
       port: 9000
       dataDir: "/app/data/raft/coordinator-1"
+    - id: "coordinator-2"
+      host: "coordinator2"
+      port: 9000
+      dataDir: "/app/data/raft/coordinator-2"
+    - id: "coordinator-3"
+      host: "coordinator3"
+      port: 9000
+      dataDir: "/app/data/raft/coordinator-3"
 
 # Storage nodes (kv.node)
 storageNodes:
@@ -40,4 +48,3 @@ raft:
   electionTimeoutMinMs: 1000
   electionTimeoutMaxMs: 2000
   maxEntriesPerRequest: 100
-

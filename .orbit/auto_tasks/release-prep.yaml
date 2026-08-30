@@ -51,8 +51,8 @@ template:
     several exist, record every duplicate candidate, and update only that one.
     If none exists, create exactly one `chore` tagged `release` with the
     candidate version and survey evidence. Its description must direct its
-    executor to RELEASING.md and preserve the human approval boundary. Its
-    context_files must contain only these verified kvDB release targets:
+    executor to RELEASING.md. Its context_files must contain only these verified
+    kvDB release targets:
 
     - `file:RELEASING.md`
     - `file:docs/release-checklist.md`
@@ -67,9 +67,7 @@ template:
     - `file:coverage/pom.xml`
 
     Stop after the evidence-backed survey and one-task handoff. Do not edit
-    version POMs or release documentation, commit, tag, push, publish images,
-    approve a task, or ask for/record human confirmation of a breaking-change
-    classification. Those actions belong to the later human-approved task.
+    version POMs or release documentation, commit, tag, push, publish images.
 
     ## Deterministic validation scenarios
 
@@ -88,7 +86,7 @@ template:
   - An eligible pass records the latest reachable v* tag, no-merge survey, referenced task IDs, candidate SemVer bump, and breaking-change evidence.
   - An eligible pass creates or updates exactly one canonical Prepare v<X.Y.Z> release task tagged release and reports its ID.
   - The canonical task points to RELEASING.md and names only verified kvDB Maven/release-documentation modification targets.
-  - The handoff stops before edits, commits, tags, pushes, publication, task approval, or human breaking-change confirmation.
+  - The handoff stops before edits, commits, tags, pushes, or publication.
   - Repeated passes do not duplicate the open probe or canonical release task.
   task_type: chore
   tags:

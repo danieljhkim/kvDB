@@ -1,7 +1,6 @@
 package com.danieljhkim.kvdb.kvgateway.client;
 
 import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthChannels;
-import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthToken;
 import com.kvdb.proto.kvstore.KVServiceGrpc;
 import io.grpc.ManagedChannel;
 import java.util.Map;
@@ -19,15 +18,8 @@ public class NodeConnectionPool {
 
     private final Map<String, ManagedChannel> channels = new ConcurrentHashMap<>();
     private final Map<String, KVServiceGrpc.KVServiceBlockingStub> stubs = new ConcurrentHashMap<>();
-    private final String token;
 
-    public NodeConnectionPool() {
-        this(InternalAuthToken.resolve());
-    }
-
-    public NodeConnectionPool(String token) {
-        this.token = token == null ? "" : token;
-    }
+    public NodeConnectionPool() {}
 
     /**
      * Gets a blocking stub for the given node address. Creates a new channel if one doesn't exist.
@@ -64,7 +56,7 @@ public class NodeConnectionPool {
             io.grpc.NameResolverRegistry.getDefaultRegistry().register(provider);
 
             logger.info("Creating gRPC channel to storage node: {}", addr);
-            return InternalAuthChannels.plaintext(host, port, token);
+            return InternalAuthChannels.forAddress(host, port);
         });
     }
 

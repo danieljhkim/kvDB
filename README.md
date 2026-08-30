@@ -129,10 +129,11 @@ Note: the Admin API forwards mutations to the Coordinator (Raft-backed state mac
 
 Consult the `Makefile` for common developer commands.
 
-Internal gRPC (coordinator, storage nodes, Raft) requires
-`KVDB_INTERNAL_GRPC_TOKEN`. `make run-cluster` generates an ephemeral token in
-`data/.internal-grpc-token` when unset. Local processes and Docker Compose use
-the same coordinator seed endpoints (`localhost:9001` through
+Internal gRPC uses mutually authenticated workload certificates in normal
+deployments. `make run-cluster` explicitly selects the fail-closed
+`development-plaintext` mode and supplies development-only identities; that mode
+is refused unless `KVDB_ENV` is `local`, `dev`, `development`, or `test`. Local
+processes and Docker Compose use the same coordinator seed endpoints (`localhost:9001` through
 `localhost:9003`). Compose publishes them on loopback only; storage-node ports
 remain private. See [SECURITY.md](SECURITY.md).
 
@@ -157,8 +158,8 @@ Typical flow:
 For the durable three-coordinator Docker deployment:
 
 ```bash
-export KVDB_INTERNAL_GRPC_TOKEN="$(openssl rand -hex 32)"
 export KVDB_ADMIN_SECURITY_API_KEY="$(openssl rand -hex 32)"
+export KVDB_TLS_DIR=/absolute/path/to/kvdb-tls
 docker compose up --build --detach
 STORAGE_NODE_ADDRS=node1:8001,node2:8002 make bootstrap-cluster
 docker compose up --detach --wait --wait-timeout 180

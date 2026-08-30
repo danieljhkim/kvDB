@@ -1,7 +1,7 @@
 package com.danieljhkim.kvdb.kvadmin.client;
 
+import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthChannels;
 import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,8 +20,7 @@ public class GatewayAdminClient {
     private final long timeoutSeconds;
 
     public GatewayAdminClient(String host, int port, long timeout, TimeUnit timeUnit) {
-        this.channel =
-                ManagedChannelBuilder.forAddress(host, port).usePlaintext().build();
+        this.channel = InternalAuthChannels.forAddress(host, port);
         this.timeoutSeconds = timeUnit.toSeconds(timeout);
         logger.info("GatewayAdminClient created for {}:{}", host, port);
     }

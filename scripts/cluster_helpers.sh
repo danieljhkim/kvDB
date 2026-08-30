@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Shared coordinator discovery and authenticated gRPC helpers. This file is
+# Shared coordinator discovery and development-identity gRPC helpers. This file is
 # sourced by cluster scripts and intentionally does not change shell options.
 
 KVDB_COORDINATOR_ADDRS_DEFAULT="localhost:9001,localhost:9002,localhost:9003"
@@ -35,7 +35,7 @@ coordinator_grpcurl() {
   fi
 
   grpcurl -plaintext -max-time 3 \
-    -H "x-kvdb-internal-token: ${KVDB_INTERNAL_GRPC_TOKEN}" \
+    -H "x-kvdb-development-identity: admin/bootstrap-local" \
     -import-path "${PROTO_DIR}" \
     -proto coordinator.proto \
     -d "$data" \

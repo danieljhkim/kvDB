@@ -4,10 +4,10 @@ import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftCommand;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine.RaftStateMachine;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.NodeRecord;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
+import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthChannels;
 import com.kvdb.proto.kvstore.KVServiceGrpc;
 import com.kvdb.proto.kvstore.PingRequest;
 import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 import io.grpc.StatusRuntimeException;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -173,9 +173,7 @@ public class NodeHealthChecker {
         return stubs.computeIfAbsent(address, addr -> {
             ManagedChannel channel = channels.computeIfAbsent(addr, a -> {
                 logger.debug("Creating gRPC channel for health check: {}", addr);
-                return ManagedChannelBuilder.forAddress(host, port)
-                        .usePlaintext()
-                        .build();
+                return InternalAuthChannels.forAddress(host, port);
             });
             return KVServiceGrpc.newBlockingStub(channel);
         });

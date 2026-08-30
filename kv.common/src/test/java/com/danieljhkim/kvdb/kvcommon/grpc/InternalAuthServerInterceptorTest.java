@@ -1,11 +1,13 @@
 package com.danieljhkim.kvdb.kvcommon.grpc;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.danieljhkim.kvdb.kvcommon.grpc.GrpcIdentity.Role;
 import com.danieljhkim.kvdb.proto.coordinator.CoordinatorGrpc;
+import com.danieljhkim.kvdb.proto.gateway.KvGatewayGrpc;
+import com.danieljhkim.kvdb.proto.raft.RaftServiceGrpc;
 import com.kvdb.proto.kvstore.KVServiceGrpc;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
@@ -13,112 +15,91 @@ import io.grpc.ServerCall;
 import io.grpc.ServerCallHandler;
 import io.grpc.Status;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.MethodSource;
 
 class InternalAuthServerInterceptorTest {
 
-    private static final String TOKEN = "test-internal-token";
-    private static final InternalAuthServerInterceptor INTERCEPTOR = new InternalAuthServerInterceptor(TOKEN);
+    @Test
+    void storageNodeCannotInvokeAdminMutation() {
+        RecordingCall<?, ?> call = new RecordingCall<>(CoordinatorGrpc.getInitShardsMethod());
 
-    static MethodDescriptor<?, ?>[] protectedMethods() {
-        return new MethodDescriptor<?, ?>[] {
-            CoordinatorGrpc.getRegisterNodeMethod(),
-            CoordinatorGrpc.getInitShardsMethod(),
-            CoordinatorGrpc.getSetNodeStatusMethod(),
-            CoordinatorGrpc.getSetShardReplicasMethod(),
-            CoordinatorGrpc.getSetShardLeaderMethod(),
-            CoordinatorGrpc.getReportShardLeaderMethod(),
-            KVServiceGrpc.getSetMethod(),
-            KVServiceGrpc.getDeleteMethod(),
-            KVServiceGrpc.getReplicateSetMethod(),
-            KVServiceGrpc.getReplicateDeleteMethod(),
-            KVServiceGrpc.getShutdownMethod()
-        };
-    }
+        intercept(call, identity("storage-node/node-1"), new AtomicReference<>());
 
-    @ParameterizedTest
-    @MethodSource("protectedMethods")
-    void unauthenticatedProtectedRpcIsRejected(MethodDescriptor<?, ?> method) {
-        RecordingCall<?, ?> call = new RecordingCall<>(method);
-        AtomicBoolean nextCalled = new AtomicBoolean(false);
-
-        INTERCEPTOR.interceptCall(call, new Metadata(), markingHandler(nextCalled));
-
-        assertNotNull(call.closedStatus);
-        assertEquals(Status.Code.UNAUTHENTICATED, call.closedStatus.getCode());
-        assertTrue(call.closedStatus.getDescription().contains("internal gRPC token"));
-        assertTrue(!nextCalled.get());
-    }
-
-    @ParameterizedTest
-    @MethodSource("protectedMethods")
-    void wrongTokenProtectedRpcIsRejected(MethodDescriptor<?, ?> method) {
-        RecordingCall<?, ?> call = new RecordingCall<>(method);
-        Metadata headers = new Metadata();
-        headers.put(InternalAuthToken.METADATA_KEY, "wrong-token");
-        AtomicBoolean nextCalled = new AtomicBoolean(false);
-
-        INTERCEPTOR.interceptCall(call, headers, markingHandler(nextCalled));
-
-        assertEquals(Status.Code.UNAUTHENTICATED, call.closedStatus.getCode());
-        assertTrue(!nextCalled.get());
-    }
-
-    @ParameterizedTest
-    @MethodSource("protectedMethods")
-    void authenticatedProtectedRpcIsAllowed(MethodDescriptor<?, ?> method) {
-        RecordingCall<?, ?> call = new RecordingCall<>(method);
-        Metadata headers = new Metadata();
-        headers.put(InternalAuthToken.METADATA_KEY, TOKEN);
-        AtomicBoolean nextCalled = new AtomicBoolean(false);
-
-        INTERCEPTOR.interceptCall(call, headers, markingHandler(nextCalled));
-
-        assertNull(call.closedStatus);
-        assertTrue(nextCalled.get());
+        assertEquals(Status.Code.PERMISSION_DENIED, call.closedStatus.getCode());
     }
 
     @Test
-    void pingRemainsUnauthenticated() {
+    void rolesAreScopedAcrossControlDataAndRaftPlanes() {
+        assertAllowed(CoordinatorGrpc.getInitShardsMethod(), "admin/operator-1");
+        assertAllowed(CoordinatorGrpc.getHeartbeatMethod(), "storage-node/node-1");
+        assertAllowed(KVServiceGrpc.getSetMethod(), "gateway/gateway-1");
+        assertAllowed(KVServiceGrpc.getReplicateSetMethod(), "storage-node/node-1");
+        assertAllowed(RaftServiceGrpc.getAppendEntriesMethod(), "coordinator/coordinator-1");
+    }
+
+    @Test
+    void gatewayIdentityComesFromVerifiedContext() {
+        RecordingCall<?, ?> call = new RecordingCall<>(KvGatewayGrpc.getPutMethod());
+        AtomicReference<GrpcIdentity> observed = new AtomicReference<>();
+
+        intercept(call, identity("client/tenant-a/alice"), observed);
+
+        assertNull(call.closedStatus);
+        assertEquals(new GrpcIdentity(Role.EXTERNAL_CLIENT, "tenant-a", "alice"), observed.get());
+    }
+
+    @Test
+    void replayedBearerCredentialIsRejectedEvenWithIdentity() {
+        RecordingCall<?, ?> call = new RecordingCall<>(KvGatewayGrpc.getGetMethod());
+        Metadata headers = identity("client/tenant-a/alice");
+        headers.put(Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER), "Bearer captured-value");
+
+        intercept(call, headers, new AtomicReference<>());
+
+        assertEquals(Status.Code.UNAUTHENTICATED, call.closedStatus.getCode());
+        assertTrue(call.closedStatus.getDescription().contains("client certificate"));
+    }
+
+    @Test
+    void missingIdentityIsRejected() {
         RecordingCall<?, ?> call = new RecordingCall<>(KVServiceGrpc.getPingMethod());
-        AtomicBoolean nextCalled = new AtomicBoolean(false);
 
-        INTERCEPTOR.interceptCall(call, new Metadata(), markingHandler(nextCalled));
-
-        assertNull(call.closedStatus);
-        assertTrue(nextCalled.get());
-    }
-
-    @Test
-    void getRemainsUnauthenticated() {
-        RecordingCall<?, ?> call = new RecordingCall<>(KVServiceGrpc.getGetMethod());
-        AtomicBoolean nextCalled = new AtomicBoolean(false);
-
-        INTERCEPTOR.interceptCall(call, new Metadata(), markingHandler(nextCalled));
-
-        assertNull(call.closedStatus);
-        assertTrue(nextCalled.get());
-    }
-
-    @Test
-    void emptyServerTokenRejectsProtectedRpc() {
-        InternalAuthServerInterceptor failClosed = new InternalAuthServerInterceptor("");
-        RecordingCall<?, ?> call = new RecordingCall<>(KVServiceGrpc.getShutdownMethod());
-        Metadata headers = new Metadata();
-        headers.put(InternalAuthToken.METADATA_KEY, TOKEN);
-        AtomicBoolean nextCalled = new AtomicBoolean(false);
-
-        failClosed.interceptCall(call, headers, markingHandler(nextCalled));
+        intercept(call, new Metadata(), new AtomicReference<>());
 
         assertEquals(Status.Code.UNAUTHENTICATED, call.closedStatus.getCode());
-        assertTrue(!nextCalled.get());
     }
 
-    private static <ReqT, RespT> ServerCallHandler<ReqT, RespT> markingHandler(AtomicBoolean nextCalled) {
+    private static void assertAllowed(MethodDescriptor<?, ?> method, String identity) {
+        RecordingCall<?, ?> call = new RecordingCall<>(method);
+        AtomicReference<GrpcIdentity> observed = new AtomicReference<>();
+        intercept(call, identity(identity), observed);
+        assertNull(call.closedStatus);
+        assertTrue(observed.get() != null);
+    }
+
+    private static Metadata identity(String value) {
+        Metadata headers = new Metadata();
+        headers.put(InternalAuthChannels.DEVELOPMENT_IDENTITY, value);
+        return headers;
+    }
+
+    private static void intercept(
+            RecordingCall<?, ?> call, Metadata headers, AtomicReference<GrpcIdentity> observedIdentity) {
+        InternalAuthServerInterceptor interceptor =
+                new InternalAuthServerInterceptor(GrpcSecurityConfig.development(Role.COORDINATOR, "test-server"));
+        AtomicBoolean nextCalled = new AtomicBoolean(false);
+        interceptor.interceptCall(call, headers, markingHandler(nextCalled, observedIdentity));
+        if (call.closedStatus == null) {
+            assertTrue(nextCalled.get());
+        }
+    }
+
+    private static <ReqT, RespT> ServerCallHandler<ReqT, RespT> markingHandler(
+            AtomicBoolean nextCalled, AtomicReference<GrpcIdentity> observedIdentity) {
         return (call, headers) -> {
             nextCalled.set(true);
+            observedIdentity.set(GrpcPeerIdentity.require());
             return new ServerCall.Listener<>() {};
         };
     }

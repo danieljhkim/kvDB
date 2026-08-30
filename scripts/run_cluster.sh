@@ -18,7 +18,8 @@ DATA_DIR="$BASE_DIR/data"
 
 mkdir -p "$LOG_DIR"
 mkdir -p "$DATA_DIR"
-INTERNAL_TOKEN_FILE="$DATA_DIR/.internal-grpc-token"
+export KVDB_ENV="${KVDB_ENV:-local}"
+export KVDB_GRPC_SECURITY_MODE="${KVDB_GRPC_SECURITY_MODE:-development-plaintext}"
 
 # Fail fast if build artifacts are missing (otherwise java will exit immediately and you won't see server logs).
 require_file() {
@@ -65,7 +66,7 @@ start_admin() {
 
     touch "$LOG_DIR/admin.log"
 
-    nohup java -jar "$ADMIN_JAR" \
+    nohup env KVDB_IDENTITY_ROLE=admin KVDB_IDENTITY_PRINCIPAL=admin-local java -jar "$ADMIN_JAR" \
       > "$LOG_DIR/admin.log" 2>&1 &
     ADMIN_PID=$!
 
@@ -96,7 +97,7 @@ start_coordinator() {
     # Ensure log file exists
     touch "$LOG_DIR/coordinator-$i.log"
 
-    nohup java -jar "$COORDINATOR_JAR" \
+    nohup env KVDB_IDENTITY_ROLE=coordinator KVDB_IDENTITY_PRINCIPAL="$coordinator_id" java -jar "$COORDINATOR_JAR" \
       > "$LOG_DIR/coordinator-$i.log" 2>&1 &
     COORDINATOR_PID=$!
 
@@ -121,7 +122,7 @@ start_nodes() {
     # Ensure log file exists
     touch "$LOG_DIR/node-$i.log"
 
-    nohup java -jar "$NODE_JAR" \
+    nohup env KVDB_IDENTITY_ROLE=storage-node KVDB_IDENTITY_PRINCIPAL="$node_id" java -jar "$NODE_JAR" \
       > "$LOG_DIR/node-$i.log" 2>&1 &
     NODE_PID=$!
     echo "Data-Node #$i started (NODE_ID=$node_id, PID: $NODE_PID)"
@@ -142,7 +143,7 @@ start_gateway() {
     # Ensure log file exists
     touch "$LOG_DIR/gateway.log"
 
-    nohup java -jar "$GATEWAY_JAR" \
+    nohup env KVDB_IDENTITY_ROLE=gateway KVDB_IDENTITY_PRINCIPAL=gateway-local java -jar "$GATEWAY_JAR" \
       > "$LOG_DIR/gateway.log" 2>&1 &
     GATEWAY_PID=$!
 
@@ -221,19 +222,6 @@ if [[ "$1" == "status" ]]; then
   exit 0
 fi
 
-if [ -z "${KVDB_INTERNAL_GRPC_TOKEN:-}" ]; then
-  if [ -f "$INTERNAL_TOKEN_FILE" ]; then
-    KVDB_INTERNAL_GRPC_TOKEN="$(tr -d '[:space:]' < "$INTERNAL_TOKEN_FILE")"
-  elif command -v openssl >/dev/null 2>&1; then
-    KVDB_INTERNAL_GRPC_TOKEN="$(openssl rand -hex 16)"
-  else
-    KVDB_INTERNAL_GRPC_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
-  fi
-fi
-export KVDB_INTERNAL_GRPC_TOKEN
-umask 077
-printf '%s\n' "$KVDB_INTERNAL_GRPC_TOKEN" > "$INTERNAL_TOKEN_FILE"
-
 echo "================================================="
 echo " Spinning up Distributed kvdb Cluster"
 echo "================================================="
@@ -279,6 +267,6 @@ if [ "$START_ADMIN" = "true" ]; then
 fi
 echo "Logs  : $LOG_DIR"
 echo "Data  : $DATA_DIR"
-echo "Internal gRPC token file: $INTERNAL_TOKEN_FILE"
+echo "gRPC security mode: $KVDB_GRPC_SECURITY_MODE (valid only for explicit local development)"
 echo "Stop  : ./scripts/run_cluster.sh stop"
 echo "================================================="

@@ -41,6 +41,7 @@ val_b64="$(printf "%s" "${val_plain}" | base64 | tr -d '\n')"
 
 put_resp="$(
   grpcurl -plaintext \
+    -H "x-kvdb-development-identity: client/local/smoke-test" \
     -import-path "${PROTO_DIR}" \
     -proto kvgateway.proto \
     -d "{\"ctx\":{\"request_id\":\"smoke-put-1\"},\"key\":\"${key_b64}\",\"value\":\"${val_b64}\",\"options\":{}}" \
@@ -52,6 +53,7 @@ echo "PutResponse: ${put_resp}"
 
 get_resp="$(
   grpcurl -plaintext \
+    -H "x-kvdb-development-identity: client/local/smoke-test" \
     -import-path "${PROTO_DIR}" \
     -proto kvgateway.proto \
     -d "{\"ctx\":{\"request_id\":\"smoke-get-1\"},\"key\":\"${key_b64}\",\"options\":{\"consistency\":\"STRONG\"}}" \
@@ -69,4 +71,3 @@ fi
 
 echo "❌ Smoke test failed: expected value base64 ${val_b64} not found in GetResponse"
 exit 1
-

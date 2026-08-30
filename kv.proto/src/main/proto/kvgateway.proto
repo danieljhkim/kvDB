@@ -71,8 +71,9 @@ enum WriteDurability {
 message WriteOptions {
   WriteDurability durability = 1;
 
-  // If true, treat "Put" with the same (request_id, key) as idempotent.
-  // Gateway will de-dupe within retention window.
+  // If true, the gateway may replay this write using the same required
+  // request_id; storage nodes de-duplicate the operation. If false, an
+  // ambiguous transport failure returns WRITE_OUTCOME_UNKNOWN without replay.
   bool require_idempotency = 2;
 
   // Optional: TTL in milliseconds; 0 means no TTL.
@@ -117,6 +118,9 @@ message Status {
     INTERNAL = 11;             // may be retryable with backoff
     NOT_LEADER = 12;           // client/gateway should reroute
     SHARD_MOVED = 13;          // metadata stale
+    // The node may have committed a non-idempotent write, but the gateway did
+    // not receive a definitive response and therefore did not replay it.
+    WRITE_OUTCOME_UNKNOWN = 14;
   }
 
   Code code = 1;
@@ -146,6 +150,10 @@ message GetResponse {
 
   // Present if found.
   KeyValue kv = 2;
+
+  // Shard-wide committed high-water mark applied by the serving node. Clients
+  // may compare this across EVENTUAL reads to make staleness decisions.
+  uint64 applied_version = 3;
 }
 
 // ============================
@@ -180,4 +188,3 @@ message DeleteResponse {
   Status status = 1;
   uint64 version = 2; // tombstone/version if supported
 }
-

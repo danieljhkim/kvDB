@@ -153,7 +153,22 @@ public class ReplicationManager implements AutoCloseable {
         ReentrantLock lock = shardLocks.computeIfAbsent(shardId, ignored -> new ReentrantLock());
         lock.lock();
         try {
-            ensureLeaderReconciledLocked(shardId, shard);
+            ensureLeaderReconciledLocked(shardId, shard, false);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Performs a quorum read barrier for a STRONG read. Unlike write admission, this deliberately rechecks a replica
+     * quorum even after the current epoch was reconciled so a partitioned or superseded leader cannot serve from a
+     * cached leadership decision.
+     */
+    public void ensureStrongReadReady(String shardId, ShardRecord shard) {
+        ReentrantLock lock = shardLocks.computeIfAbsent(shardId, ignored -> new ReentrantLock());
+        lock.lock();
+        try {
+            ensureLeaderReconciledLocked(shardId, shard, true);
         } finally {
             lock.unlock();
         }
@@ -172,7 +187,7 @@ public class ReplicationManager implements AutoCloseable {
         ReentrantLock lock = shardLocks.computeIfAbsent(shardId, ignored -> new ReentrantLock());
         lock.lock();
         try {
-            ensureLeaderReconciledLocked(shardId, shard);
+            ensureLeaderReconciledLocked(shardId, shard, false);
             ShardKVStore local = shardStores.getOrCreate(shardId);
             ReplicatedMutation mutation =
                     local.prepareNewMutation(requestId, shard.getEpoch(), kind, key, value, nodeId);
@@ -304,11 +319,11 @@ public class ReplicationManager implements AutoCloseable {
         return durability == WriteDurability.ALL_SYNC ? totalReplicas : (totalReplicas / 2) + 1;
     }
 
-    private void ensureLeaderReconciledLocked(String shardId, ShardRecord shard) {
+    private void ensureLeaderReconciledLocked(String shardId, ShardRecord shard, boolean forceQuorumRead) {
         if (!nodeId.equals(shard.getLeader())) {
             throw unavailable(shardId, "Node is not the shard leader for reconciliation");
         }
-        if (reconciledEpochs.getOrDefault(shardId, 0L) >= shard.getEpoch()) {
+        if (!forceQuorumRead && reconciledEpochs.getOrDefault(shardId, 0L) >= shard.getEpoch()) {
             return;
         }
 
@@ -342,7 +357,7 @@ public class ReplicationManager implements AutoCloseable {
 
     private boolean pullReplicaState(String target, String shardId, long epoch, ShardKVStore local) {
         String cursorKey = target + "/" + shardId + "/" + epoch;
-        long afterVersion = pullCursors.getOrDefault(cursorKey, 0L);
+        long afterVersion = pullCursors.getOrDefault(cursorKey, local.committedVersion());
         for (int batchIndex = 0; batchIndex < MAX_PULL_BATCHES_PER_PASS; batchIndex++) {
             try {
                 ReplicaStateResponse response = replicaWriteClient.fetchReplicaState(

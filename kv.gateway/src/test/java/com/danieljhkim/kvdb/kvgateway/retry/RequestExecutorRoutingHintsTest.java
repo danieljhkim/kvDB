@@ -12,9 +12,13 @@ import com.danieljhkim.kvdb.proto.coordinator.NodeRecord;
 import com.danieljhkim.kvdb.proto.coordinator.NodeStatus;
 import com.kvdb.proto.kvstore.KVServiceGrpc;
 import io.grpc.*;
+import java.time.Duration;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import org.junit.jupiter.api.Test;
 
@@ -70,7 +74,7 @@ class RequestExecutorRoutingHintsTest {
             return "ok";
         };
 
-        ExecutionResult<String> result = executor.executeWithRetry("shard-1", true, op, () -> List.of(nodeA));
+        ExecutionResult<String> result = executor.executeWithRetry("shard-1", true, true, op, () -> List.of(nodeA));
 
         assertTrue(result.isSuccess());
         assertEquals("leader:456", result.getLastNodeAddress());
@@ -100,9 +104,158 @@ class RequestExecutorRoutingHintsTest {
             throw new StatusRuntimeException(Status.FAILED_PRECONDITION.withDescription("SHARD_MOVED"), trailers);
         };
 
-        ExecutionResult<String> result = executor.executeWithRetry("shard-1", true, op, () -> List.of(nodeA));
+        ExecutionResult<String> result = executor.executeWithRetry("shard-1", true, true, op, () -> List.of(nodeA));
 
         // SHARD_MOVED should result in failure since we have maxAttempts=1
         assertFalse(result.isSuccess());
+    }
+
+    @Test
+    void nonIdempotentWriteTimeoutIsAmbiguousAndIsNotReplayed() {
+        AtomicInteger calls = new AtomicInteger();
+        RequestExecutor executor = executor(RetryPolicy.builder()
+                .maxAttempts(3)
+                .initialBackoffMs(0)
+                .jitterPercent(0)
+                .build());
+
+        ExecutionResult<String> result = executor.executeWithRetry(
+                "shard-1",
+                true,
+                false,
+                stub -> {
+                    calls.incrementAndGet();
+                    throw Status.DEADLINE_EXCEEDED
+                            .withDescription("response lost")
+                            .asRuntimeException();
+                },
+                () -> List.of(node("node-a", "nodeA:123")));
+
+        assertFalse(result.isSuccess());
+        assertTrue(result.isAmbiguous());
+        assertEquals(Status.Code.DEADLINE_EXCEEDED, result.getErrorCode());
+        assertEquals(1, calls.get());
+    }
+
+    @Test
+    void idempotentWriteTimeoutIsRetriedWithTheSameOperation() {
+        AtomicInteger calls = new AtomicInteger();
+        RequestExecutor executor = executor(RetryPolicy.builder()
+                .maxAttempts(2)
+                .initialBackoffMs(0)
+                .jitterPercent(0)
+                .build());
+        String stableRequestId = "stable-request-id";
+
+        ExecutionResult<String> result = executor.executeWithRetry(
+                "shard-1",
+                true,
+                true,
+                stub -> {
+                    if (calls.getAndIncrement() == 0) {
+                        throw Status.DEADLINE_EXCEEDED
+                                .withDescription("response lost")
+                                .asRuntimeException();
+                    }
+                    return stableRequestId;
+                },
+                () -> List.of(node("node-a", "nodeA:123")));
+
+        assertTrue(result.isSuccess());
+        assertEquals(stableRequestId, result.getResponse());
+        assertEquals(2, calls.get());
+    }
+
+    @Test
+    void inboundDeadlineStopsRetryBackoff() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        RequestExecutor executor = executor(RetryPolicy.builder()
+                .maxAttempts(3)
+                .initialBackoffMs(1_000)
+                .jitterPercent(0)
+                .build());
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        Context.CancellableContext context =
+                Context.current().withDeadlineAfter(40, java.util.concurrent.TimeUnit.MILLISECONDS, scheduler);
+        long started = System.nanoTime();
+        try {
+            ExecutionResult<String> result = context.call(() -> executor.executeWithRetry(
+                    "shard-1",
+                    false,
+                    true,
+                    stub -> {
+                        calls.incrementAndGet();
+                        throw Status.UNAVAILABLE.asRuntimeException();
+                    },
+                    () -> List.of(node("node-a", "nodeA:123"))));
+
+            assertFalse(result.isSuccess());
+            assertEquals(Status.Code.DEADLINE_EXCEEDED, result.getErrorCode());
+            assertEquals(1, calls.get());
+            assertTrue(Duration.ofNanos(System.nanoTime() - started).toMillis() < 500);
+        } finally {
+            context.cancel(null);
+            scheduler.shutdownNow();
+        }
+    }
+
+    @Test
+    void cancelledInboundCallDoesNotStartAnAttempt() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        RequestExecutor executor = executor(RetryPolicy.defaults());
+        Context.CancellableContext context = Context.current().withCancellation();
+        context.cancel(null);
+
+        ExecutionResult<String> result = context.call(() -> executor.executeWithRetry(
+                "shard-1",
+                false,
+                true,
+                stub -> {
+                    calls.incrementAndGet();
+                    return "unexpected";
+                },
+                () -> List.of(node("node-a", "nodeA:123"))));
+
+        assertFalse(result.isSuccess());
+        assertEquals(Status.Code.CANCELLED, result.getErrorCode());
+        assertEquals(0, calls.get());
+    }
+
+    @Test
+    void inboundDeadlineCapsNodeRpcDeadline() throws Exception {
+        RequestExecutor executor = executor(RetryPolicy.defaults());
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        Context.CancellableContext context =
+                Context.current().withDeadlineAfter(2, java.util.concurrent.TimeUnit.SECONDS, scheduler);
+        AtomicReference<Deadline> observedDeadline = new AtomicReference<>();
+        try {
+            ExecutionResult<String> result = context.call(() -> executor.executeWithRetry(
+                    "shard-1",
+                    false,
+                    true,
+                    stub -> {
+                        observedDeadline.set(stub.getCallOptions().getDeadline());
+                        return "ok";
+                    },
+                    () -> List.of(node("node-a", "nodeA:123"))));
+
+            assertTrue(result.isSuccess());
+            assertEquals(context.getDeadline(), observedDeadline.get());
+        } finally {
+            context.cancel(null);
+            scheduler.shutdownNow();
+        }
+    }
+
+    private static RequestExecutor executor(RetryPolicy policy) {
+        return new RequestExecutor(new FakeNodeConnectionPool(), new NodeFailureTracker(5000), policy, 5_000);
+    }
+
+    private static NodeRecord node(String nodeId, String address) {
+        return NodeRecord.newBuilder()
+                .setNodeId(nodeId)
+                .setAddress(address)
+                .setStatus(NodeStatus.ALIVE)
+                .build();
     }
 }

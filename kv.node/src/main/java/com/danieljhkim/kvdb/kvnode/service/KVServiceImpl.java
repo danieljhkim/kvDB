@@ -1,6 +1,7 @@
 package com.danieljhkim.kvdb.kvnode.service;
 
 import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
+import com.danieljhkim.kvdb.kvcommon.exception.NodeUnavailableException;
 import com.danieljhkim.kvdb.kvnode.client.ReplicaWriteClient;
 import com.danieljhkim.kvdb.kvnode.cluster.ReplicationManager;
 import com.danieljhkim.kvdb.kvnode.cluster.ReplicationManager.MutationResult;
@@ -74,18 +75,30 @@ public class KVServiceImpl extends KVServiceGrpc.KVServiceImplBase {
     public void get(KeyRequest request, StreamObserver<ValueResponse> responseObserver) {
         String key = request.getKey();
 
-        // Route and validate
+        // EVENTUAL reads may use any replica. STRONG reads are leader-only and
+        // cross a fresh quorum barrier before observing local committed state.
         String shardId = shardRouter.resolveShardId(key);
-        leadershipValidator.validateReadReplica(shardId);
-        if (replicationManager != null && leadershipValidator.isLeader(shardId)) {
-            replicationManager.ensureLeaderReconciled(shardId, shardRouter.getShardRecord(shardId));
+        if (request.getRequireLeader()) {
+            leadershipValidator.validateWriteLeadership(shardId);
+            ShardRecord shard = shardRouter.getShardRecord(shardId);
+            if (replicationManager != null) {
+                replicationManager.ensureStrongReadReady(shardId, shard);
+            } else if (shard.getReplicasCount() > 1) {
+                throw new NodeUnavailableException(
+                        "Strong read quorum validation is unavailable on this node", shardId);
+            }
+        } else {
+            leadershipValidator.validateReadReplica(shardId);
         }
 
-        // Execute read
-        String value = shardStores.getOrCreate(shardId).get(key);
+        ShardKVStore.ReadResult read = shardStores.getOrCreate(shardId).read(key);
 
-        ValueResponse response =
-                ValueResponse.newBuilder().setValue(value != null ? value : "").build();
+        ValueResponse response = ValueResponse.newBuilder()
+                .setValue(read.value())
+                .setVersion(read.version())
+                .setAppliedVersion(read.appliedVersion())
+                .setShardEpoch(read.shardEpoch())
+                .build();
 
         responseObserver.onNext(response);
         responseObserver.onCompleted();

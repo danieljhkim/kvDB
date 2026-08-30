@@ -13,6 +13,10 @@
 
     <artifactId>kv.admin</artifactId>
 
+    <properties>
+        <jacoco.minimum.line.coverage>0.05</jacoco.minimum.line.coverage>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>com.danieljhkim.kvdb</groupId>

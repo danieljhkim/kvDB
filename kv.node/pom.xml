@@ -11,6 +11,10 @@
 
     <artifactId>kv.node</artifactId>
 
+    <properties>
+        <jacoco.minimum.line.coverage>0.55</jacoco.minimum.line.coverage>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>com.danieljhkim.kvdb</groupId>

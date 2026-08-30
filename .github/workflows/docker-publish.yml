@@ -1,4 +1,4 @@
-name: Publish Docker images
+name: Publish signed Docker images
 
 on:
   push:
@@ -7,63 +7,75 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
-  publish:
+  dependency-scan:
+    name: Scan release dependencies
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Scan Maven, Go, configuration, and repository dependencies
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+
+  publish:
+    name: Publish ${{ matrix.service }}
+    needs: dependency-scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
     strategy:
+      fail-fast: false
       matrix:
-        service:
-          - kv.node
-          - kv.coordinator
-          - kv.admin
-          - kv.gateway
+        service: [kv.node, kv.coordinator, kv.admin, kv.gateway]
 
     steps:
       - uses: actions/checkout@v6
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3.7.0
+      - uses: docker/setup-qemu-action@v3.7.0
         with:
           platforms: amd64,arm64
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3.12.0
+      - uses: docker/setup-buildx-action@v3.12.0
 
-      - name: Login to GHCR
+      - name: Log in to GHCR
         uses: docker/login-action@v3.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract tag name
-        id: meta
-        run: echo "TAG=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
-
-      - name: Compute image tags
-        id: tags
+      - name: Compute immutable image coordinates
+        id: image
         shell: bash
         run: |
-          TAG="${{ steps.meta.outputs.TAG }}"
-
-          # Always publish an immutable, versioned tag.
-          VERSIONED="ghcr.io/${{ github.repository }}/${{ matrix.service }}:${TAG}"
-
-          # Only publish :latest for non-RC tags.
-          # (Treat tags containing "-rc" / "-RC" as release candidates.)
-          if echo "$TAG" | grep -Eiq '(^|[-.])rc([0-9].*)?$|[-.]rc'; then
-            echo "TAGS=${VERSIONED}" >> "$GITHUB_OUTPUT"
+          repository="${GITHUB_REPOSITORY,,}"
+          name="ghcr.io/${repository}/${{ matrix.service }}"
+          versioned="${name}:${GITHUB_REF_NAME}"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "versioned=${versioned}" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF_NAME" =~ (^|[-.])[rR][cC]([0-9].*)?$|[-.][rR][cC] ]]; then
+            echo "tags=${versioned}" >> "$GITHUB_OUTPUT"
           else
-            LATEST="ghcr.io/${{ github.repository }}/${{ matrix.service }}:latest"
-            echo "TAGS<<EOF" >> "$GITHUB_OUTPUT"
-            echo "${VERSIONED}" >> "$GITHUB_OUTPUT"
-            echo "${LATEST}" >> "$GITHUB_OUTPUT"
-            echo "EOF" >> "$GITHUB_OUTPUT"
+            {
+              echo "tags<<EOF"
+              echo "${versioned}"
+              echo "${name}:latest"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Verify Docker base images are pinned
+      - name: Verify Docker base images are digest-pinned
         shell: bash
         run: |
           set -euo pipefail
@@ -72,9 +84,7 @@ jobs:
             if ! awk '
               toupper($1) == "FROM" {
                 image_field = 2
-                while (image_field <= NF && $image_field ~ /^--/) {
-                  image_field++
-                }
+                while (image_field <= NF && $image_field ~ /^--/) image_field++
                 if ($image_field !~ /@sha256:[[:xdigit:]]{64}$/) {
                   print FILENAME ":" FNR ": mutable or missing Docker base-image digest: " $0
                   invalid = 1
@@ -87,11 +97,109 @@ jobs:
           done < <(git ls-files -z -- '*Dockerfile*')
           exit "$status"
 
-      - name: Build and push
+      - name: Build and push multi-platform image with SBOM and provenance
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./${{ matrix.service }}/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.tags.outputs.TAGS }}
+          tags: ${{ steps.image.outputs.tags }}
+          sbom: true
+          provenance: mode=max
+
+      - name: Scan immutable image digest
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+
+      - name: Generate SPDX SBOM
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output: sbom-${{ matrix.service }}.spdx.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v6
+        with:
+          name: sbom-${{ matrix.service }}-${{ github.ref_name }}
+          path: sbom-${{ matrix.service }}.spdx.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - uses: sigstore/cosign-installer@v4.0.0
+
+      - name: Sign immutable image digest
+        run: cosign sign --yes "${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}"
+
+      - name: Attest build provenance
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest SBOM
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: sbom-${{ matrix.service }}.spdx.json
+          push-to-registry: true
+          create-storage-record: false
+
+  release-smoke:
+    name: Verify published signatures and attestations
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: docker/setup-buildx-action@v3.12.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: sigstore/cosign-installer@v4.0.0
+
+      - name: Verify every released digest, signature, SBOM, and provenance attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          repository="${GITHUB_REPOSITORY,,}"
+          identity="^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/docker-publish.yml@refs/tags/v.*$"
+          for service in kv.node kv.coordinator kv.admin kv.gateway; do
+            image="ghcr.io/${repository}/${service}"
+            tagged="${image}:${GITHUB_REF_NAME}"
+            digest="$(docker buildx imagetools inspect "$tagged" | awk '$1 == "Digest:" { print $2; exit }')"
+            test -n "$digest"
+            immutable="${image}@${digest}"
+            cosign verify \
+              --certificate-identity-regexp "$identity" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "$immutable" >/dev/null
+            gh attestation verify "oci://${immutable}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --bundle-from-oci \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/docker-publish.yml" \
+              --predicate-type https://slsa.dev/provenance/v1 >/dev/null
+            gh attestation verify "oci://${immutable}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --bundle-from-oci \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/docker-publish.yml" \
+              --predicate-type https://spdx.dev/Document/v2.3 >/dev/null
+          done

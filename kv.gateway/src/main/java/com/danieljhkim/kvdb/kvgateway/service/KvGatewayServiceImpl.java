@@ -29,6 +29,7 @@ import io.grpc.stub.StreamObserver;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * gRPC service implementation for the KvGateway. Handles Get, Put, Delete operations by routing to appropriate storage
@@ -94,6 +95,8 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
             KeyValueRequest nodeRequest = KeyValueRequest.newBuilder()
                     .setKey(keyStr)
                     .setValue(valueStr)
+                    .setRequestId(writeRequestId(request.getCtx().getRequestId()))
+                    .setDurability(com.kvdb.proto.kvstore.WriteDurability.QUORUM_SYNC)
                     .build();
             ExecutionResult<SetResponse> result = requestExecutor.executeWithRetry(
                     shardId, true, stub -> stub.set(nodeRequest), () -> getNodesForWrite(shardId));
@@ -106,7 +109,7 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
             }
             responseObserver.onNext(PutResponse.newBuilder()
                     .setStatus(okStatus(shardId))
-                    .setVersion(1)
+                    .setVersion(nodeResponse.getVersion())
                     .build());
             responseObserver.onCompleted();
 
@@ -128,6 +131,8 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
             final String shardId = resolveShardId(keyBytes);
             com.kvdb.proto.kvstore.DeleteRequest nodeRequest = com.kvdb.proto.kvstore.DeleteRequest.newBuilder()
                     .setKey(keyStr)
+                    .setRequestId(writeRequestId(request.getCtx().getRequestId()))
+                    .setDurability(com.kvdb.proto.kvstore.WriteDurability.QUORUM_SYNC)
                     .build();
             ExecutionResult<com.kvdb.proto.kvstore.DeleteResponse> result = requestExecutor.executeWithRetry(
                     shardId, true, stub -> stub.delete(nodeRequest), () -> getNodesForWrite(shardId));
@@ -142,7 +147,7 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
 
             responseObserver.onNext(DeleteResponse.newBuilder()
                     .setStatus(okStatus(shardId))
-                    .setVersion(1)
+                    .setVersion(nodeResponse.getVersion())
                     .build());
             responseObserver.onCompleted();
 
@@ -266,5 +271,9 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
         }
 
         return candidates;
+    }
+
+    private static String writeRequestId(String candidate) {
+        return candidate == null || candidate.isBlank() ? UUID.randomUUID().toString() : candidate;
     }
 }

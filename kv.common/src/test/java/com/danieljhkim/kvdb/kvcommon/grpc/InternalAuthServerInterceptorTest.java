@@ -34,7 +34,9 @@ class InternalAuthServerInterceptorTest {
         assertAllowed(CoordinatorGrpc.getInitShardsMethod(), "admin/operator-1");
         assertAllowed(CoordinatorGrpc.getHeartbeatMethod(), "storage-node/node-1");
         assertAllowed(KVServiceGrpc.getSetMethod(), "gateway/gateway-1");
-        assertAllowed(KVServiceGrpc.getReplicateSetMethod(), "storage-node/node-1");
+        assertAllowed(KVServiceGrpc.getReplicateMutationMethod(), "storage-node/node-1");
+        assertAllowed(KVServiceGrpc.getRepairReplicaMethod(), "storage-node/node-1");
+        assertAllowed(KVServiceGrpc.getFetchReplicaStateMethod(), "storage-node/node-1");
         assertAllowed(RaftServiceGrpc.getAppendEntriesMethod(), "coordinator/coordinator-1");
     }
 

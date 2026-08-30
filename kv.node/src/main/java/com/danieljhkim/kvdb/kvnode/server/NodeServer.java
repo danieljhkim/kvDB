@@ -40,6 +40,7 @@ public class NodeServer {
     private final WatchShardMapClient watchShardMapClient;
     private final ShardStoreRegistry shardStores;
     private final ReplicaWriteClient replicaWriteClient;
+    private final KVServiceImpl kvService;
 
     public NodeServer(String nodeId, AppConfig appConfig) {
         // Find this node's configuration
@@ -74,10 +75,10 @@ public class NodeServer {
 
         this.watchShardMapClient = new WatchShardMapClient(shardMapCache, coordinatorClientManager);
 
-        KVServiceImpl kvservice = new KVServiceImpl(
+        this.kvService = new KVServiceImpl(
                 nodeId, shardMapCache, shardStores, replicaWriteClient, Duration.ofMillis(replicationTimeoutMs));
         ServerServiceDefinition interceptedService = ServerInterceptors.intercept(
-                kvservice,
+                kvService,
                 new CorrelationIdInterceptor(),
                 new AdmissionControlInterceptor(lifecycle),
                 new RequestMetricsInterceptor("node", lifecycle),
@@ -141,6 +142,11 @@ public class NodeServer {
             coordinatorClientManager.shutdown();
         } catch (Exception e) {
             logger.warn("Failed to shutdown ShardMapClient", e);
+        }
+        try {
+            kvService.shutdownReplication();
+        } catch (Exception e) {
+            logger.warn("Failed to shutdown replication repair worker", e);
         }
         try {
             replicaWriteClient.shutdown();

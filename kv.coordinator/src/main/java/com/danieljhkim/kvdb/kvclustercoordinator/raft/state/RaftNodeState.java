@@ -282,7 +282,7 @@ public class RaftNodeState {
     public void becomeLeader(Iterable<String> peerIds) {
         RaftRole oldRole = currentRole.getAndSet(RaftRole.LEADER);
         currentLeader.set(nodeId);
-        leaderState.initialize(peerIds, raftLog.size());
+        leaderState.initialize(peerIds, raftLog.lastIndex());
         log.info("[{}] Transitioned from {} to LEADER in term {}", nodeId, oldRole, currentTerm.get());
         notifyRoleChange(oldRole, RaftRole.LEADER);
     }
@@ -322,7 +322,7 @@ public class RaftNodeState {
      */
     public long computeMajorityMatchIndex(int clusterSize) {
         // Include leader's own log index in the calculation
-        long leaderLogIndex = raftLog.size();
+        long leaderLogIndex = raftLog.lastIndex();
         return leaderState.computeMajorityMatchIndex(clusterSize, leaderLogIndex);
     }
 

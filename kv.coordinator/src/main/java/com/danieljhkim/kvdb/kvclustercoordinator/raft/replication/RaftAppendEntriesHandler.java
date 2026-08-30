@@ -75,7 +75,7 @@ public class RaftAppendEntriesHandler {
                     requestTerm,
                     currentTerm);
             return AppendEntriesResponse.newBuilder()
-                    .setTerm(currentTerm)
+                    .setTerm(state.getCurrentTerm())
                     .setSuccess(false)
                     .setFollowerId(nodeId)
                     .build();
@@ -87,11 +87,11 @@ public class RaftAppendEntriesHandler {
 
             // Persist FIRST, then update memory for crash safety
             try {
-                persistentStore.save(requestTerm, state.getVotedFor());
+                persistentStore.save(requestTerm, null);
             } catch (IOException e) {
                 log.error("[{}] Failed to persist term update, rejecting AppendEntries", nodeId, e);
                 return AppendEntriesResponse.newBuilder()
-                        .setTerm(currentTerm)
+                        .setTerm(state.getCurrentTerm())
                         .setSuccess(false)
                         .setFollowerId(nodeId)
                         .build();
@@ -124,7 +124,7 @@ public class RaftAppendEntriesHandler {
                         conflictTerm);
 
                 return AppendEntriesResponse.newBuilder()
-                        .setTerm(currentTerm)
+                        .setTerm(state.getCurrentTerm())
                         .setSuccess(false)
                         .setConflictIndex(conflictIndex)
                         .setConflictTerm(conflictTerm)
@@ -139,7 +139,7 @@ public class RaftAppendEntriesHandler {
 
             // 5. Update commit index if necessary
             if (request.getLeaderCommit() > state.getCommitIndex()) {
-                long newCommitIndex = Math.min(request.getLeaderCommit(), raftLog.size());
+                long newCommitIndex = Math.min(request.getLeaderCommit(), raftLog.lastIndex());
                 state.advanceCommitIndex(newCommitIndex);
                 log.debug("[{}] Advanced commitIndex to {}", nodeId, newCommitIndex);
             }
@@ -147,7 +147,7 @@ public class RaftAppendEntriesHandler {
             long matchIndex = prevLogIndex + request.getEntriesCount();
 
             return AppendEntriesResponse.newBuilder()
-                    .setTerm(currentTerm)
+                    .setTerm(state.getCurrentTerm())
                     .setSuccess(true)
                     .setMatchIndex(matchIndex)
                     .setFollowerId(nodeId)
@@ -156,7 +156,7 @@ public class RaftAppendEntriesHandler {
         } catch (IOException e) {
             log.error("[{}] Error handling AppendEntries: {}", nodeId, e.getMessage(), e);
             return AppendEntriesResponse.newBuilder()
-                    .setTerm(currentTerm)
+                    .setTerm(state.getCurrentTerm())
                     .setSuccess(false)
                     .setFollowerId(nodeId)
                     .build();
@@ -172,14 +172,7 @@ public class RaftAppendEntriesHandler {
             return true;
         }
 
-        // Check if we have an entry at prevLogIndex
-        Optional<RaftLogEntry> prevEntry = log.getEntry(prevLogIndex);
-        if (prevEntry.isEmpty()) {
-            return false; // We don't have this entry
-        }
-
-        // Check if the term matches
-        return prevEntry.get().term() == prevLogTerm;
+        return log.getTerm(prevLogIndex).map(term -> term == prevLogTerm).orElse(false);
     }
 
     /**
@@ -187,8 +180,11 @@ public class RaftAppendEntriesHandler {
      */
     private long findConflictIndex(RaftLog log, long prevLogIndex, long prevLogTerm) throws IOException {
         // If we don't have the entry at all, return our last log index + 1
-        if (prevLogIndex > log.size()) {
-            return log.size() + 1;
+        if (prevLogIndex > log.lastIndex()) {
+            return log.lastIndex() + 1;
+        }
+        if (prevLogIndex <= log.compactedIndex()) {
+            return log.compactedIndex() + 1;
         }
 
         // If we have the entry but term doesn't match, find the first entry of the conflicting term
@@ -200,21 +196,21 @@ public class RaftAppendEntriesHandler {
         long conflictTerm = conflictEntry.get().term();
 
         // Find the first index with this term
-        for (long i = prevLogIndex; i >= 1; i--) {
+        for (long i = prevLogIndex; i >= log.firstIndex(); i--) {
             Optional<RaftLogEntry> entry = log.getEntry(i);
             if (entry.isEmpty() || entry.get().term() != conflictTerm) {
                 return i + 1;
             }
         }
 
-        return 1; // Conflict at the beginning
+        return log.firstIndex();
     }
 
     /**
      * Gets the term of the entry at conflictIndex.
      */
     private long getConflictTerm(RaftLog log, long conflictIndex) throws IOException {
-        if (conflictIndex <= 0 || conflictIndex > log.size()) {
+        if (conflictIndex <= 0 || conflictIndex > log.lastIndex()) {
             return 0;
         }
         return log.getEntry(conflictIndex).map(RaftLogEntry::term).orElse(0L);

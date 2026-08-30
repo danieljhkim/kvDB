@@ -2,8 +2,10 @@ package com.danieljhkim.kvdb.kvclustercoordinator.raft.rpc;
 
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.election.RaftVoteHandler;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.replication.RaftAppendEntriesHandler;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.replication.RaftInstallSnapshotHandler;
 import com.danieljhkim.kvdb.proto.raft.*;
 import io.grpc.stub.StreamObserver;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import lombok.extern.slf4j.Slf4j;
 
@@ -21,7 +23,9 @@ public class RaftGrpcService extends RaftServiceGrpc.RaftServiceImplBase {
 
     private final String nodeId;
     private final RaftVoteHandler voteHandler;
-    private final RaftAppendEntriesHandler appendEntriesHandler;
+    private final Function<AppendEntriesRequest, AppendEntriesResponse> appendEntriesHandler;
+    private final RaftInstallSnapshotHandler installSnapshotHandler;
+    private final Function<InstallSnapshotRequest, InstallSnapshotResponse> installSnapshotFunction;
     private final Supplier<Long> currentTermSupplier;
     private final Supplier<String> currentLeaderSupplier;
 
@@ -40,9 +44,59 @@ public class RaftGrpcService extends RaftServiceGrpc.RaftServiceImplBase {
             RaftAppendEntriesHandler appendEntriesHandler,
             Supplier<Long> currentTermSupplier,
             Supplier<String> currentLeaderSupplier) {
+        this(
+                nodeId,
+                voteHandler,
+                appendEntriesHandler::handleAppendEntries,
+                (RaftInstallSnapshotHandler) null,
+                currentTermSupplier,
+                currentLeaderSupplier);
+    }
+
+    public RaftGrpcService(
+            String nodeId,
+            RaftVoteHandler voteHandler,
+            RaftAppendEntriesHandler appendEntriesHandler,
+            RaftInstallSnapshotHandler installSnapshotHandler,
+            Supplier<Long> currentTermSupplier,
+            Supplier<String> currentLeaderSupplier) {
+        this(
+                nodeId,
+                voteHandler,
+                appendEntriesHandler::handleAppendEntries,
+                installSnapshotHandler,
+                currentTermSupplier,
+                currentLeaderSupplier);
+    }
+
+    public RaftGrpcService(
+            String nodeId,
+            RaftVoteHandler voteHandler,
+            Function<AppendEntriesRequest, AppendEntriesResponse> appendEntriesHandler,
+            RaftInstallSnapshotHandler installSnapshotHandler,
+            Supplier<Long> currentTermSupplier,
+            Supplier<String> currentLeaderSupplier) {
         this.nodeId = nodeId;
         this.voteHandler = voteHandler;
         this.appendEntriesHandler = appendEntriesHandler;
+        this.installSnapshotHandler = installSnapshotHandler;
+        this.installSnapshotFunction = null;
+        this.currentTermSupplier = currentTermSupplier;
+        this.currentLeaderSupplier = currentLeaderSupplier;
+    }
+
+    public RaftGrpcService(
+            String nodeId,
+            RaftVoteHandler voteHandler,
+            Function<AppendEntriesRequest, AppendEntriesResponse> appendEntriesHandler,
+            Function<InstallSnapshotRequest, InstallSnapshotResponse> installSnapshotFunction,
+            Supplier<Long> currentTermSupplier,
+            Supplier<String> currentLeaderSupplier) {
+        this.nodeId = nodeId;
+        this.voteHandler = voteHandler;
+        this.appendEntriesHandler = appendEntriesHandler;
+        this.installSnapshotHandler = null;
+        this.installSnapshotFunction = installSnapshotFunction;
         this.currentTermSupplier = currentTermSupplier;
         this.currentLeaderSupplier = currentLeaderSupplier;
     }
@@ -93,7 +147,7 @@ public class RaftGrpcService extends RaftServiceGrpc.RaftServiceImplBase {
                 request.getEntriesCount());
 
         try {
-            AppendEntriesResponse response = appendEntriesHandler.handleAppendEntries(request);
+            AppendEntriesResponse response = appendEntriesHandler.apply(request);
             responseObserver.onNext(response);
             responseObserver.onCompleted();
 
@@ -120,8 +174,6 @@ public class RaftGrpcService extends RaftServiceGrpc.RaftServiceImplBase {
      *
      * <p>Raft paper §7: Leaders use InstallSnapshot RPC to send snapshots to followers
      * that are too far behind to catch up via AppendEntries.
-     *
-     * <p>Note: Snapshot installation is not yet implemented (Phase 5).
      */
     @Override
     public void installSnapshot(
@@ -130,17 +182,15 @@ public class RaftGrpcService extends RaftServiceGrpc.RaftServiceImplBase {
                 "[{}] Received InstallSnapshot from {} for term {}", nodeId, request.getLeaderId(), request.getTerm());
 
         try {
-            // TODO: Implement snapshot installation in Phase 5
-            InstallSnapshotResponse response = InstallSnapshotResponse.newBuilder()
-                    .setTerm(currentTermSupplier.get())
-                    .setSuccess(false)
-                    .setFollowerId(nodeId)
-                    .build();
+            if (installSnapshotHandler == null && installSnapshotFunction == null) {
+                throw new IllegalStateException("InstallSnapshot handler is not configured");
+            }
+            InstallSnapshotResponse response = installSnapshotFunction != null
+                    ? installSnapshotFunction.apply(request)
+                    : installSnapshotHandler.handleInstallSnapshot(request);
 
             responseObserver.onNext(response);
             responseObserver.onCompleted();
-
-            log.warn("[{}] InstallSnapshot not yet implemented (Phase 5)", nodeId);
 
         } catch (Exception e) {
             log.error(
@@ -149,8 +199,8 @@ public class RaftGrpcService extends RaftServiceGrpc.RaftServiceImplBase {
                     request.getLeaderId(),
                     e.getMessage(),
                     e);
-            responseObserver.onError(io.grpc.Status.UNIMPLEMENTED
-                    .withDescription("InstallSnapshot not yet implemented")
+            responseObserver.onError(io.grpc.Status.INTERNAL
+                    .withDescription("Error processing InstallSnapshot: " + e.getMessage())
                     .asRuntimeException());
         }
     }

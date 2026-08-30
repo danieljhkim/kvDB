@@ -1,187 +1,416 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence;
 
-import com.google.protobuf.InvalidProtocolBufferException;
-import java.io.*;
+import java.io.BufferedOutputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
+import java.io.EOFException;
+import java.io.IOException;
+import java.io.RandomAccessFile;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.zip.CRC32C;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * File-based implementation of RaftLog that stores log entries in a binary format.
- * Each entry is prefixed with its size (4 bytes) followed by the Protocol Buffer serialized data.
+ * Durable, prefix-compacting Raft log.
  *
- * <p>Format: [size (4 bytes)][protobuf data (size bytes)]...
- *
- * <p>This implementation maintains an in-memory index of byte offsets for fast random access.
+ * <p>Version 2 format: {@code [magic][version][base index][base term][header crc]} followed by records
+ * {@code [length][protobuf][crc32c]}. Version 1 was the historical length-prefixed protobuf stream. It is read
+ * strictly for rolling upgrades and rewritten as version 2 at the first mutation. Truncated, oversized, malformed,
+ * checksum-invalid, or non-consecutive records fail construction.
  */
 @Slf4j
 public class FileBasedRaftLog implements RaftLog {
 
+    static final int MAGIC = 0x4b564c47; // KVLG
+    static final int FORMAT_VERSION = 2;
+    static final int MAX_ENTRY_BYTES = 16 * 1024 * 1024;
+    private static final int HEADER_BYTES = Integer.BYTES * 3 + Long.BYTES * 2;
+
     private final Path logFile;
-    private final List<Long> indexOffsets; // Byte offset for each entry
+    private final Path tempFile;
+    private final DurableFileOps durableFiles;
+    private final List<Long> indexOffsets = new ArrayList<>();
+
+    private long compactedIndex;
+    private long compactedTerm;
+    private boolean legacyFormat;
+    private IOException failure;
 
     public FileBasedRaftLog(Path logFile) throws IOException {
-        this.logFile = logFile;
-        this.indexOffsets = new ArrayList<>();
+        this(logFile, new DurableFileOps());
+    }
 
-        if (!Files.exists(logFile)) {
-            Files.createDirectories(logFile.getParent());
-            Files.createFile(logFile);
-            log.info("Created new Raft log file: {}", logFile);
+    FileBasedRaftLog(Path logFile, DurableFileOps durableFiles) throws IOException {
+        this.logFile = logFile;
+        this.tempFile = logFile.resolveSibling(logFile.getFileName() + ".tmp");
+        this.durableFiles = durableFiles;
+        Files.createDirectories(logFile.toAbsolutePath().getParent());
+
+        if (!Files.exists(logFile) || Files.size(logFile) == 0) {
+            rewrite(List.of(), 0, 0);
+            log.info("Created new versioned Raft log file: {}", logFile);
         } else {
             buildIndex();
         }
     }
 
-    /**
-     * Builds the in-memory index by reading the log file and recording byte offsets.
-     */
     private void buildIndex() throws IOException {
         indexOffsets.clear();
-        try (DataInputStream dis = new DataInputStream(new BufferedInputStream(Files.newInputStream(logFile)))) {
-
-            long offset = 0;
-            while (dis.available() > 0) {
-                indexOffsets.add(offset);
-                int entrySize = dis.readInt();
-                offset += 4 + entrySize;
-                dis.skipBytes(entrySize);
+        try (RandomAccessFile file = new RandomAccessFile(logFile.toFile(), "r")) {
+            if (file.length() < Integer.BYTES) {
+                throw corruption("truncated log header");
+            }
+            int marker = file.readInt();
+            if (marker == MAGIC) {
+                readVersionedHeader(file);
+                legacyFormat = false;
+                readVersionedRecords(file);
+            } else {
+                compactedIndex = 0;
+                compactedTerm = 0;
+                legacyFormat = true;
+                file.seek(0);
+                readLegacyRecords(file);
+                log.warn("Loaded legacy Raft log {}; it will be upgraded on the next write", logFile);
             }
         }
-        log.info("Built index with {} entries from {}", indexOffsets.size(), logFile);
+        log.info(
+                "Built Raft log index with {} live entries after compacted index {} from {}",
+                indexOffsets.size(),
+                compactedIndex,
+                logFile);
+    }
+
+    private void readVersionedHeader(RandomAccessFile file) throws IOException {
+        if (file.length() < HEADER_BYTES) {
+            throw corruption("truncated versioned log header");
+        }
+        int version = file.readInt();
+        if (version != FORMAT_VERSION) {
+            throw corruption("unsupported log format version " + version);
+        }
+        compactedIndex = file.readLong();
+        compactedTerm = file.readLong();
+        int expected = file.readInt();
+        int actual = checksum(headerPayload(compactedIndex, compactedTerm));
+        if (expected != actual) {
+            throw corruption("log header checksum mismatch");
+        }
+        if (compactedIndex < 0 || compactedTerm < 0) {
+            throw corruption("negative compacted index or term");
+        }
+    }
+
+    private void readVersionedRecords(RandomAccessFile file) throws IOException {
+        long expectedIndex = compactedIndex + 1;
+        while (file.getFilePointer() < file.length()) {
+            long offset = file.getFilePointer();
+            int length = readLength(file, "log record");
+            ensureRemaining(file, (long) length + Integer.BYTES, "log record");
+            byte[] data = new byte[length];
+            file.readFully(data);
+            int expectedChecksum = file.readInt();
+            if (checksum(data) != expectedChecksum) {
+                throw corruption("checksum mismatch at byte offset " + offset);
+            }
+            RaftLogEntry entry = decode(data, offset);
+            if (entry.index() != expectedIndex) {
+                throw corruption("non-consecutive entry at byte offset " + offset + ": expected index " + expectedIndex
+                        + " but found " + entry.index());
+            }
+            indexOffsets.add(offset);
+            expectedIndex++;
+        }
+    }
+
+    private void readLegacyRecords(RandomAccessFile file) throws IOException {
+        long expectedIndex = 1;
+        while (file.getFilePointer() < file.length()) {
+            long offset = file.getFilePointer();
+            int length = readLength(file, "legacy log record");
+            ensureRemaining(file, length, "legacy log record");
+            byte[] data = new byte[length];
+            file.readFully(data);
+            RaftLogEntry entry = decode(data, offset);
+            if (entry.index() != expectedIndex) {
+                throw corruption("non-consecutive legacy entry at byte offset " + offset + ": expected index "
+                        + expectedIndex + " but found " + entry.index());
+            }
+            indexOffsets.add(offset);
+            expectedIndex++;
+        }
+    }
+
+    private int readLength(RandomAccessFile file, String recordType) throws IOException {
+        try {
+            int length = file.readInt();
+            if (length <= 0 || length > MAX_ENTRY_BYTES) {
+                throw corruption(recordType + " length " + length + " is outside 1.." + MAX_ENTRY_BYTES);
+            }
+            return length;
+        } catch (EOFException e) {
+            throw corruption("truncated " + recordType + " length", e);
+        }
+    }
+
+    private void ensureRemaining(RandomAccessFile file, long required, String recordType) throws IOException {
+        long remaining = file.length() - file.getFilePointer();
+        if (remaining < required) {
+            throw corruption("truncated " + recordType + ": requires " + required + " bytes, has " + remaining);
+        }
+    }
+
+    private RaftLogEntry decode(byte[] data, long offset) throws IOException {
+        try {
+            return RaftLogEntry.fromBytes(data);
+        } catch (Exception e) {
+            throw corruption("invalid protobuf record at byte offset " + offset, e);
+        }
     }
 
     @Override
     public synchronized void append(RaftLogEntry entry) throws IOException {
-        byte[] serialized = entry.toBytes();
-
-        try (DataOutputStream dos = new DataOutputStream(
-                new BufferedOutputStream(Files.newOutputStream(logFile, StandardOpenOption.APPEND)))) {
-
-            dos.writeInt(serialized.length);
-            dos.write(serialized);
-            dos.flush();
-
-            long offset = indexOffsets.isEmpty()
-                    ? 0
-                    : indexOffsets.get(indexOffsets.size() - 1) + getEntrySize(indexOffsets.size() - 1);
-            indexOffsets.add(offset);
-
-            log.debug("Appended entry at index {} (offset={})", entry.index(), offset);
+        ensureHealthy();
+        if (entry.index() != lastIndex() + 1) {
+            throw new IOException(
+                    "Refusing non-consecutive Raft entry " + entry.index() + "; expected " + (lastIndex() + 1));
         }
-    }
-
-    /**
-     * Calculates the size of an entry including the 4-byte size prefix.
-     * @param arrayIndex 0-based index into the indexOffsets array
-     */
-    private int getEntrySize(int arrayIndex) throws IOException {
-        if (arrayIndex < 0 || arrayIndex >= indexOffsets.size()) {
-            throw new IllegalArgumentException("Invalid array index: " + arrayIndex);
+        if (legacyFormat) {
+            rewrite(readAllEntries(), compactedIndex, compactedTerm);
         }
 
-        long offset = indexOffsets.get(arrayIndex);
-
-        try (RandomAccessFile raf = new RandomAccessFile(logFile.toFile(), "r")) {
-            raf.seek(offset);
-            int entrySize = raf.readInt();
-            return 4 + entrySize; // size prefix + data
+        byte[] data = entry.toBytes();
+        validateEntryLength(data.length);
+        long offset = Files.size(logFile);
+        ByteBuffer record = ByteBuffer.allocate(Integer.BYTES + data.length + Integer.BYTES)
+                .putInt(data.length)
+                .put(data)
+                .putInt(checksum(data));
+        record.flip();
+        try (FileChannel channel = FileChannel.open(logFile, StandardOpenOption.WRITE, StandardOpenOption.APPEND)) {
+            while (record.hasRemaining()) {
+                channel.write(record);
+            }
+            channel.force(true);
+        } catch (IOException e) {
+            throw poison(e);
         }
+        indexOffsets.add(offset);
+        log.debug("Appended durable Raft entry at index {} (offset={})", entry.index(), offset);
     }
 
     @Override
     public synchronized Optional<RaftLogEntry> getEntry(long index) throws IOException {
-        // Raft log indices are 1-based
-        if (index < 1 || index > indexOffsets.size()) {
+        ensureHealthy();
+        if (index <= compactedIndex || index > lastIndex()) {
             return Optional.empty();
         }
-
-        // Convert 1-based Raft index to 0-based array index
-        long offset = indexOffsets.get((int) (index - 1));
-
-        try (RandomAccessFile raf = new RandomAccessFile(logFile.toFile(), "r")) {
-            raf.seek(offset);
-            int entrySize = raf.readInt();
-            byte[] data = new byte[entrySize];
-            raf.readFully(data);
-            return Optional.of(RaftLogEntry.fromBytes(data));
-        } catch (InvalidProtocolBufferException e) {
-            log.error("Failed to deserialize entry at index {}", index, e);
-            throw new IOException("Failed to deserialize log entry", e);
+        int arrayIndex = Math.toIntExact(index - compactedIndex - 1);
+        long offset = indexOffsets.get(arrayIndex);
+        try (RandomAccessFile file = new RandomAccessFile(logFile.toFile(), "r")) {
+            file.seek(offset);
+            int length = readLength(file, legacyFormat ? "legacy log record" : "log record");
+            ensureRemaining(file, (long) length + (legacyFormat ? 0 : Integer.BYTES), "log record");
+            byte[] data = new byte[length];
+            file.readFully(data);
+            if (!legacyFormat && file.readInt() != checksum(data)) {
+                throw corruption("checksum mismatch at index " + index);
+            }
+            return Optional.of(decode(data, offset));
+        } catch (IOException e) {
+            throw poison(e);
         }
     }
 
     @Override
     public synchronized List<RaftLogEntry> getEntriesSince(long fromIndex) throws IOException {
+        long start = Math.max(fromIndex, firstIndex());
         List<RaftLogEntry> entries = new ArrayList<>();
-        // Raft indices are 1-based, size() returns count (last index = size)
-        for (long i = fromIndex; i <= indexOffsets.size(); i++) {
-            getEntry(i).ifPresent(entries::add);
+        for (long index = start; index <= lastIndex(); index++) {
+            Optional<RaftLogEntry> entry = getEntry(index);
+            if (entry.isEmpty()) {
+                throw corruption("missing indexed entry " + index);
+            }
+            entries.add(entry.get());
         }
         return entries;
     }
 
     @Override
     public synchronized Optional<RaftLogEntry> getLastEntry() throws IOException {
-        if (indexOffsets.isEmpty()) {
-            return Optional.empty();
-        }
-        // Last entry is at 1-based index equal to size
-        return getEntry(indexOffsets.size());
+        return indexOffsets.isEmpty() ? Optional.empty() : getEntry(lastIndex());
     }
 
     @Override
     public synchronized long size() {
+        ensureHealthyUnchecked();
         return indexOffsets.size();
     }
 
     @Override
-    public synchronized void truncateAfter(long index) throws IOException {
-        // Keep entries 1..index, remove entries after index
-        // If index >= size, nothing to truncate
-        if (index >= indexOffsets.size()) {
-            return;
-        }
-
-        // index is 1-based, we want to keep 'index' entries
-        // So we truncate starting from array position 'index' (0-based)
-        if (index < 0) {
-            index = 0; // Truncate everything
-        }
-
-        long truncateOffset;
-        if (index == 0) {
-            truncateOffset = 0; // Truncate entire file
-        } else {
-            // Get the END of entry at position (index), which is the start of entry at (index+1)
-            // We need to keep bytes up to and including entry at index
-            int arrayIndex = (int) (index - 1); // Convert to 0-based
-            truncateOffset = indexOffsets.get(arrayIndex);
-            // Add the size of the entry we want to keep
-            try (RandomAccessFile raf = new RandomAccessFile(logFile.toFile(), "r")) {
-                raf.seek(truncateOffset);
-                int entrySize = raf.readInt();
-                truncateOffset += 4 + entrySize; // Skip past this entry
-            }
-        }
-
-        try (RandomAccessFile raf = new RandomAccessFile(logFile.toFile(), "rw")) {
-            raf.setLength(truncateOffset);
-        }
-
-        // Keep first 'index' elements in the list (indices 0 to index-1)
-        if (index < indexOffsets.size()) {
-            indexOffsets.subList((int) index, indexOffsets.size()).clear();
-        }
-        log.info("Truncated log after index {}, new size: {}", index, indexOffsets.size());
+    public synchronized long firstIndex() {
+        ensureHealthyUnchecked();
+        return compactedIndex + 1;
     }
 
     @Override
-    public void close() throws IOException {
-        log.info("Closing Raft log with {} entries", indexOffsets.size());
+    public synchronized long lastIndex() {
+        ensureHealthyUnchecked();
+        return compactedIndex + indexOffsets.size();
+    }
+
+    @Override
+    public synchronized long compactedIndex() {
+        ensureHealthyUnchecked();
+        return compactedIndex;
+    }
+
+    @Override
+    public synchronized long compactedTerm() {
+        ensureHealthyUnchecked();
+        return compactedTerm;
+    }
+
+    @Override
+    public synchronized void truncateAfter(long index) throws IOException {
+        ensureHealthy();
+        if (index < compactedIndex) {
+            throw new IOException("Cannot truncate before durable snapshot index " + compactedIndex);
+        }
+        if (index >= lastIndex()) {
+            return;
+        }
+        int keep = Math.toIntExact(index - compactedIndex);
+        rewrite(new ArrayList<>(readAllEntries().subList(0, keep)), compactedIndex, compactedTerm);
+        log.info("Truncated Raft log after index {}; last index is now {}", index, lastIndex());
+    }
+
+    @Override
+    public synchronized void compactThrough(long index, long term) throws IOException {
+        ensureHealthy();
+        if (index < compactedIndex) {
+            throw new IOException("Compaction index " + index + " precedes durable snapshot index " + compactedIndex);
+        }
+        if (index == compactedIndex) {
+            if (term != compactedTerm) {
+                throw new IOException("Compaction term mismatch at existing snapshot boundary");
+            }
+            return;
+        }
+        if (index > lastIndex()) {
+            rewrite(List.of(), index, term);
+            log.info("Installed Raft snapshot boundary at index {} term {} beyond the prior log", index, term);
+            return;
+        }
+        List<RaftLogEntry> entries = readAllEntries();
+        int remove = Math.toIntExact(index - compactedIndex);
+        long actualTerm = getTerm(index).orElseThrow(() -> corruption("missing compaction boundary " + index));
+        List<RaftLogEntry> suffix =
+                actualTerm == term ? new ArrayList<>(entries.subList(remove, entries.size())) : List.of();
+        rewrite(suffix, index, term);
+        log.info("Compacted durable Raft log through index {} term {}", index, term);
+    }
+
+    private List<RaftLogEntry> readAllEntries() throws IOException {
+        return getEntriesSince(firstIndex());
+    }
+
+    private void rewrite(List<RaftLogEntry> entries, long newCompactedIndex, long newCompactedTerm) throws IOException {
+        ensureHealthy();
+        try {
+            try (DataOutputStream output = new DataOutputStream(new BufferedOutputStream(Files.newOutputStream(
+                    tempFile,
+                    StandardOpenOption.CREATE,
+                    StandardOpenOption.TRUNCATE_EXISTING,
+                    StandardOpenOption.WRITE)))) {
+                writeHeader(output, newCompactedIndex, newCompactedTerm);
+                long expectedIndex = newCompactedIndex + 1;
+                for (RaftLogEntry entry : entries) {
+                    if (entry.index() != expectedIndex++) {
+                        throw new IOException("Cannot persist non-consecutive Raft entry " + entry.index());
+                    }
+                    byte[] data = entry.toBytes();
+                    validateEntryLength(data.length);
+                    output.writeInt(data.length);
+                    output.write(data);
+                    output.writeInt(checksum(data));
+                }
+            }
+            durableFiles.atomicReplace(tempFile, logFile);
+            compactedIndex = newCompactedIndex;
+            compactedTerm = newCompactedTerm;
+            legacyFormat = false;
+            buildIndex();
+        } catch (IOException e) {
+            throw poison(e);
+        }
+    }
+
+    private void writeHeader(DataOutputStream output, long baseIndex, long baseTerm) throws IOException {
+        output.writeInt(MAGIC);
+        output.writeInt(FORMAT_VERSION);
+        output.writeLong(baseIndex);
+        output.writeLong(baseTerm);
+        output.writeInt(checksum(headerPayload(baseIndex, baseTerm)));
+    }
+
+    private byte[] headerPayload(long baseIndex, long baseTerm) throws IOException {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (DataOutputStream output = new DataOutputStream(bytes)) {
+            output.writeInt(MAGIC);
+            output.writeInt(FORMAT_VERSION);
+            output.writeLong(baseIndex);
+            output.writeLong(baseTerm);
+        }
+        return bytes.toByteArray();
+    }
+
+    private void validateEntryLength(int length) throws IOException {
+        if (length <= 0 || length > MAX_ENTRY_BYTES) {
+            throw new IOException("Raft log entry length " + length + " is outside 1.." + MAX_ENTRY_BYTES);
+        }
+    }
+
+    static int checksum(byte[] data) {
+        CRC32C checksum = new CRC32C();
+        checksum.update(data, 0, data.length);
+        return (int) checksum.getValue();
+    }
+
+    private IOException corruption(String detail) {
+        return new IOException("Corrupt Raft log " + logFile + ": " + detail);
+    }
+
+    private IOException corruption(String detail, Throwable cause) {
+        return new IOException("Corrupt Raft log " + logFile + ": " + detail, cause);
+    }
+
+    private void ensureHealthy() throws IOException {
+        if (failure != null) {
+            throw new IOException("Raft log is unavailable after a prior persistence failure", failure);
+        }
+    }
+
+    private void ensureHealthyUnchecked() {
+        if (failure != null) {
+            throw new IllegalStateException("Raft log is unavailable after a prior persistence failure", failure);
+        }
+    }
+
+    private IOException poison(IOException error) {
+        failure = error;
+        return error;
+    }
+
+    @Override
+    public void close() {
+        log.info("Closing Raft log at {} with {} live entries", logFile, indexOffsets.size());
     }
 }

@@ -47,6 +47,9 @@ public class RaftConfiguration {
         if (!clusterMembers.containsKey(nodeId)) {
             throw new IllegalArgumentException("nodeId must be present in clusterMembers");
         }
+        if (snapshotThreshold < 0) {
+            throw new IllegalArgumentException("snapshotThreshold cannot be negative");
+        }
     }
 
     public static Builder builder() {

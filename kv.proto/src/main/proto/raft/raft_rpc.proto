@@ -60,12 +60,15 @@ message InstallSnapshotRequest {
   bytes data = 5;                    // Raw bytes of the snapshot chunk
   bool done = 6;                     // True if this is the last chunk
   int64 offset = 7;                  // Byte offset where chunk is positioned in snapshot file
+  fixed32 checksum = 8;              // CRC32C of the complete unchunked snapshot
+  int64 total_size = 9;              // Complete snapshot size for bounds checking and resume
 }
 
 message InstallSnapshotResponse {
   int64 term = 1;                    // Current term, for leader to update itself
   bool success = 2;                  // True if snapshot was successfully installed
   string follower_id = 3;            // ID of the follower
+  int64 next_offset = 4;             // Durable byte offset accepted; leader resumes here
 }
 
 // ========================================
@@ -159,4 +162,3 @@ service RaftService {
   rpc AddServer(AddServerRequest) returns (AddServerResponse);
   rpc RemoveServer(RemoveServerRequest) returns (RemoveServerResponse);
 }
-

@@ -14,33 +14,33 @@ public class RaftCommandConverter {
                 com.danieljhkim.kvdb.proto.raft.RaftCommand.newBuilder();
 
         switch (command) {
-            case RaftCommand.InitShards cmd -> builder.setInitShards(
-                    com.danieljhkim.kvdb.proto.raft.InitShards.newBuilder()
-                            .setNumShards(cmd.numShards())
-                            .setReplicationFactor(cmd.replicationFactor())
-                            .build());
-            case RaftCommand.RegisterNode cmd -> builder.setRegisterNode(
-                    com.danieljhkim.kvdb.proto.raft.RegisterNode.newBuilder()
-                            .setNodeId(cmd.nodeId())
-                            .setAddress(cmd.address())
-                            .setZone(cmd.zone())
-                            .build());
-            case RaftCommand.SetNodeStatus cmd -> builder.setSetNodeStatus(
-                    com.danieljhkim.kvdb.proto.raft.SetNodeStatus.newBuilder()
-                            .setNodeId(cmd.nodeId())
-                            .setStatus(cmd.status().name())
-                            .build());
-            case RaftCommand.SetShardReplicas cmd -> builder.setSetShardReplicas(
-                    com.danieljhkim.kvdb.proto.raft.SetShardReplicas.newBuilder()
-                            .setShardId(cmd.shardId())
-                            .addAllReplicas(cmd.replicas())
-                            .build());
-            case RaftCommand.SetShardLeader cmd -> builder.setSetShardLeader(
-                    com.danieljhkim.kvdb.proto.raft.SetShardLeader.newBuilder()
-                            .setShardId(cmd.shardId())
-                            .setEpoch(cmd.epoch())
-                            .setLeaderNodeId(cmd.leaderNodeId())
-                            .build());
+            case RaftCommand.InitShards cmd ->
+                builder.setInitShards(com.danieljhkim.kvdb.proto.raft.InitShards.newBuilder()
+                        .setNumShards(cmd.numShards())
+                        .setReplicationFactor(cmd.replicationFactor())
+                        .build());
+            case RaftCommand.RegisterNode cmd ->
+                builder.setRegisterNode(com.danieljhkim.kvdb.proto.raft.RegisterNode.newBuilder()
+                        .setNodeId(cmd.nodeId())
+                        .setAddress(cmd.address())
+                        .setZone(cmd.zone())
+                        .build());
+            case RaftCommand.SetNodeStatus cmd ->
+                builder.setSetNodeStatus(com.danieljhkim.kvdb.proto.raft.SetNodeStatus.newBuilder()
+                        .setNodeId(cmd.nodeId())
+                        .setStatus(cmd.status().name())
+                        .build());
+            case RaftCommand.SetShardReplicas cmd ->
+                builder.setSetShardReplicas(com.danieljhkim.kvdb.proto.raft.SetShardReplicas.newBuilder()
+                        .setShardId(cmd.shardId())
+                        .addAllReplicas(cmd.replicas())
+                        .build());
+            case RaftCommand.SetShardLeader cmd ->
+                builder.setSetShardLeader(com.danieljhkim.kvdb.proto.raft.SetShardLeader.newBuilder()
+                        .setShardId(cmd.shardId())
+                        .setEpoch(cmd.epoch())
+                        .setLeaderNodeId(cmd.leaderNodeId())
+                        .build());
         }
 
         return builder.build();

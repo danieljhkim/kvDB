@@ -243,8 +243,8 @@ class ReplicationManagerTest {
                         case PREPARE -> store.prepareMutation(request.getMutation());
                         case COMMIT -> store.commitMutation(request.getMutation());
                         case ABORT -> store.abortMutation(request.getMutation());
-                        default -> new ShardKVStore.MutationStatus(
-                                false, false, "phase required", store.committedVersion());
+                        default ->
+                            new ShardKVStore.MutationStatus(false, false, "phase required", store.committedVersion());
                     };
             return ReplicationAck.newBuilder()
                     .setSuccess(status.success())

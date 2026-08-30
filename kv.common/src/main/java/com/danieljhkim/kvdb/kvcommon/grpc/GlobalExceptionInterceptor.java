@@ -60,8 +60,8 @@ public class GlobalExceptionInterceptor implements ServerInterceptor {
     private void logException(Status status, Throwable t) {
         switch (status.getCode()) {
             case INTERNAL -> logger.error("Unhandled exception in gRPC call", t);
-            case UNAVAILABLE, DEADLINE_EXCEEDED -> logger.warn(
-                    "gRPC call failed: {} - {}", status.getCode(), status.getDescription());
+            case UNAVAILABLE, DEADLINE_EXCEEDED ->
+                logger.warn("gRPC call failed: {} - {}", status.getCode(), status.getDescription());
             default -> logger.debug("gRPC exception: {} - {}", status.getCode(), status.getDescription());
         }
     }

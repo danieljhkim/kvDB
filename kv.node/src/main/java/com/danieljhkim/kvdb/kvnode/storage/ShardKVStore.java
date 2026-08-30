@@ -7,6 +7,7 @@ import com.danieljhkim.kvdb.kvnode.persistence.FilePersistenceManager;
 import com.danieljhkim.kvdb.kvnode.persistence.PersistenceManager;
 import com.fasterxml.jackson.core.type.TypeReference;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -35,7 +36,8 @@ public class ShardKVStore {
     private final boolean enableAutoFlush;
 
     private final AtomicInteger curFlushInterval = new AtomicInteger(0);
-    private final ReentrantLock flushLock = new ReentrantLock();
+    /** Serializes the WAL append, in-memory mutation, and snapshot/WAL cut. */
+    private final ReentrantLock stateLock = new ReentrantLock();
 
     private final Map<String, String> store = new ConcurrentHashMap<>();
     private final PersistenceManager<Map<String, String>> persistenceManager;
@@ -43,13 +45,25 @@ public class ShardKVStore {
 
     public ShardKVStore(
             String shardId, String snapshotFilePath, String walFilePath, int flushInterval, boolean enableAutoFlush) {
+        this(
+                shardId,
+                flushInterval,
+                enableAutoFlush,
+                new FilePersistenceManager<>(snapshotFilePath, new TypeReference<Map<String, String>>() {}),
+                new WALManager(walFilePath));
+    }
+
+    ShardKVStore(
+            String shardId,
+            int flushInterval,
+            boolean enableAutoFlush,
+            PersistenceManager<Map<String, String>> persistenceManager,
+            WALManager walManager) {
         this.shardId = Objects.requireNonNull(shardId, "shardId");
         this.flushInterval = flushInterval;
         this.enableAutoFlush = enableAutoFlush;
-
-        TypeReference<Map<String, String>> typeRef = new TypeReference<>() {};
-        this.persistenceManager = new FilePersistenceManager<>(snapshotFilePath, typeRef);
-        this.walManager = new WALManager(walFilePath);
+        this.persistenceManager = Objects.requireNonNull(persistenceManager, "persistenceManager");
+        this.walManager = Objects.requireNonNull(walManager, "walManager");
 
         loadFromDisk();
         recoverFromWal();
@@ -69,19 +83,29 @@ public class ShardKVStore {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(value, "value");
 
-        walManager.log("SET", key, value);
-        store.put(key, value);
-        flushIfNeeded();
-        return true;
+        stateLock.lock();
+        try {
+            walManager.log("SET", key, value);
+            store.put(key, value);
+            flushIfNeededLocked();
+            return true;
+        } finally {
+            stateLock.unlock();
+        }
     }
 
     public boolean del(String key) {
         Objects.requireNonNull(key, "key");
 
-        walManager.log("DEL", key, null);
-        boolean removed = (store.remove(key) != null);
-        flushIfNeeded();
-        return removed;
+        stateLock.lock();
+        try {
+            walManager.log("DEL", key, null);
+            boolean removed = (store.remove(key) != null);
+            flushIfNeededLocked();
+            return removed;
+        } finally {
+            stateLock.unlock();
+        }
     }
 
     @Timer
@@ -95,7 +119,12 @@ public class ShardKVStore {
     }
 
     public Map<String, String> snapshot() {
-        return Collections.unmodifiableMap(store);
+        stateLock.lock();
+        try {
+            return Collections.unmodifiableMap(new HashMap<>(store));
+        } finally {
+            stateLock.unlock();
+        }
     }
 
     public Map<String, String> getMultiple(List<String> keys) {
@@ -122,17 +151,17 @@ public class ShardKVStore {
             logger.info("Loaded {} entries from disk for shardId={}", loadedData.size(), shardId);
         } catch (IOException e) {
             Metrics.increment("kvdb_snapshot_failures_total", "node", "load", "error");
-            logger.error("Failed to load shard snapshot from disk for shardId={}", shardId, e);
+            throw new UncheckedIOException("Failed to load shard snapshot for shardId=" + shardId, e);
         }
     }
 
     @Timer
     private void saveToDisk() {
         try {
-            persistenceManager.save(store);
+            persistenceManager.save(new HashMap<>(store));
         } catch (IOException e) {
             Metrics.increment("kvdb_snapshot_failures_total", "node", "save", "error");
-            logger.error("Failed to save shard snapshot to disk for shardId={}", shardId, e);
+            throw new UncheckedIOException("Failed to save shard snapshot for shardId=" + shardId, e);
         }
     }
 
@@ -140,8 +169,8 @@ public class ShardKVStore {
     private void recoverFromWal() {
         List<String[]> ops = walManager.replay();
         for (String[] op : ops) {
-            if (op.length < 2) {
-                continue;
+            if (op.length != 3) {
+                throw new WALManager.WALCorruptionException("Malformed WAL operation for shardId=" + shardId);
             }
             String operation = op[0];
             String key = op[1];
@@ -150,7 +179,8 @@ public class ShardKVStore {
             switch (operation) {
                 case "SET" -> store.put(key, value);
                 case "DEL" -> store.remove(key);
-                default -> logger.warn("Unknown WAL op={} for shardId={}", operation, shardId);
+                default -> throw new WALManager.WALCorruptionException(
+                        "Unknown WAL operation " + operation + " for shardId=" + shardId);
             }
         }
         if (!ops.isEmpty()) {
@@ -163,26 +193,11 @@ public class ShardKVStore {
      * current state and clear the WAL.
      */
     public void flushIfNeeded() {
-        if (!enableAutoFlush) {
-            return;
-        }
-
-        int count = curFlushInterval.incrementAndGet();
-        if (count < flushInterval) {
-            return;
-        }
-
-        if (!flushLock.tryLock()) {
-            return;
-        }
+        stateLock.lock();
         try {
-            if (curFlushInterval.get() >= flushInterval) {
-                saveToDisk();
-                walManager.clear();
-                curFlushInterval.set(0);
-            }
+            flushIfNeededLocked();
         } finally {
-            flushLock.unlock();
+            stateLock.unlock();
         }
     }
 
@@ -190,30 +205,67 @@ public class ShardKVStore {
      * Force persistence immediately (snapshot + WAL clear), regardless of the auto-flush counter.
      */
     public void persistNow() {
-        if (!flushLock.tryLock()) {
-            return;
-        }
+        stateLock.lock();
         try {
-            saveToDisk();
-            walManager.clear();
-            curFlushInterval.set(0);
+            snapshotAndRotateWal();
         } finally {
-            flushLock.unlock();
+            stateLock.unlock();
         }
     }
 
     public void shutdown() {
+        stateLock.lock();
+        RuntimeException failure = null;
+        try {
+            try {
+                snapshotAndRotateWal();
+            } catch (RuntimeException e) {
+                failure = e;
+            }
+            try {
+                persistenceManager.close();
+            } catch (IOException e) {
+                RuntimeException closeFailure =
+                        new UncheckedIOException("Failed to close persistence manager for shardId=" + shardId, e);
+                failure = combineFailures(failure, closeFailure);
+            }
+            try {
+                walManager.close();
+            } catch (RuntimeException e) {
+                failure = combineFailures(failure, e);
+            }
+        } finally {
+            stateLock.unlock();
+        }
+        if (failure != null) {
+            throw failure;
+        }
+    }
+
+    public WALManager.Durability acknowledgedDurability() {
+        return walManager.durability();
+    }
+
+    private void flushIfNeededLocked() {
+        if (!enableAutoFlush) {
+            return;
+        }
+        if (curFlushInterval.incrementAndGet() >= flushInterval) {
+            snapshotAndRotateWal();
+        }
+    }
+
+    private void snapshotAndRotateWal() {
         saveToDisk();
         walManager.clear();
-        try {
-            persistenceManager.close();
-        } catch (IOException e) {
-            logger.warn("Error closing persistence manager for shardId={}", shardId, e);
+        curFlushInterval.set(0);
+    }
+
+    private static RuntimeException combineFailures(RuntimeException primary, RuntimeException additional) {
+        if (primary == null) {
+            return additional;
         }
-        try {
-            walManager.close();
-        } catch (Exception e) {
-            logger.warn("Error closing WAL manager for shardId={}", shardId, e);
-        }
+        primary.addSuppressed(additional);
+        return primary;
     }
 }

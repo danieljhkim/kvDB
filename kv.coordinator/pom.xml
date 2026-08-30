@@ -11,6 +11,10 @@
 
     <artifactId>kv.coordinator</artifactId>
 
+    <properties>
+        <jacoco.minimum.line.coverage>0.45</jacoco.minimum.line.coverage>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>com.danieljhkim.kvdb</groupId>

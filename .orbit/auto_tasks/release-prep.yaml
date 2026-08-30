@@ -1,0 +1,104 @@
+schemaVersion: 1
+name: release-prep
+description: Guarded kvDB release-preparation probe
+enabled: false
+schedule:
+  every_minutes: 180
+template:
+  title: Check whether the next kvDB release is ready to prepare
+  description: |
+    You are the report-first release-preparation probe for this workspace.
+    You may read Orbit tasks, Git history/tags, and RELEASING.md. During this
+    gate, never edit repository or release state. You may create or update one
+    canonical open release task only after every gate below passes.
+
+    ## 1. Unfinished-work gate
+
+    Query tasks in `backlog`, `in-progress`, and `review` through the registered
+    Orbit task surface. Sort all blocking IDs lexicographically. Exempt a task
+    only when its tags contain the exact provenance tag `auto-task:release-prep`.
+    Do not exempt `release`, `release-prep`, or any other `auto-task:<name>`.
+
+    If a non-exempt task is open, persist the complete sorted list and the
+    blocked result in this probe's `execution_summary`, then stop successfully.
+    Do not create/update a release task, change a status, edit files, alter
+    release metadata, commit, tag, push, publish, or seek human confirmation.
+
+    ## 2. Baseline and no-release gates
+
+    Find the latest reachable tag with:
+
+        git tag --merged HEAD --list 'v*' --sort=-version:refname | head -n 1
+
+    If none exists, record `no reachable v* baseline` and stop successfully
+    without state changes. Otherwise run the no-merge survey in RELEASING.md
+    for `<tag>..HEAD`. If it has no commits, record the exact tag and `nothing
+    to release`, then stop successfully without creating/updating a release
+    task or changing repository/release state.
+
+    ## 3. Eligible handoff
+
+    When both gates pass, record the empty sorted blocker result, latest tag,
+    surveyed commit IDs/subjects, referenced DANI task IDs, candidate SemVer
+    bump, and each breaking-change candidate with exact commit/task evidence.
+    Apply kvDB's post-1.0 policy from RELEASING.md: patch for compatible fixes
+    or operations/docs, minor for compatible public features, and major only
+    for evidence-backed breaking candidates. This is a candidate, never a
+    human-confirmed classification.
+
+    Find open tasks matching the exact title pattern `Prepare v<X.Y.Z> release`
+    and tag `release`. Select the lexicographically smallest matching ID if
+    several exist, record every duplicate candidate, and update only that one.
+    If none exists, create exactly one `chore` tagged `release` with the
+    candidate version and survey evidence. Its description must direct its
+    executor to RELEASING.md and preserve the human approval boundary. Its
+    context_files must contain only these verified kvDB release targets:
+
+    - `file:RELEASING.md`
+    - `file:docs/release-checklist.md`
+    - `file:pom.xml`
+    - `file:kv.common/pom.xml`
+    - `file:kv.coordinator/pom.xml`
+    - `file:kv.node/pom.xml`
+    - `file:kv.client/pom.xml`
+    - `file:kv.proto/pom.xml`
+    - `file:kv.gateway/pom.xml`
+    - `file:kv.admin/pom.xml`
+    - `file:coverage/pom.xml`
+
+    Stop after the evidence-backed survey and one-task handoff. Do not edit
+    version POMs or release documentation, commit, tag, push, publish images,
+    approve a task, or ask for/record human confirmation of a breaking-change
+    classification. Those actions belong to the later human-approved task.
+
+    ## Deterministic validation scenarios
+
+    - Unfinished work: report sorted blocking IDs; make no repository or
+      release-state changes.
+    - No baseline or no post-tag commits: report the exact condition; make no
+      repository or release-state changes.
+    - Eligible range: record survey/candidate/breaking evidence and create or
+      update exactly one canonical release task.
+
+    Repeated runs must reuse the open probe through `skip_if_open` and reuse
+    the canonical release task rather than create duplicates.
+  acceptance_criteria:
+  - The unfinished-work gate reports sorted blocking IDs and exempts only tasks with the exact auto-task:release-prep provenance tag.
+  - Unfinished-work, no-baseline, and no-release outcomes make no repository or release-state changes and complete with evidence in execution_summary.
+  - An eligible pass records the latest reachable v* tag, no-merge survey, referenced task IDs, candidate SemVer bump, and breaking-change evidence.
+  - An eligible pass creates or updates exactly one canonical Prepare v<X.Y.Z> release task tagged release and reports its ID.
+  - The canonical task points to RELEASING.md and names only verified kvDB Maven/release-documentation modification targets.
+  - The handoff stops before edits, commits, tags, pushes, publication, task approval, or human breaking-change confirmation.
+  - Repeated passes do not duplicate the open probe or canonical release task.
+  task_type: chore
+  tags:
+  - release-prep
+  - no-diff-expected
+  priority: high
+  crew: luna
+  status: backlog
+dedupe: skip_if_open
+created_by: codex
+created_at: 2026-08-30T06:40:00Z
+updated_by: codex
+updated_at: 2026-08-30T06:40:00Z

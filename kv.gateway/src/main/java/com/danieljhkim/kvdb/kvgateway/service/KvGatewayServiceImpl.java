@@ -4,9 +4,11 @@ import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
 import com.danieljhkim.kvdb.kvcommon.exception.InvalidRequestException;
 import com.danieljhkim.kvdb.kvcommon.exception.KeyNotFoundException;
 import com.danieljhkim.kvdb.kvcommon.exception.KvException;
-import com.danieljhkim.kvdb.kvcommon.exception.NodeOperationException;
 import com.danieljhkim.kvdb.kvcommon.exception.NodeUnavailableException;
 import com.danieljhkim.kvdb.kvcommon.exception.ShardMapUnavailableException;
+import com.danieljhkim.kvdb.kvcommon.grpc.GrpcIdentity;
+import com.danieljhkim.kvdb.kvcommon.grpc.GrpcPeerIdentity;
+import com.danieljhkim.kvdb.kvcommon.limits.KvRequestLimits;
 import com.danieljhkim.kvdb.kvgateway.retry.RequestExecutor;
 import com.danieljhkim.kvdb.kvgateway.retry.RequestExecutor.ExecutionResult;
 import com.danieljhkim.kvdb.proto.coordinator.NodeRecord;
@@ -20,15 +22,21 @@ import com.danieljhkim.kvdb.proto.gateway.KeyValue;
 import com.danieljhkim.kvdb.proto.gateway.KvGatewayGrpc;
 import com.danieljhkim.kvdb.proto.gateway.PutRequest;
 import com.danieljhkim.kvdb.proto.gateway.PutResponse;
+import com.danieljhkim.kvdb.proto.gateway.ReadMode;
 import com.danieljhkim.kvdb.proto.gateway.Status;
+import com.danieljhkim.kvdb.proto.gateway.WriteDurability;
+import com.danieljhkim.kvdb.proto.gateway.WriteOptions;
 import com.kvdb.proto.kvstore.KeyRequest;
 import com.kvdb.proto.kvstore.KeyValueRequest;
+import com.kvdb.proto.kvstore.MutationOutcome;
 import com.kvdb.proto.kvstore.SetResponse;
 import com.kvdb.proto.kvstore.ValueResponse;
 import io.grpc.stub.StreamObserver;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * gRPC service implementation for the KvGateway. Handles Get, Put, Delete operations by routing to appropriate storage
@@ -36,27 +44,35 @@ import java.util.List;
  */
 public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
 
+    private static final Logger logger = LoggerFactory.getLogger(KvGatewayServiceImpl.class);
+
     private final ShardMapCache shardMapCache;
     private final RequestExecutor requestExecutor;
+    private final KvRequestLimits limits;
 
     public KvGatewayServiceImpl(ShardMapCache shardMapCache, RequestExecutor requestExecutor) {
+        this(shardMapCache, requestExecutor, new KvRequestLimits(null));
+    }
+
+    public KvGatewayServiceImpl(ShardMapCache shardMapCache, RequestExecutor requestExecutor, KvRequestLimits limits) {
         this.shardMapCache = shardMapCache;
         this.requestExecutor = requestExecutor;
+        this.limits = limits;
     }
 
     @Override
     public void get(GetRequest request, StreamObserver<GetResponse> responseObserver) {
         try {
-            if (request.getKey().isEmpty()) {
-                throw new InvalidRequestException("Key cannot be empty");
-            }
+            limits.validateMessage(request);
+            limits.validateKey(request.getKey());
+            validateReadOptions(request);
             byte[] keyBytes = request.getKey().toByteArray();
-            String keyStr = new String(keyBytes, StandardCharsets.UTF_8);
             final String shardId = resolveShardId(keyBytes);
-            Consistency consistency = request.getOptions().getConsistency();
+            Consistency consistency = normalizedConsistency(request.getOptions().getConsistency());
             KeyRequest nodeRequest = KeyRequest.newBuilder()
-                    .setKey(keyStr)
+                    .setKey(request.getKey())
                     .setRequireLeader(consistency == Consistency.STRONG)
+                    .setHeadOnly(request.getHeadOnly())
                     .build();
 
             ExecutionResult<ValueResponse> result = requestExecutor.executeWithRetry(
@@ -65,15 +81,18 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
                 throw new NodeUnavailableException(result.getErrorMessage(), shardId, result.getErrorCode());
             }
             ValueResponse nodeResponse = result.getResponse();
-            if (nodeResponse.getValue().isEmpty()) {
-                throw new KeyNotFoundException(keyStr, shardId);
+            if (!nodeResponse.getFound()) {
+                throw new KeyNotFoundException(printableKey(request.getKey()), shardId);
             }
             responseObserver.onNext(GetResponse.newBuilder()
                     .setStatus(okStatus(shardId))
                     .setKv(KeyValue.newBuilder()
                             .setKey(request.getKey())
-                            .setValue(com.google.protobuf.ByteString.copyFromUtf8(nodeResponse.getValue()))
+                            .setValue(nodeResponse.getValue())
                             .setVersion(nodeResponse.getVersion())
+                            .setCreateTimeMs(nodeResponse.getCreateTimeMs())
+                            .setUpdateTimeMs(nodeResponse.getUpdateTimeMs())
+                            .setExpireTimeMs(nodeResponse.getExpireTimeMs())
                             .build())
                     .setAppliedVersion(nodeResponse.getAppliedVersion())
                     .build());
@@ -89,23 +108,27 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
     @Override
     public void put(PutRequest request, StreamObserver<PutResponse> responseObserver) {
         try {
-            if (request.getKey().isEmpty()) {
-                throw new InvalidRequestException("Key cannot be empty");
-            }
+            limits.validateMessage(request);
+            limits.validateKey(request.getKey());
+            limits.validateValue(request.getValue());
+            limits.validateWriteContext(request.getCtx());
+            GrpcIdentity identity = GrpcPeerIdentity.require();
             byte[] keyBytes = request.getKey().toByteArray();
-            String keyStr = new String(keyBytes, StandardCharsets.UTF_8);
-            String valueStr = request.getValue().toStringUtf8();
             final String shardId = resolveShardId(keyBytes);
             String requestId = requireWriteRequestId(request.getCtx().getRequestId());
             boolean replaySafe = request.getOptions().getRequireIdempotency();
-            KeyValueRequest nodeRequest = KeyValueRequest.newBuilder()
-                    .setKey(keyStr)
-                    .setValue(valueStr)
+            KeyValueRequest.Builder nodeRequest = KeyValueRequest.newBuilder()
+                    .setKey(request.getKey())
+                    .setValue(request.getValue())
                     .setRequestId(requestId)
-                    .setDurability(com.kvdb.proto.kvstore.WriteDurability.QUORUM_SYNC)
-                    .build();
+                    .setDurability(nodeDurability(request.getOptions().getDurability()))
+                    .setTtlMs(request.getOptions().getTtlMs())
+                    .setIfNotExists(request.getOptions().getIfNotExists());
+            if (request.getOptions().hasIfVersionEquals()) {
+                nodeRequest.setIfVersionEquals(request.getOptions().getIfVersionEquals());
+            }
             ExecutionResult<SetResponse> result = requestExecutor.executeWithRetry(
-                    shardId, true, replaySafe, stub -> stub.set(nodeRequest), () -> getNodesForWrite(shardId));
+                    shardId, true, replaySafe, stub -> stub.set(nodeRequest.build()), () -> getNodesForWrite(shardId));
             if (!result.isSuccess()) {
                 if (result.isAmbiguous()) {
                     responseObserver.onNext(PutResponse.newBuilder()
@@ -118,8 +141,14 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
             }
             SetResponse nodeResponse = result.getResponse();
             if (!nodeResponse.getSuccess()) {
-                throw new NodeOperationException("Put operation failed on storage node", shardId);
+                responseObserver.onNext(PutResponse.newBuilder()
+                        .setStatus(mutationStatus(shardId, nodeResponse.getOutcome(), nodeResponse.getMessage()))
+                        .setVersion(nodeResponse.getVersion())
+                        .build());
+                responseObserver.onCompleted();
+                return;
             }
+            auditWrite("put", requestId, shardId, identity, request.getCtx().getTraceparent());
             responseObserver.onNext(PutResponse.newBuilder()
                     .setStatus(okStatus(shardId))
                     .setVersion(nodeResponse.getVersion())
@@ -136,21 +165,28 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
     @Override
     public void delete(DeleteRequest request, StreamObserver<DeleteResponse> responseObserver) {
         try {
-            if (request.getKey().isEmpty()) {
-                throw new InvalidRequestException("Key cannot be empty");
-            }
+            limits.validateMessage(request);
+            limits.validateKey(request.getKey());
+            limits.validateWriteContext(request.getCtx());
+            validateDeleteOptions(request.getOptions());
+            GrpcIdentity identity = GrpcPeerIdentity.require();
             byte[] keyBytes = request.getKey().toByteArray();
-            String keyStr = new String(keyBytes, StandardCharsets.UTF_8);
             final String shardId = resolveShardId(keyBytes);
             String requestId = requireWriteRequestId(request.getCtx().getRequestId());
             boolean replaySafe = request.getOptions().getRequireIdempotency();
-            com.kvdb.proto.kvstore.DeleteRequest nodeRequest = com.kvdb.proto.kvstore.DeleteRequest.newBuilder()
-                    .setKey(keyStr)
+            com.kvdb.proto.kvstore.DeleteRequest.Builder nodeRequest = com.kvdb.proto.kvstore.DeleteRequest.newBuilder()
+                    .setKey(request.getKey())
                     .setRequestId(requestId)
-                    .setDurability(com.kvdb.proto.kvstore.WriteDurability.QUORUM_SYNC)
-                    .build();
+                    .setDurability(nodeDurability(request.getOptions().getDurability()));
+            if (request.getOptions().hasIfVersionEquals()) {
+                nodeRequest.setIfVersionEquals(request.getOptions().getIfVersionEquals());
+            }
             ExecutionResult<com.kvdb.proto.kvstore.DeleteResponse> result = requestExecutor.executeWithRetry(
-                    shardId, true, replaySafe, stub -> stub.delete(nodeRequest), () -> getNodesForWrite(shardId));
+                    shardId,
+                    true,
+                    replaySafe,
+                    stub -> stub.delete(nodeRequest.build()),
+                    () -> getNodesForWrite(shardId));
 
             if (!result.isSuccess()) {
                 if (result.isAmbiguous()) {
@@ -164,8 +200,15 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
             }
             com.kvdb.proto.kvstore.DeleteResponse nodeResponse = result.getResponse();
             if (!nodeResponse.getSuccess()) {
-                throw new KeyNotFoundException(keyStr, shardId);
+                responseObserver.onNext(DeleteResponse.newBuilder()
+                        .setStatus(mutationStatus(shardId, nodeResponse.getOutcome(), nodeResponse.getMessage()))
+                        .setVersion(nodeResponse.getVersion())
+                        .build());
+                responseObserver.onCompleted();
+                return;
             }
+
+            auditWrite("delete", requestId, shardId, identity, request.getCtx().getTraceparent());
 
             responseObserver.onNext(DeleteResponse.newBuilder()
                     .setStatus(okStatus(shardId))
@@ -232,7 +275,7 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
             case INVALID_ARGUMENT -> Status.Code.INVALID_ARGUMENT;
             case ALREADY_EXISTS -> Status.Code.ALREADY_EXISTS;
             case FAILED_PRECONDITION -> Status.Code.PRECONDITION_FAILED;
-            case RESOURCE_EXHAUSTED -> Status.Code.RATE_LIMITED;
+            case RESOURCE_EXHAUSTED -> Status.Code.PAYLOAD_TOO_LARGE;
             case UNAVAILABLE -> Status.Code.UNAVAILABLE;
             case DEADLINE_EXCEEDED -> Status.Code.TIMEOUT;
             case CANCELLED -> Status.Code.UNAVAILABLE;
@@ -303,6 +346,80 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
             throw new InvalidRequestException("request_id is required for writes and must be reused by retries");
         }
         return requestId;
+    }
+
+    private static Consistency normalizedConsistency(Consistency consistency) {
+        return consistency == Consistency.CONSISTENCY_UNSPECIFIED ? Consistency.STRONG : consistency;
+    }
+
+    private static void validateReadOptions(GetRequest request) {
+        if (request.getOptions().getMaxStalenessMs() != 0) {
+            throw new InvalidRequestException("max_staleness_ms is not supported");
+        }
+        if (request.getOptions().getConsistency() == Consistency.UNRECOGNIZED) {
+            throw new InvalidRequestException("consistency is unrecognized");
+        }
+        Consistency consistency = normalizedConsistency(request.getOptions().getConsistency());
+        ReadMode mode = request.getOptions().getReadMode();
+        if (mode == ReadMode.UNRECOGNIZED) {
+            throw new InvalidRequestException("read_mode is unrecognized");
+        }
+        if (mode == ReadMode.READ_YOUR_WRITES && consistency != Consistency.STRONG) {
+            throw new InvalidRequestException("READ_YOUR_WRITES requires STRONG consistency");
+        }
+        if (mode == ReadMode.LOW_LATENCY && consistency != Consistency.EVENTUAL) {
+            throw new InvalidRequestException("LOW_LATENCY requires EVENTUAL consistency");
+        }
+    }
+
+    private static void validateDeleteOptions(WriteOptions options) {
+        if (options.getTtlMs() != 0) {
+            throw new InvalidRequestException("ttl_ms is not valid for delete");
+        }
+        if (options.getIfNotExists()) {
+            throw new InvalidRequestException("if_not_exists is not valid for delete");
+        }
+    }
+
+    private static com.kvdb.proto.kvstore.WriteDurability nodeDurability(WriteDurability durability) {
+        return switch (durability) {
+            case DURABILITY_UNSPECIFIED, QUORUM_SYNC -> com.kvdb.proto.kvstore.WriteDurability.QUORUM_SYNC;
+            case WAL_SYNC -> com.kvdb.proto.kvstore.WriteDurability.LOCAL_SYNC;
+            case WAL_ASYNC -> throw new InvalidRequestException("WAL_ASYNC durability is not supported");
+            case UNRECOGNIZED -> throw new InvalidRequestException("durability is unrecognized");
+        };
+    }
+
+    private static Status mutationStatus(String shardId, MutationOutcome outcome, String message) {
+        Status.Code code =
+                switch (outcome) {
+                    case ALREADY_EXISTS -> Status.Code.ALREADY_EXISTS;
+                    case VERSION_MISMATCH -> Status.Code.VERSION_MISMATCH;
+                    case INVALID_OPTIONS, MUTATION_OUTCOME_UNSPECIFIED, UNRECOGNIZED -> Status.Code.PRECONDITION_FAILED;
+                    case APPLIED -> Status.Code.OK;
+                };
+        return Status.newBuilder()
+                .setCode(code)
+                .setMessage(message)
+                .setShardId(shardId)
+                .build();
+    }
+
+    private static String printableKey(com.google.protobuf.ByteString key) {
+        return Base64.getEncoder().encodeToString(key.toByteArray());
+    }
+
+    private static void auditWrite(
+            String operation, String requestId, String shardId, GrpcIdentity identity, String traceparent) {
+        logger.info(
+                "KV write audit operation={} requestId={} shardId={} authenticatedRole={} authenticatedTenant={} authenticatedPrincipal={} traceparent={}",
+                operation,
+                requestId,
+                shardId,
+                identity.role().sanValue(),
+                identity.tenant(),
+                identity.principal(),
+                traceparent);
     }
 
     private static Status writeOutcomeUnknownStatus(String shardId, ExecutionResult<?> result) {

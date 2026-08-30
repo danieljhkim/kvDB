@@ -8,6 +8,7 @@ import com.danieljhkim.kvdb.kvcommon.grpc.GrpcSecurity;
 import com.danieljhkim.kvdb.kvcommon.grpc.GrpcSecurityConfig;
 import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthServerInterceptor;
 import com.danieljhkim.kvdb.kvcommon.grpc.WatchShardMapClient;
+import com.danieljhkim.kvdb.kvcommon.limits.KvRequestLimits;
 import com.danieljhkim.kvdb.kvcommon.observability.AdmissionControlInterceptor;
 import com.danieljhkim.kvdb.kvcommon.observability.CorrelationIdInterceptor;
 import com.danieljhkim.kvdb.kvcommon.observability.HealthHttpServer;
@@ -58,6 +59,7 @@ public class GatewayServer {
         }
 
         this.port = gatewayConfig.getPort();
+        KvRequestLimits requestLimits = new KvRequestLimits(appConfig.getLimits());
         GrpcSecurityConfig gatewaySecurity = GrpcSecurityConfig.gatewayServer();
 
         // Initialize core components
@@ -74,7 +76,7 @@ public class GatewayServer {
         this.watchShardMapClient = new WatchShardMapClient(shardMapCache, coordinatorClientManager);
 
         // Create the service with retry-enabled executor
-        KvGatewayServiceImpl gatewayService = new KvGatewayServiceImpl(shardMapCache, requestExecutor);
+        KvGatewayServiceImpl gatewayService = new KvGatewayServiceImpl(shardMapCache, requestExecutor, requestLimits);
         ServerServiceDefinition interceptedService = ServerInterceptors.intercept(
                 gatewayService,
                 new CorrelationIdInterceptor(),
@@ -84,6 +86,8 @@ public class GatewayServer {
                 new GlobalExceptionInterceptor());
 
         this.grpcServer = GrpcSecurity.configureServer(NettyServerBuilder.forPort(port), gatewaySecurity)
+                .maxInboundMessageSize(requestLimits.maxMessageBytes())
+                .maxConcurrentCallsPerConnection(requestLimits.maxConcurrentRequestsPerConnection())
                 .addService(interceptedService)
                 .build();
         this.drainBudgetMillis = drainBudgetMillis();

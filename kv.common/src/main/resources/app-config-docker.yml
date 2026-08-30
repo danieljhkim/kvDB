@@ -42,6 +42,14 @@ persistence:
 replication:
   timeoutMs: 500
 
+limits:
+  maxKeyBytes: 4096
+  maxValueBytes: 1048576
+  maxMessageBytes: 2097152
+  maxBatchEntries: 128
+  maxConcurrentRequestsPerConnection: 128
+  maxContextFieldBytes: 512
+
 # Raft Configuration
 raft:
   heartbeatIntervalMs: 100

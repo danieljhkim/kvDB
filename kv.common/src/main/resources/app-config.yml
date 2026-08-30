@@ -42,6 +42,15 @@ persistence:
 replication:
   timeoutMs: 500
 
+# Data-plane allocation and concurrency bounds (enforced at gateway and node).
+limits:
+  maxKeyBytes: 4096
+  maxValueBytes: 1048576
+  maxMessageBytes: 2097152
+  maxBatchEntries: 128
+  maxConcurrentRequestsPerConnection: 128
+  maxContextFieldBytes: 512
+
 # Raft Configuration
 raft:
   heartbeatIntervalMs: 500

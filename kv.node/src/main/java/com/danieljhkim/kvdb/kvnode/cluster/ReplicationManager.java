@@ -7,6 +7,7 @@ import com.danieljhkim.kvdb.kvnode.client.ReplicaWriteClient;
 import com.danieljhkim.kvdb.kvnode.storage.ShardKVStore;
 import com.danieljhkim.kvdb.kvnode.storage.ShardStoreRegistry;
 import com.danieljhkim.kvdb.proto.coordinator.ShardRecord;
+import com.google.protobuf.ByteString;
 import com.kvdb.proto.kvstore.MutationKind;
 import com.kvdb.proto.kvstore.ReplicaRepairRequest;
 import com.kvdb.proto.kvstore.ReplicaRepairResponse;
@@ -23,6 +24,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -77,12 +79,65 @@ public class ReplicationManager implements AutoCloseable {
 
     public MutationResult replicateSet(
             String shardId, ShardRecord shard, String key, String value, String requestId, WriteDurability durability) {
-        return replicateMutation(shardId, shard, key, value, requestId, MutationKind.SET, durability);
+        return replicateSet(
+                shardId,
+                shard,
+                ByteString.copyFromUtf8(key),
+                ByteString.copyFromUtf8(value),
+                requestId,
+                durability,
+                0,
+                OptionalLong.empty(),
+                false);
+    }
+
+    public MutationResult replicateSet(
+            String shardId,
+            ShardRecord shard,
+            ByteString key,
+            ByteString value,
+            String requestId,
+            WriteDurability durability,
+            long ttlMs,
+            OptionalLong expectedVersion,
+            boolean ifNotExists) {
+        return replicateMutation(
+                shardId,
+                shard,
+                key,
+                value,
+                requestId,
+                MutationKind.SET,
+                durability,
+                ttlMs,
+                expectedVersion,
+                ifNotExists);
     }
 
     public MutationResult replicateDelete(
             String shardId, ShardRecord shard, String key, String requestId, WriteDurability durability) {
-        return replicateMutation(shardId, shard, key, "", requestId, MutationKind.DELETE, durability);
+        return replicateDelete(
+                shardId, shard, ByteString.copyFromUtf8(key), requestId, durability, OptionalLong.empty());
+    }
+
+    public MutationResult replicateDelete(
+            String shardId,
+            ShardRecord shard,
+            ByteString key,
+            String requestId,
+            WriteDurability durability,
+            OptionalLong expectedVersion) {
+        return replicateMutation(
+                shardId,
+                shard,
+                key,
+                ByteString.EMPTY,
+                requestId,
+                MutationKind.DELETE,
+                durability,
+                0,
+                expectedVersion,
+                false);
     }
 
     /** Runs one bounded anti-entropy pass immediately. Exposed for operational hooks and deterministic tests. */
@@ -177,11 +232,14 @@ public class ReplicationManager implements AutoCloseable {
     private MutationResult replicateMutation(
             String shardId,
             ShardRecord shard,
-            String key,
-            String value,
+            ByteString key,
+            ByteString value,
             String requestId,
             MutationKind kind,
-            WriteDurability durability) {
+            WriteDurability durability,
+            long ttlMs,
+            OptionalLong expectedVersion,
+            boolean ifNotExists) {
         Objects.requireNonNull(shard, "shard");
         knownShards.put(shardId, shard);
         ReentrantLock lock = shardLocks.computeIfAbsent(shardId, ignored -> new ReentrantLock());
@@ -189,8 +247,17 @@ public class ReplicationManager implements AutoCloseable {
         try {
             ensureLeaderReconciledLocked(shardId, shard, false);
             ShardKVStore local = shardStores.getOrCreate(shardId);
-            ReplicatedMutation mutation =
-                    local.prepareNewMutation(requestId, shard.getEpoch(), kind, key, value, nodeId);
+            ReplicatedMutation mutation = local.prepareNewMutation(
+                    requestId,
+                    shard.getEpoch(),
+                    kind,
+                    key,
+                    value,
+                    nodeId,
+                    ttlMs,
+                    expectedVersion,
+                    ifNotExists,
+                    System.currentTimeMillis());
             List<String> targets = getReplicationTargets(shard);
             int totalReplicas = Math.max(1, shard.getReplicasCount());
             int requiredAcks = requiredAcks(totalReplicas, durability);
@@ -316,6 +383,9 @@ public class ReplicationManager implements AutoCloseable {
     }
 
     private static int requiredAcks(int totalReplicas, WriteDurability durability) {
+        if (durability == WriteDurability.LOCAL_SYNC) {
+            return 1;
+        }
         return durability == WriteDurability.ALL_SYNC ? totalReplicas : (totalReplicas / 2) + 1;
     }
 

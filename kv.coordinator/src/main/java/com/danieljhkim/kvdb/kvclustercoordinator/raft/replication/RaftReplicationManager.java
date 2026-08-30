@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiFunction;
 import lombok.extern.slf4j.Slf4j;
 
@@ -59,16 +60,31 @@ public class RaftReplicationManager {
             return CompletableFuture.failedFuture(new IllegalStateException("Not a leader"));
         }
 
-        List<CompletableFuture<Void>> futures = new ArrayList<>();
-
-        for (String peerId : config.getPeers().keySet()) {
-            CompletableFuture<Void> future = replicateToPeer(peerId);
-            futures.add(future);
+        int quorumSize = config.getQuorumSize();
+        if (quorumSize == 1) {
+            updateCommitIndex();
+            return CompletableFuture.completedFuture(null);
         }
 
-        // Wait for all replications to complete (or fail)
-        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
-                .thenRun(this::updateCommitIndex);
+        CompletableFuture<Void> quorumReached = new CompletableFuture<>();
+        AtomicInteger successfulServers = new AtomicInteger(1); // The leader stores the entry locally.
+        AtomicInteger failedServers = new AtomicInteger();
+
+        for (String peerId : config.getPeers().keySet()) {
+            replicateToPeer(peerId).whenComplete((ignored, error) -> {
+                if (error == null) {
+                    updateCommitIndex();
+                    if (successfulServers.incrementAndGet() >= quorumSize) {
+                        quorumReached.complete(null);
+                    }
+                } else if (config.getClusterSize() - failedServers.incrementAndGet() < quorumSize) {
+                    quorumReached.completeExceptionally(
+                            new IllegalStateException("Unable to replicate command to a majority", error));
+                }
+            });
+        }
+
+        return quorumReached;
     }
 
     /**
@@ -111,7 +127,8 @@ public class RaftReplicationManager {
             Long nextIndex = state.getNextIndex(peerId);
             if (nextIndex == null) {
                 log.warn("[{}] No nextIndex for peer {}, cannot replicate", nodeId, peerId);
-                return CompletableFuture.completedFuture(null);
+                return CompletableFuture.failedFuture(
+                        new IllegalStateException("No replication state for peer " + peerId));
             }
 
             RaftLog log = state.getLog();
@@ -189,7 +206,8 @@ public class RaftReplicationManager {
             log.warn("[{}] Discovered higher term {} from {}, stepping down", nodeId, response.getTerm(), peerId);
             state.updateTerm(response.getTerm());
             state.transitionToFollower(null);
-            return CompletableFuture.completedFuture(null);
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("Stepped down after discovering higher term " + response.getTerm()));
         }
 
         if (response.getSuccess()) {

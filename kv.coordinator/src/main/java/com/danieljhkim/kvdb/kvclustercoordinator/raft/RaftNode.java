@@ -209,7 +209,7 @@ public class RaftNode {
      * Submits a command to be replicated (only works if this node is the leader).
      *
      * @param command the command to replicate
-     * @return CompletableFuture that completes when command is committed
+     * @return CompletableFuture that completes when command is committed and applied
      */
     public CompletableFuture<Void> submitCommand(RaftCommand command) {
         if (!state.isLeader()) {
@@ -228,11 +228,16 @@ public class RaftNode {
             log.debug("[{}] Appended command to log at index {} term {}", nodeId, index, term);
 
             // Replicate to followers
-            return replicationManager.replicateToAll().thenRun(() -> {
-                // After replication, apply to state machine if committed
-                if (state.getCommitIndex() >= index) {
-                    stateMachineApplier.applyCommittedEntries();
+            return replicationManager.replicateToAll().thenCompose(ignored -> {
+                if (state.getCommitIndex() < index) {
+                    return CompletableFuture.failedFuture(
+                            new IllegalStateException("Command was not committed at index " + index));
                 }
+                return stateMachineApplier.applyCommittedEntries().thenRun(() -> {
+                    if (state.getLastApplied() < index) {
+                        throw new IllegalStateException("Command was not applied at index " + index);
+                    }
+                });
             });
 
         } catch (IOException e) {

@@ -1,29 +1,70 @@
 package com.danieljhkim.kvdb.kvcommon.grpc;
 
+import io.grpc.CallOptions;
+import io.grpc.Channel;
+import io.grpc.ClientCall;
+import io.grpc.ClientInterceptor;
 import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
+import io.grpc.Metadata;
+import io.grpc.MethodDescriptor;
+import io.grpc.netty.shaded.io.grpc.netty.GrpcSslContexts;
+import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
+import java.io.IOException;
 
 /**
- * Helpers for building plaintext internal channels that carry the cluster token.
+ * Builds internal channels with verified TLS peer identities.
  */
 public final class InternalAuthChannels {
 
     private InternalAuthChannels() {}
 
-    public static ManagedChannel plaintext(String host, int port, String token) {
-        return withToken(ManagedChannelBuilder.forAddress(host, port).usePlaintext(), token)
-                .build();
+    static final Metadata.Key<String> DEVELOPMENT_IDENTITY =
+            Metadata.Key.of("x-kvdb-development-identity", Metadata.ASCII_STRING_MARSHALLER);
+
+    public static ManagedChannel forAddress(String host, int port) {
+        return forAddress(host, port, GrpcSecurityConfig.currentInternalIdentity());
     }
 
-    public static ManagedChannel plaintextTarget(String target, String token) {
-        return withToken(ManagedChannelBuilder.forTarget(target).usePlaintext(), token)
-                .build();
+    public static ManagedChannel forAddress(String host, int port, GrpcSecurityConfig config) {
+        return configure(NettyChannelBuilder.forAddress(host, port), config).build();
     }
 
-    public static ManagedChannelBuilder<?> withToken(ManagedChannelBuilder<?> builder, String token) {
-        if (token != null && !token.isBlank()) {
-            builder.intercept(new InternalAuthClientInterceptor(token));
+    public static ManagedChannel forTarget(String target) {
+        return forTarget(target, GrpcSecurityConfig.currentInternalIdentity());
+    }
+
+    public static ManagedChannel forTarget(String target, GrpcSecurityConfig config) {
+        return configure(NettyChannelBuilder.forTarget(target), config).build();
+    }
+
+    public static NettyChannelBuilder configure(NettyChannelBuilder builder, GrpcSecurityConfig config) {
+        if (config.mode() == GrpcSecurityConfig.Mode.DEVELOPMENT_PLAINTEXT) {
+            return builder.usePlaintext().intercept(new ClientInterceptor() {
+                @Override
+                public <ReqT, RespT> ClientCall<ReqT, RespT> interceptCall(
+                        MethodDescriptor<ReqT, RespT> method, CallOptions callOptions, Channel next) {
+                    return new io.grpc.ForwardingClientCall.SimpleForwardingClientCall<>(
+                            next.newCall(method, callOptions)) {
+                        @Override
+                        public void start(ClientCall.Listener<RespT> responseListener, Metadata headers) {
+                            headers.put(
+                                    DEVELOPMENT_IDENTITY,
+                                    config.localRole().sanValue() + "/" + config.localPrincipal());
+                            super.start(responseListener, headers);
+                        }
+                    };
+                }
+            });
         }
-        return builder;
+        try {
+            return builder.sslContext(GrpcSslContexts.forClient()
+                    .trustManager(ReloadingRevocationTrustManager.create(config.trustBundle(), config.revocationList()))
+                    .keyManager(
+                            config.certificateChain().toFile(),
+                            config.privateKey().toFile())
+                    .build());
+        } catch (IOException e) {
+            throw new IllegalStateException("Unable to load internal gRPC TLS credentials", e);
+        }
     }
 }

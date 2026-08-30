@@ -53,8 +53,10 @@ jobs:
 
       - name: Validate Compose model
         env:
-          KVDB_INTERNAL_GRPC_TOKEN: ci-internal-token
           KVDB_ADMIN_SECURITY_API_KEY: ci-admin-key
+          KVDB_ENV: test
+          KVDB_GRPC_SECURITY_MODE: development-plaintext
+          KVDB_TLS_DIR: .
         run: docker compose config --quiet
 
       - name: Build images and exercise failover

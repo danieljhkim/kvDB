@@ -1,12 +1,11 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.raft.rpc;
 
 import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthChannels;
-import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthToken;
 import com.danieljhkim.kvdb.proto.raft.*;
 import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
+import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -28,7 +27,6 @@ import lombok.extern.slf4j.Slf4j;
 public class RaftGrpcClient implements AutoCloseable {
 
     private final String nodeId;
-    private final String token;
     private final Map<String, ManagedChannel> channels;
     private final Map<String, RaftServiceGrpc.RaftServiceBlockingStub> blockingStubs;
     private final Map<String, RaftServiceGrpc.RaftServiceFutureStub> futureStubs;
@@ -44,11 +42,7 @@ public class RaftGrpcClient implements AutoCloseable {
      * @param peerAddresses map of peer nodeId -> gRPC address (host:port)
      */
     public RaftGrpcClient(String nodeId, Map<String, String> peerAddresses) {
-        this(nodeId, peerAddresses, Duration.ofSeconds(5), Duration.ofSeconds(10), InternalAuthToken.resolve());
-    }
-
-    public RaftGrpcClient(String nodeId, Map<String, String> peerAddresses, String token) {
-        this(nodeId, peerAddresses, Duration.ofSeconds(5), Duration.ofSeconds(10), token);
+        this(nodeId, peerAddresses, Duration.ofSeconds(5), Duration.ofSeconds(10));
     }
 
     /**
@@ -61,18 +55,7 @@ public class RaftGrpcClient implements AutoCloseable {
      */
     public RaftGrpcClient(
             String nodeId, Map<String, String> peerAddresses, Duration rpcTimeout, Duration connectionTimeout) {
-        this(nodeId, peerAddresses, rpcTimeout, connectionTimeout, InternalAuthToken.resolve());
-    }
-
-    public RaftGrpcClient(
-            String nodeId,
-            Map<String, String> peerAddresses,
-            Duration rpcTimeout,
-            Duration connectionTimeout,
-            String token) {
-
         this.nodeId = nodeId;
-        this.token = token == null ? "" : token;
         this.rpcTimeout = rpcTimeout;
         this.connectionTimeout = connectionTimeout;
         this.channels = new ConcurrentHashMap<>();
@@ -94,11 +77,13 @@ public class RaftGrpcClient implements AutoCloseable {
      */
     private void createChannelForPeer(String peerId, String address) {
         try {
-            ManagedChannelBuilder<?> builder = ManagedChannelBuilder.forTarget(address)
-                    .usePlaintext()
-                    .maxInboundMessageSize(10 * 1024 * 1024); // 10MB max message size
-            ManagedChannel channel =
-                    InternalAuthChannels.withToken(builder, token).build();
+            NettyChannelBuilder builder =
+                    NettyChannelBuilder.forTarget(address).maxInboundMessageSize(10 * 1024 * 1024);
+            ManagedChannel channel = InternalAuthChannels.configure(
+                            builder,
+                            com.danieljhkim.kvdb.kvcommon.grpc.GrpcSecurityConfig.internal(
+                                    com.danieljhkim.kvdb.kvcommon.grpc.GrpcIdentity.Role.COORDINATOR))
+                    .build();
 
             RaftServiceGrpc.RaftServiceBlockingStub blockingStub = RaftServiceGrpc.newBlockingStub(channel);
 

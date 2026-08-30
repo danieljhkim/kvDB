@@ -1,10 +1,10 @@
 package com.danieljhkim.kvdb.kvadmin.client;
 
+import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthChannels;
 import com.kvdb.proto.kvstore.KVServiceGrpc;
 import com.kvdb.proto.kvstore.PingRequest;
 import com.kvdb.proto.kvstore.PingResponse;
 import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 import io.grpc.StatusRuntimeException;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -51,7 +51,7 @@ public class NodeAdminClient {
             }
 
             logger.debug("Creating gRPC channel to node: {}", addr);
-            return ManagedChannelBuilder.forAddress(host, port).usePlaintext().build();
+            return InternalAuthChannels.forAddress(host, port);
         });
 
         try {

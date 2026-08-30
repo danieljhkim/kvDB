@@ -6,8 +6,11 @@ PROTO_DIR="$BASE_DIR/kv.proto/src/main/proto"
 source "$BASE_DIR/scripts/cluster_helpers.sh"
 
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-kvdb-failover-${GITHUB_RUN_ID:-$$}}"
-export KVDB_INTERNAL_GRPC_TOKEN="${KVDB_INTERNAL_GRPC_TOKEN:-docker-failover-internal-token}"
 export KVDB_ADMIN_SECURITY_API_KEY="${KVDB_ADMIN_SECURITY_API_KEY:-docker-failover-admin-key}"
+export KVDB_ENV=test
+export KVDB_GRPC_SECURITY_MODE=development-plaintext
+export KVDB_TLS_DIR="${KVDB_TLS_DIR:-$BASE_DIR/data/dev-tls-empty}"
+mkdir -p "$KVDB_TLS_DIR"
 export COORDINATOR_ADDRS="${COORDINATOR_ADDRS:-$KVDB_COORDINATOR_ADDRS_DEFAULT}"
 export LEADER_DISCOVERY_TIMEOUT_SECONDS="${LEADER_DISCOVERY_TIMEOUT_SECONDS:-90}"
 export N_NODES="${N_NODES:-2}"
@@ -109,6 +112,7 @@ gateway_put() {
   key_b64="$(printf '%s' "$key" | base64 | tr -d '\n')"
   value_b64="$(printf '%s' "$value" | base64 | tr -d '\n')"
   grpcurl -plaintext -max-time 10 \
+    -H "x-kvdb-development-identity: client/local/failover-test" \
     -import-path "$PROTO_DIR" \
     -proto kvgateway.proto \
     -d "{\"ctx\":{\"request_id\":\"${request_id}\"},\"key\":\"${key_b64}\",\"value\":\"${value_b64}\",\"options\":{}}" \
@@ -124,6 +128,7 @@ assert_gateway_value() {
   key_b64="$(printf '%s' "$key" | base64 | tr -d '\n')"
   value_b64="$(printf '%s' "$value" | base64 | tr -d '\n')"
   response="$(grpcurl -plaintext -max-time 10 \
+    -H "x-kvdb-development-identity: client/local/failover-test" \
     -import-path "$PROTO_DIR" \
     -proto kvgateway.proto \
     -d "{\"ctx\":{\"request_id\":\"${request_id}\"},\"key\":\"${key_b64}\",\"options\":{\"consistency\":\"STRONG\"}}" \

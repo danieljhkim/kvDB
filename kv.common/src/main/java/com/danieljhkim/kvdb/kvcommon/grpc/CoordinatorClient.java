@@ -29,12 +29,8 @@ public class CoordinatorClient {
     private final CoordinatorGrpc.CoordinatorStub asyncStub;
 
     public CoordinatorClient(String host, int port) {
-        this(host, port, InternalAuthToken.resolve());
-    }
-
-    public CoordinatorClient(String host, int port, String token) {
         this.address = host + ":" + port;
-        this.channel = InternalAuthChannels.plaintext(host, port, token);
+        this.channel = InternalAuthChannels.forAddress(host, port);
         this.blockingStub = CoordinatorGrpc.newBlockingStub(channel);
         this.asyncStub = CoordinatorGrpc.newStub(channel);
         logger.info("CoordinatorClient created for {}", address);

@@ -15,13 +15,6 @@ NODE_HOST="${NODE_HOST:-localhost}"
 STORAGE_NODE_ADDRS="${STORAGE_NODE_ADDRS:-}"
 RF="${RF:-$N_NODES}"
 NUM_SHARDS="${NUM_SHARDS:-8}"
-TOKEN_FILE="$BASE_DIR/data/.internal-grpc-token"
-
-if [[ -z "${KVDB_INTERNAL_GRPC_TOKEN:-}" && -f "$TOKEN_FILE" ]]; then
-  KVDB_INTERNAL_GRPC_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
-fi
-: "${KVDB_INTERNAL_GRPC_TOKEN:?Set KVDB_INTERNAL_GRPC_TOKEN or start the local cluster first}"
-
 require_grpcurl
 
 leader="$(discover_coordinator_leader)"

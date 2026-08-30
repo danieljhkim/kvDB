@@ -27,6 +27,7 @@
         <slf4j.version>2.0.17</slf4j.version>
         <log4j2.version>2.25.5</log4j2.version>
         <spring.boot.version>3.5.12</spring.boot.version>
+        <bouncycastle.version>1.78.1</bouncycastle.version>
     </properties>
     <dependencyManagement>
         <dependencies>
@@ -166,6 +167,18 @@
                 <groupId>org.junit.jupiter</groupId>
                 <artifactId>junit-jupiter</artifactId>
                 <version>5.14.1</version>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcprov-jdk18on</artifactId>
+                <version>${bouncycastle.version}</version>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcpkix-jdk18on</artifactId>
+                <version>${bouncycastle.version}</version>
                 <scope>test</scope>
             </dependency>
 

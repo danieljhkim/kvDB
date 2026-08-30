@@ -4,7 +4,9 @@ import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
 import com.danieljhkim.kvdb.kvcommon.config.AppConfig;
 import com.danieljhkim.kvdb.kvcommon.grpc.CoordinatorClientManager;
 import com.danieljhkim.kvdb.kvcommon.grpc.GlobalExceptionInterceptor;
-import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthToken;
+import com.danieljhkim.kvdb.kvcommon.grpc.GrpcSecurity;
+import com.danieljhkim.kvdb.kvcommon.grpc.GrpcSecurityConfig;
+import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthServerInterceptor;
 import com.danieljhkim.kvdb.kvcommon.grpc.WatchShardMapClient;
 import com.danieljhkim.kvdb.kvcommon.observability.AdmissionControlInterceptor;
 import com.danieljhkim.kvdb.kvcommon.observability.CorrelationIdInterceptor;
@@ -56,11 +58,11 @@ public class GatewayServer {
         }
 
         this.port = gatewayConfig.getPort();
-        String internalToken = InternalAuthToken.require(appConfig);
+        GrpcSecurityConfig gatewaySecurity = GrpcSecurityConfig.gatewayServer();
 
         // Initialize core components
         this.coordinatorClientManager = new CoordinatorClientManager(appConfig);
-        this.nodePool = new NodeConnectionPool(internalToken);
+        this.nodePool = new NodeConnectionPool();
         this.shardMapCache = new ShardMapCache();
 
         // Initialize retry infrastructure
@@ -78,10 +80,12 @@ public class GatewayServer {
                 new CorrelationIdInterceptor(),
                 new AdmissionControlInterceptor(lifecycle),
                 new RequestMetricsInterceptor("gateway", lifecycle),
+                new InternalAuthServerInterceptor(gatewaySecurity),
                 new GlobalExceptionInterceptor());
 
-        this.grpcServer =
-                NettyServerBuilder.forPort(port).addService(interceptedService).build();
+        this.grpcServer = GrpcSecurity.configureServer(NettyServerBuilder.forPort(port), gatewaySecurity)
+                .addService(interceptedService)
+                .build();
         this.drainBudgetMillis = drainBudgetMillis();
         try {
             this.healthServer = new HealthHttpServer(

@@ -39,7 +39,7 @@ public class CoordinatorClientManager {
             String nodeId = nodeConfig.getId();
             String host = nodeConfig.getHost();
             int port = nodeConfig.getPort();
-            CoordinatorClient client = new CoordinatorClient(host, port, InternalAuthToken.resolve(appConfig));
+            CoordinatorClient client = new CoordinatorClient(host, port);
             clients.put(nodeId, client);
             nodeIds.add(nodeId);
         }

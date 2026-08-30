@@ -14,7 +14,6 @@ public class AppConfig {
     private PersistenceConfig persistence;
     private ReplicationConfig replication;
     private RaftConfig raft;
-    private SecurityConfig security;
 
     @Setter
     @Getter
@@ -122,22 +121,6 @@ public class AppConfig {
         @Override
         public String toString() {
             return "GatewayConfig{" + "port=" + port + '}';
-        }
-    }
-
-    @Setter
-    @Getter
-    public static class SecurityConfig {
-        /**
-         * Cluster-wide token for internal gRPC. Prefer {@code KVDB_INTERNAL_GRPC_TOKEN} over committing a
-         * value here.
-         */
-        private String internalGrpcToken = "";
-
-        @Override
-        public String toString() {
-            boolean configured = internalGrpcToken != null && !internalGrpcToken.isBlank();
-            return "SecurityConfig{internalGrpcTokenConfigured=" + configured + '}';
         }
     }
 }

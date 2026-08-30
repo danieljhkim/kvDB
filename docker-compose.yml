@@ -1,5 +1,5 @@
 # Durable local cluster: three Raft coordinators, two storage nodes, gateway,
-# and admin API. Set both required secrets before starting the stack.
+# and admin API. TLS material is mounted read-only from KVDB_TLS_DIR.
 
 x-coordinator-common: &coordinator-common
   build:
@@ -8,9 +8,12 @@ x-coordinator-common: &coordinator-common
   networks:
     - kvdb-net
   environment: &coordinator-environment
-    KVDB_ENV: docker
+    KVDB_ENV: ${KVDB_ENV:-docker}
     APP_CONFIG_PATH: app-config-docker.yml
-    KVDB_INTERNAL_GRPC_TOKEN: ${KVDB_INTERNAL_GRPC_TOKEN:?Set KVDB_INTERNAL_GRPC_TOKEN}
+    KVDB_GRPC_SECURITY_MODE: ${KVDB_GRPC_SECURITY_MODE:-mtls}
+    KVDB_IDENTITY_ROLE: coordinator
+    KVDB_INTERNAL_TLS_TRUST_BUNDLE: /run/secrets/kvdb/internal-ca-bundle.pem
+    KVDB_INTERNAL_TLS_REVOCATION_LIST: /run/secrets/kvdb/internal-revoked.sha256
     KVDB_HEALTH_PORT: "19000"
   healthcheck: &coordinator-healthcheck
     test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/19000; printf \"GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3; read -r status <&3; [[ \"$$status\" == *\" 200 \"* ]]'"]
@@ -27,7 +30,11 @@ services:
     environment:
       <<: *coordinator-environment
       COORDINATOR_NODE_ID: coordinator-1
+      KVDB_IDENTITY_PRINCIPAL: coordinator-1
+      KVDB_INTERNAL_TLS_CERT_CHAIN: /run/secrets/kvdb/coordinator-1/tls.crt
+      KVDB_INTERNAL_TLS_PRIVATE_KEY: /run/secrets/kvdb/coordinator-1/tls.key
     volumes:
+      - ${KVDB_TLS_DIR:?Set KVDB_TLS_DIR}:/run/secrets/kvdb:ro
       - coordinator1-data:/app/data
 
   coordinator2:
@@ -37,7 +44,11 @@ services:
     environment:
       <<: *coordinator-environment
       COORDINATOR_NODE_ID: coordinator-2
+      KVDB_IDENTITY_PRINCIPAL: coordinator-2
+      KVDB_INTERNAL_TLS_CERT_CHAIN: /run/secrets/kvdb/coordinator-2/tls.crt
+      KVDB_INTERNAL_TLS_PRIVATE_KEY: /run/secrets/kvdb/coordinator-2/tls.key
     volumes:
+      - ${KVDB_TLS_DIR:?Set KVDB_TLS_DIR}:/run/secrets/kvdb:ro
       - coordinator2-data:/app/data
 
   coordinator3:
@@ -47,7 +58,11 @@ services:
     environment:
       <<: *coordinator-environment
       COORDINATOR_NODE_ID: coordinator-3
+      KVDB_IDENTITY_PRINCIPAL: coordinator-3
+      KVDB_INTERNAL_TLS_CERT_CHAIN: /run/secrets/kvdb/coordinator-3/tls.crt
+      KVDB_INTERNAL_TLS_PRIVATE_KEY: /run/secrets/kvdb/coordinator-3/tls.key
     volumes:
+      - ${KVDB_TLS_DIR:?Set KVDB_TLS_DIR}:/run/secrets/kvdb:ro
       - coordinator3-data:/app/data
 
   # Compose cannot express "any two of three dependencies are healthy". This
@@ -101,11 +116,19 @@ services:
       coordinator-quorum:
         condition: service_completed_successfully
     environment:
-      KVDB_ENV: docker
+      KVDB_ENV: ${KVDB_ENV:-docker}
       KVDB_COORDINATOR_GRPC_ADDRESS: coordinator1:9000,coordinator2:9000,coordinator3:9000
       KVDB_ADMIN_SECURITY_ALLOWED_IPS: 127.0.0.1/32,::1/128,172.16.0.0/12,10.0.0.0/8,192.168.0.0/16
       KVDB_ADMIN_SECURITY_API_KEY: ${KVDB_ADMIN_SECURITY_API_KEY:?Set KVDB_ADMIN_SECURITY_API_KEY}
-      KVDB_INTERNAL_GRPC_TOKEN: ${KVDB_INTERNAL_GRPC_TOKEN:?Set KVDB_INTERNAL_GRPC_TOKEN}
+      KVDB_GRPC_SECURITY_MODE: ${KVDB_GRPC_SECURITY_MODE:-mtls}
+      KVDB_IDENTITY_ROLE: admin
+      KVDB_IDENTITY_PRINCIPAL: admin-1
+      KVDB_INTERNAL_TLS_CERT_CHAIN: /run/secrets/kvdb/admin/tls.crt
+      KVDB_INTERNAL_TLS_PRIVATE_KEY: /run/secrets/kvdb/admin/tls.key
+      KVDB_INTERNAL_TLS_TRUST_BUNDLE: /run/secrets/kvdb/internal-ca-bundle.pem
+      KVDB_INTERNAL_TLS_REVOCATION_LIST: /run/secrets/kvdb/internal-revoked.sha256
+    volumes:
+      - ${KVDB_TLS_DIR:?Set KVDB_TLS_DIR}:/run/secrets/kvdb:ro
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/8089; printf \"GET /admin/actuator/health/readiness HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3; read -r status <&3; [[ \"$$status\" == *\" 200 \"* ]]'"]
       interval: 5s
@@ -123,12 +146,19 @@ services:
       coordinator-quorum:
         condition: service_completed_successfully
     environment:
-      KVDB_ENV: docker
+      KVDB_ENV: ${KVDB_ENV:-docker}
       APP_CONFIG_PATH: app-config-docker.yml
       STORAGE_NODE_ID: node-1
-      KVDB_INTERNAL_GRPC_TOKEN: ${KVDB_INTERNAL_GRPC_TOKEN:?Set KVDB_INTERNAL_GRPC_TOKEN}
+      KVDB_GRPC_SECURITY_MODE: ${KVDB_GRPC_SECURITY_MODE:-mtls}
+      KVDB_IDENTITY_ROLE: storage-node
+      KVDB_IDENTITY_PRINCIPAL: node-1
+      KVDB_INTERNAL_TLS_CERT_CHAIN: /run/secrets/kvdb/node-1/tls.crt
+      KVDB_INTERNAL_TLS_PRIVATE_KEY: /run/secrets/kvdb/node-1/tls.key
+      KVDB_INTERNAL_TLS_TRUST_BUNDLE: /run/secrets/kvdb/internal-ca-bundle.pem
+      KVDB_INTERNAL_TLS_REVOCATION_LIST: /run/secrets/kvdb/internal-revoked.sha256
       KVDB_HEALTH_PORT: "18001"
     volumes:
+      - ${KVDB_TLS_DIR:?Set KVDB_TLS_DIR}:/run/secrets/kvdb:ro
       - node1-data:/app/data
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/18001; printf \"GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3; read -r status <&3; [[ \"$$status\" == *\" 200 \"* ]]'"]
@@ -147,12 +177,19 @@ services:
       coordinator-quorum:
         condition: service_completed_successfully
     environment:
-      KVDB_ENV: docker
+      KVDB_ENV: ${KVDB_ENV:-docker}
       APP_CONFIG_PATH: app-config-docker.yml
       STORAGE_NODE_ID: node-2
-      KVDB_INTERNAL_GRPC_TOKEN: ${KVDB_INTERNAL_GRPC_TOKEN:?Set KVDB_INTERNAL_GRPC_TOKEN}
+      KVDB_GRPC_SECURITY_MODE: ${KVDB_GRPC_SECURITY_MODE:-mtls}
+      KVDB_IDENTITY_ROLE: storage-node
+      KVDB_IDENTITY_PRINCIPAL: node-2
+      KVDB_INTERNAL_TLS_CERT_CHAIN: /run/secrets/kvdb/node-2/tls.crt
+      KVDB_INTERNAL_TLS_PRIVATE_KEY: /run/secrets/kvdb/node-2/tls.key
+      KVDB_INTERNAL_TLS_TRUST_BUNDLE: /run/secrets/kvdb/internal-ca-bundle.pem
+      KVDB_INTERNAL_TLS_REVOCATION_LIST: /run/secrets/kvdb/internal-revoked.sha256
       KVDB_HEALTH_PORT: "18002"
     volumes:
+      - ${KVDB_TLS_DIR:?Set KVDB_TLS_DIR}:/run/secrets/kvdb:ro
       - node2-data:/app/data
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/18002; printf \"GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3; read -r status <&3; [[ \"$$status\" == *\" 200 \"* ]]'"]
@@ -177,10 +214,22 @@ services:
       node2:
         condition: service_started
     environment:
-      KVDB_ENV: docker
+      KVDB_ENV: ${KVDB_ENV:-docker}
       APP_CONFIG_PATH: app-config-docker.yml
-      KVDB_INTERNAL_GRPC_TOKEN: ${KVDB_INTERNAL_GRPC_TOKEN:?Set KVDB_INTERNAL_GRPC_TOKEN}
+      KVDB_GRPC_SECURITY_MODE: ${KVDB_GRPC_SECURITY_MODE:-mtls}
+      KVDB_IDENTITY_ROLE: gateway
+      KVDB_IDENTITY_PRINCIPAL: gateway-1
+      KVDB_INTERNAL_TLS_CERT_CHAIN: /run/secrets/kvdb/gateway-internal/tls.crt
+      KVDB_INTERNAL_TLS_PRIVATE_KEY: /run/secrets/kvdb/gateway-internal/tls.key
+      KVDB_INTERNAL_TLS_TRUST_BUNDLE: /run/secrets/kvdb/internal-ca-bundle.pem
+      KVDB_INTERNAL_TLS_REVOCATION_LIST: /run/secrets/kvdb/internal-revoked.sha256
+      KVDB_GATEWAY_TLS_CERT_CHAIN: /run/secrets/kvdb/gateway-server/tls.crt
+      KVDB_GATEWAY_TLS_PRIVATE_KEY: /run/secrets/kvdb/gateway-server/tls.key
+      KVDB_GATEWAY_TLS_TRUST_BUNDLE: /run/secrets/kvdb/gateway-client-ca-bundle.pem
+      KVDB_GATEWAY_TLS_REVOCATION_LIST: /run/secrets/kvdb/gateway-revoked.sha256
       KVDB_HEALTH_PORT: "17000"
+    volumes:
+      - ${KVDB_TLS_DIR:?Set KVDB_TLS_DIR}:/run/secrets/kvdb:ro
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/17000; printf \"GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3; read -r status <&3; [[ \"$$status\" == *\" 200 \"* ]]'"]
       interval: 5s

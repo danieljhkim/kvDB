@@ -80,37 +80,86 @@ Timelines may vary depending on complexity and severity.
 kvDB is a **distributed systems learning and research project** and currently:
 
 - Does **not** provide built-in encryption at rest
-- Does **not** provide TLS for gRPC (plaintext inside the deployment boundary)
 - Is **not yet production-hardened**
 
-### Internal gRPC authentication
+### gRPC identities and transport
 
-Coordinator and storage-node gRPC listeners require a cluster-wide token on
-control-plane mutations, data-plane writes, replication, shutdown, and Raft RPCs.
-Clients send it as metadata header `x-kvdb-internal-token`.
+All coordinator, Raft, storage-node, admin-to-cluster, gateway-to-cluster, and
+gateway client gRPC connections use TLS. Internal listeners require client
+certificates issued by the internal workload CA. The gateway listener uses a
+separate client trust bundle so external client identity is not interchangeable
+with workload identity. Channel hostnames are verified against certificate DNS
+SANs; IP literals require matching IP SANs.
 
-Set the same value on every internal process:
+Authorization is derived only from a verified URI SAN:
 
-```bash
-export KVDB_INTERNAL_GRPC_TOKEN=$(openssl rand -hex 32)
+```text
+spiffe://kvdb/coordinator/<principal>
+spiffe://kvdb/storage-node/<principal>
+spiffe://kvdb/gateway/<principal>
+spiffe://kvdb/admin/<principal>
+spiffe://kvdb/client/<tenant>/<principal>
 ```
 
-- **Docker Compose:** coordinator seeds are published only on loopback as
-  `127.0.0.1:9001` through `:9003` for authenticated bootstrap and failover
-  diagnostics. Storage-node `:8001`/`:8002` and the internal Raft addresses
-  remain reachable only on the `kvdb-net` bridge. Compose refuses to start
-  unless `KVDB_INTERNAL_GRPC_TOKEN` is set (no committed default). Gateway
-  `:7000` and admin `:8089` are also bound to loopback by default.
-- **Local `scripts/run_cluster.sh`:** an ephemeral token is written to
-  `data/.internal-grpc-token` (covered by `data/*` in `.gitignore`) and exported
-  to coordinator, node, gateway, and admin processes. Do not publish
-  coordinator/node ports on untrusted networks.
-- **Gateway client API** (`Get`/`Put`/`Delete`) is the public data plane and is
-  not gated by this token. Do not publish coordinator/node ports in production.
+Roles are scoped in the server interceptor. Only coordinators may perform Raft
+replication, only storage nodes may perform replica writes and node reports,
+only gateways may invoke node data operations, and only admins may invoke
+cluster mutations or node shutdown. External clients can invoke only the
+gateway data API. A storage-node certificate is therefore insufficient for an
+admin mutation. The gateway's `RequestContext.tenant_id` and `principal` fields
+are informational and are not authorization inputs; services use the
+certificate-derived identity available in `GrpcPeerIdentity`. Bearer
+`Authorization` headers are rejected, including replay of a previously captured
+value.
 
-The node `Shutdown` RPC is retained for operator use and is rejected without a
-valid token. mTLS is a follow-up; token + private network is the current
-authenticated boundary.
+### Credential files
+
+Set `KVDB_TLS_DIR` to a directory outside the repository before starting Docker
+Compose. `docker-compose.yml` documents the expected per-workload files and
+mounts the directory read-only. Each process receives:
+
+- `KVDB_IDENTITY_ROLE` and `KVDB_IDENTITY_PRINCIPAL`
+- `KVDB_INTERNAL_TLS_CERT_CHAIN` and `KVDB_INTERNAL_TLS_PRIVATE_KEY`
+- `KVDB_INTERNAL_TLS_TRUST_BUNDLE` and `KVDB_INTERNAL_TLS_REVOCATION_LIST`
+- Gateway only: the corresponding `KVDB_GATEWAY_TLS_*` server/client-boundary
+  files
+
+Never commit private keys, certificate bundles containing keys, or revocation
+operational data. Configuration errors name paths but credentials and
+certificate contents are never logged.
+
+Issue server certificates with every configured service hostname in DNS SANs
+(`coordinator1`, `node1`, and so on for Compose). Client certificates must also
+carry exactly one recognized URI SAN from the formats above. The gateway client
+trust bundle may contain the external client issuers plus the admin issuer when
+the optional admin-to-gateway client is enabled.
+
+### Rotation and revocation
+
+CA and leaf rotation is performed as a rolling change; it does not require a
+cluster-wide stop:
+
+1. Add the new issuer certificate to the applicable trust bundle while keeping
+   the old issuer, then roll processes.
+2. Issue and roll new leaf certificates. Existing and new identities overlap
+   during this window.
+3. Remove the old issuer after every peer has moved and roll again.
+
+For immediate leaf revocation, write the lowercase SHA-256 fingerprint of the
+DER certificate (one per line, colons optional) to the applicable
+`*_REVOCATION_LIST`. The interceptor reloads this list on every RPC, so new calls
+from a revoked identity are denied without restarting the cluster. Protect
+revocation files with the same operational controls as trust bundles.
+
+### Explicit local-development mode
+
+`scripts/run_cluster.sh` sets `KVDB_GRPC_SECURITY_MODE=development-plaintext`
+and supplies role/principal headers for local smoke tests. The process refuses
+that mode unless `KVDB_ENV` is exactly `local`, `dev`, `development`, or `test`;
+the default mode is `mtls`, so a missing or mistyped production configuration
+fails closed. Development identities are forgeable and must never be exposed on
+an untrusted network. Docker Compose still binds published endpoints to
+loopback by default.
 
 ---
 

@@ -4,8 +4,10 @@ import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
 import com.danieljhkim.kvdb.kvcommon.config.AppConfig;
 import com.danieljhkim.kvdb.kvcommon.grpc.CoordinatorClientManager;
 import com.danieljhkim.kvdb.kvcommon.grpc.GlobalExceptionInterceptor;
+import com.danieljhkim.kvdb.kvcommon.grpc.GrpcIdentity;
+import com.danieljhkim.kvdb.kvcommon.grpc.GrpcSecurity;
+import com.danieljhkim.kvdb.kvcommon.grpc.GrpcSecurityConfig;
 import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthServerInterceptor;
-import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthToken;
 import com.danieljhkim.kvdb.kvcommon.grpc.WatchShardMapClient;
 import com.danieljhkim.kvdb.kvcommon.observability.AdmissionControlInterceptor;
 import com.danieljhkim.kvdb.kvcommon.observability.CorrelationIdInterceptor;
@@ -45,7 +47,7 @@ public class NodeServer {
         if (thisNode == null) {
             throw new IllegalArgumentException("Node configuration not found for nodeId: " + nodeId);
         }
-        String internalToken = InternalAuthToken.require(appConfig);
+        GrpcSecurityConfig grpcSecurity = GrpcSecurityConfig.internal(GrpcIdentity.Role.STORAGE_NODE);
 
         this.coordinatorClientManager = new CoordinatorClientManager(appConfig);
         this.shardMapCache = new ShardMapCache();
@@ -68,7 +70,7 @@ public class NodeServer {
 
         this.shardStores =
                 new ShardStoreRegistry(baseDir, snapshotFileName, walFileName, flushInterval, enableAutoFlush);
-        this.replicaWriteClient = new ReplicaWriteClient(Duration.ofMillis(replicationTimeoutMs), internalToken);
+        this.replicaWriteClient = new ReplicaWriteClient(Duration.ofMillis(replicationTimeoutMs));
 
         this.watchShardMapClient = new WatchShardMapClient(shardMapCache, coordinatorClientManager);
 
@@ -79,10 +81,10 @@ public class NodeServer {
                 new CorrelationIdInterceptor(),
                 new AdmissionControlInterceptor(lifecycle),
                 new RequestMetricsInterceptor("node", lifecycle),
-                new InternalAuthServerInterceptor(internalToken),
+                new InternalAuthServerInterceptor(grpcSecurity),
                 new GlobalExceptionInterceptor());
 
-        this.server = NettyServerBuilder.forPort(thisNode.getPort())
+        this.server = GrpcSecurity.configureServer(NettyServerBuilder.forPort(thisNode.getPort()), grpcSecurity)
                 .addService(interceptedService)
                 .build();
         this.drainBudget = Duration.ofMillis(drainBudgetMillis());

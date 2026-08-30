@@ -27,16 +27,12 @@ public interface RaftStateMachine {
      * Applies a command to the state machine.
      *
      * <p>
-     * In a Raft implementation, this would:
-     * <ol>
-     * <li>Append the command to the Raft log</li>
-     * <li>Replicate to a majority of nodes</li>
-     * <li>Apply to the state machine once committed</li>
-     * <li>Notify watchers of the change</li>
-     * </ol>
+     * The caller is responsible for establishing that the command is committed. Implementations mutate only the state
+     * machine; they must not create a second command log. The returned future is the acknowledgement used by the Raft
+     * applier, so it must complete successfully only after the mutation has completed.
      *
      * @param command the command to apply
-     * @return a future that completes when the command is committed and applied
+     * @return a future that completes when the committed command has been applied
      */
     CompletableFuture<Void> apply(RaftCommand command);
 

@@ -29,7 +29,8 @@ public class ClusterServerApplication {
         logger.info("Loaded application configuration");
 
         CoordinatorServer coordServer = new CoordinatorServer(nodeId, appConfig);
-        NodeHealthChecker healthChecker = new NodeHealthChecker(coordServer.getRaftStateMachine());
+        NodeHealthChecker healthChecker =
+                new NodeHealthChecker(coordServer.getRaftStateMachine(), coordServer::submitCommand);
         HealthCheckScheduler healthCheckScheduler = new HealthCheckScheduler(healthChecker, CONFIG);
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {

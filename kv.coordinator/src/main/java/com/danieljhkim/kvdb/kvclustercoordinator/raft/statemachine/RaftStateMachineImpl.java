@@ -1,18 +1,12 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine;
 
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftCommand;
-import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.FileBasedRaftLog;
-import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLog;
-import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLogEntry;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ClusterState;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapDelta;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
-import java.io.IOException;
-import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import org.slf4j.Logger;
@@ -26,40 +20,26 @@ public class RaftStateMachineImpl implements RaftStateMachine {
     private final AtomicReference<ShardMapSnapshot> snapshotRef;
     private final List<Consumer<ShardMapDelta>> watchers;
     private final Object writeLock = new Object();
-    private final RaftLog raftLog;
-    private final AtomicLong currentIndex = new AtomicLong(0);
-    private final AtomicLong currentTerm = new AtomicLong(0);
 
-    public RaftStateMachineImpl(Path logPath) throws IOException {
+    public RaftStateMachineImpl() {
         this.state = new ClusterState();
         this.snapshotRef = new AtomicReference<>(ShardMapSnapshot.empty());
         this.watchers = new CopyOnWriteArrayList<>();
-        this.raftLog = new FileBasedRaftLog(logPath);
-
-        replayLog();
     }
 
     @Override
     public CompletableFuture<Void> apply(RaftCommand command) {
-        return CompletableFuture.supplyAsync(() -> {
-            synchronized (writeLock) {
-                try {
-                    // Persist to log first
-                    RaftLogEntry entry =
-                            RaftLogEntry.create(currentIndex.incrementAndGet(), currentTerm.get(), command);
-                    raftLog.append(entry);
-
-                    // Then apply to state machine
-                    ShardMapDelta delta = applyCommand(command);
-                    notifyWatchers(delta);
-                    logger.info("Applied command: {}", command.describe());
-                    return null;
-                } catch (Exception e) {
-                    logger.error("Failed to apply command: {}", command.describe(), e);
-                    throw new RuntimeException("Command application failed", e);
-                }
+        synchronized (writeLock) {
+            try {
+                ShardMapDelta delta = applyCommand(command);
+                notifyWatchers(delta);
+                logger.info("Applied command: {}", command.describe());
+                return CompletableFuture.completedFuture(null);
+            } catch (Exception e) {
+                logger.error("Failed to apply command: {}", command.describe(), e);
+                return CompletableFuture.failedFuture(new IllegalStateException("Command application failed", e));
             }
-        });
+        }
     }
     /**
      * Applies a command to the state and returns the resulting delta. Must be called while holding writeLock.
@@ -119,16 +99,6 @@ public class RaftStateMachineImpl implements RaftStateMachine {
                 logger.warn("Watcher threw exception", e);
             }
         }
-    }
-
-    private void replayLog() throws IOException {
-        List<RaftLogEntry> entries = raftLog.getEntriesSince(0);
-        for (RaftLogEntry entry : entries) {
-            applyCommand(entry.command());
-            currentIndex.set(entry.index());
-            currentTerm.set(entry.term());
-        }
-        logger.info("Replayed {} log entries", entries.size());
     }
 
     @Override

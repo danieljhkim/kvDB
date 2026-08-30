@@ -195,11 +195,15 @@ public class RaftNode {
      * Handles incoming AppendEntries RPC.
      */
     public AppendEntriesResponse handleAppendEntries(AppendEntriesRequest request) {
+        if (!stateMachineApplier.isRunning()) {
+            throw new IllegalStateException("State machine applier is unavailable");
+        }
+
         AppendEntriesResponse response = appendEntriesHandler.handleAppendEntries(request);
 
         // Trigger state machine applier if commit index advanced
         if (state.getCommitIndex() > state.getLastApplied()) {
-            stateMachineApplier.applyCommittedEntries();
+            stateMachineApplier.applyCommittedEntries().join();
         }
 
         return response;
@@ -216,6 +220,9 @@ public class RaftNode {
             return CompletableFuture.failedFuture(
                     new IllegalStateException("Not the leader. Current leader: " + state.getCurrentLeader()));
         }
+        if (!stateMachineApplier.isRunning()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("State machine applier is unavailable"));
+        }
 
         try {
             // Append to local log
@@ -229,15 +236,12 @@ public class RaftNode {
 
             // Replicate to followers
             return replicationManager.replicateToAll().thenCompose(ignored -> {
-                if (state.getCommitIndex() < index) {
-                    return CompletableFuture.failedFuture(
-                            new IllegalStateException("Command was not committed at index " + index));
+                // After replication, do not acknowledge the command until application succeeds.
+                if (state.getCommitIndex() >= index) {
+                    return stateMachineApplier.applyCommittedEntries();
                 }
-                return stateMachineApplier.applyCommittedEntries().thenRun(() -> {
-                    if (state.getLastApplied() < index) {
-                        throw new IllegalStateException("Command was not applied at index " + index);
-                    }
-                });
+                return CompletableFuture.failedFuture(
+                        new IllegalStateException("Replication completed without committing entry " + index));
             });
 
         } catch (IOException e) {

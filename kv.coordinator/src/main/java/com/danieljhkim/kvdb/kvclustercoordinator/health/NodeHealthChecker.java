@@ -10,8 +10,10 @@ import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.StatusRuntimeException;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -25,6 +27,7 @@ public class NodeHealthChecker {
     private static final int PING_TIMEOUT_SECONDS = 5;
 
     private final RaftStateMachine raftStateMachine;
+    private final Function<RaftCommand, CompletableFuture<Void>> commandSubmitter;
     private final Map<String, ManagedChannel> channels = new ConcurrentHashMap<>();
     private final Map<String, KVServiceGrpc.KVServiceBlockingStub> stubs = new ConcurrentHashMap<>();
 
@@ -34,8 +37,10 @@ public class NodeHealthChecker {
         io.grpc.NameResolverRegistry.getDefaultRegistry().register(provider);
     }
 
-    public NodeHealthChecker(RaftStateMachine raftStateMachine) {
+    public NodeHealthChecker(
+            RaftStateMachine raftStateMachine, Function<RaftCommand, CompletableFuture<Void>> commandSubmitter) {
         this.raftStateMachine = raftStateMachine;
+        this.commandSubmitter = commandSubmitter;
     }
 
     /**
@@ -110,7 +115,7 @@ public class NodeHealthChecker {
         // Update node status via Raft command
         try {
             RaftCommand.SetNodeStatus command = new RaftCommand.SetNodeStatus(node.nodeId(), newStatus);
-            raftStateMachine.apply(command).get(5, TimeUnit.SECONDS);
+            commandSubmitter.apply(command).get(5, TimeUnit.SECONDS);
         } catch (Exception e) {
             logger.warn("Failed to update node status for {}", node.nodeId(), e);
         }

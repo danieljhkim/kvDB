@@ -1,5 +1,6 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.server;
 
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftCommand;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftConfiguration;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftNode;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.FileBasedRaftLog;
@@ -26,6 +27,7 @@ import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import lombok.Getter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -65,8 +67,7 @@ public class CoordinatorServer {
         this.watcherManager = new WatcherManager();
 
         // Initialize Raft state machine with watcher
-        Path stateMachineLogPath = dataDirPath.resolve("state-machine-log");
-        this.raftStateMachine = new RaftStateMachineImpl(stateMachineLogPath);
+        this.raftStateMachine = new RaftStateMachineImpl();
         this.raftStateMachine.addWatcher(watcherManager);
 
         // Initialize gRPC client for peer communication
@@ -175,6 +176,10 @@ public class CoordinatorServer {
         logger.info("gRPC server started on port {}", server.getPort());
 
         server.awaitTermination();
+    }
+
+    public CompletableFuture<Void> submitCommand(RaftCommand command) {
+        return raftNode.submitCommand(command);
     }
 
     public void shutdown() throws InterruptedException {

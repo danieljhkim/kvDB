@@ -195,11 +195,15 @@ public class RaftNode {
      * Handles incoming AppendEntries RPC.
      */
     public AppendEntriesResponse handleAppendEntries(AppendEntriesRequest request) {
+        if (!stateMachineApplier.isRunning()) {
+            throw new IllegalStateException("State machine applier is unavailable");
+        }
+
         AppendEntriesResponse response = appendEntriesHandler.handleAppendEntries(request);
 
         // Trigger state machine applier if commit index advanced
         if (state.getCommitIndex() > state.getLastApplied()) {
-            stateMachineApplier.applyCommittedEntries();
+            stateMachineApplier.applyCommittedEntries().join();
         }
 
         return response;
@@ -216,6 +220,9 @@ public class RaftNode {
             return CompletableFuture.failedFuture(
                     new IllegalStateException("Not the leader. Current leader: " + state.getCurrentLeader()));
         }
+        if (!stateMachineApplier.isRunning()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("State machine applier is unavailable"));
+        }
 
         try {
             // Append to local log
@@ -228,11 +235,13 @@ public class RaftNode {
             log.debug("[{}] Appended command to log at index {} term {}", nodeId, index, term);
 
             // Replicate to followers
-            return replicationManager.replicateToAll().thenRun(() -> {
-                // After replication, apply to state machine if committed
+            return replicationManager.replicateToAll().thenCompose(ignored -> {
+                // After replication, do not acknowledge the command until application succeeds.
                 if (state.getCommitIndex() >= index) {
-                    stateMachineApplier.applyCommittedEntries();
+                    return stateMachineApplier.applyCommittedEntries();
                 }
+                return CompletableFuture.failedFuture(
+                        new IllegalStateException("Replication completed without committing entry " + index));
             });
 
         } catch (IOException e) {

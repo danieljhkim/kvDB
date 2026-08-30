@@ -160,8 +160,7 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
         RaftCommand.SetShardLeader command =
                 new RaftCommand.SetShardLeader(request.getShardId(), request.getEpoch(), request.getLeaderNodeId());
 
-        raftStateMachine
-                .apply(command)
+        raftNode.submitCommand(command)
                 .thenAccept(v -> {
                     responseObserver.onNext(ReportShardLeaderResponse.newBuilder()
                             .setAccepted(true)
@@ -191,8 +190,7 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
         RaftCommand.RegisterNode command =
                 new RaftCommand.RegisterNode(request.getNodeId(), request.getAddress(), request.getZone());
 
-        raftStateMachine
-                .apply(command)
+        raftNode.submitCommand(command)
                 .thenAccept(v -> {
                     long version = raftStateMachine.getMapVersion();
                     responseObserver.onNext(RegisterNodeResponse.newBuilder()
@@ -221,8 +219,7 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
         RaftCommand.InitShards command =
                 new RaftCommand.InitShards(request.getNumShards(), request.getReplicationFactor());
 
-        raftStateMachine
-                .apply(command)
+        raftNode.submitCommand(command)
                 .thenAccept(v -> {
                     ShardMapSnapshot snapshot = raftStateMachine.getSnapshot();
                     List<String> shardIds =
@@ -255,8 +252,7 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
         NodeRecord.NodeStatus status = ProtoConverter.fromProto(request.getStatus());
         RaftCommand.SetNodeStatus command = new RaftCommand.SetNodeStatus(request.getNodeId(), status);
 
-        raftStateMachine
-                .apply(command)
+        raftNode.submitCommand(command)
                 .thenAccept(v -> {
                     long version = raftStateMachine.getMapVersion();
                     responseObserver.onNext(SetNodeStatusResponse.newBuilder()
@@ -286,8 +282,7 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
         RaftCommand.SetShardReplicas command =
                 new RaftCommand.SetShardReplicas(request.getShardId(), request.getReplicasList());
 
-        raftStateMachine
-                .apply(command)
+        raftNode.submitCommand(command)
                 .thenAccept(v -> {
                     ShardMapSnapshot snapshot = raftStateMachine.getSnapshot();
                     ShardRecord shard = snapshot.getShard(request.getShardId());
@@ -322,8 +317,7 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
         RaftCommand.SetShardLeader command =
                 new RaftCommand.SetShardLeader(request.getShardId(), request.getEpoch(), request.getLeaderNodeId());
 
-        raftStateMachine
-                .apply(command)
+        raftNode.submitCommand(command)
                 .thenAccept(v -> {
                     long version = raftStateMachine.getMapVersion();
                     responseObserver.onNext(SetShardLeaderResponse.newBuilder()

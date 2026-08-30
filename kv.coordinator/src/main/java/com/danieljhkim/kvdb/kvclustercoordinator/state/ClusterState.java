@@ -40,6 +40,25 @@ public class ClusterState {
         this.replicationFactor = other.replicationFactor;
     }
 
+    /** Replaces the complete state while the owning Raft state machine holds its write lock. */
+    public void restore(
+            long mapVersion,
+            Map<String, NodeRecord> nodes,
+            Map<String, ShardRecord> shards,
+            int numShards,
+            int replicationFactor) {
+        if (mapVersion < 0 || numShards < 0 || replicationFactor < 0) {
+            throw new IllegalArgumentException("Snapshot contains negative cluster-state metadata");
+        }
+        this.mapVersion = mapVersion;
+        this.nodes.clear();
+        this.nodes.putAll(nodes);
+        this.shards.clear();
+        this.shards.putAll(shards);
+        this.numShards = numShards;
+        this.replicationFactor = replicationFactor;
+    }
+
     // ============================
     // Getters
     // ============================

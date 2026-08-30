@@ -179,18 +179,14 @@ public class RaftVoteHandler {
      * Returns the term of our last log entry (0 if log is empty).
      */
     private long getLastLogTerm() {
-        long lastIndex = state.getLog().size();
+        long lastIndex = state.getLog().lastIndex();
         if (lastIndex == 0) {
             return 0;
         }
         try {
-            return state.getLog()
-                    .getEntry(lastIndex)
-                    .map(com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLogEntry::term)
-                    .orElse(0L);
+            return state.getLog().getTerm(lastIndex).orElse(0L);
         } catch (IOException e) {
-            log.error("[{}] Failed to read last log entry term", nodeId, e);
-            return 0;
+            throw new IllegalStateException("Failed to read safety-critical last log term", e);
         }
     }
 
@@ -198,7 +194,7 @@ public class RaftVoteHandler {
      * Returns the index of our last log entry (0 if log is empty).
      */
     private long getLastLogIndex() {
-        return state.getLog().size();
+        return state.getLog().lastIndex();
     }
 
     /**

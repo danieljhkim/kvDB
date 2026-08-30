@@ -48,3 +48,4 @@ raft:
   electionTimeoutMinMs: 1000
   electionTimeoutMaxMs: 2000
   maxEntriesPerRequest: 100
+  snapshotThreshold: 10000

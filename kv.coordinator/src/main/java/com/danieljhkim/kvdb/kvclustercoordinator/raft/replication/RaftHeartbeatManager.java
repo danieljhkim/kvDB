@@ -10,6 +10,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
+import java.util.function.Consumer;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -30,6 +31,7 @@ public class RaftHeartbeatManager {
     private final RaftNodeState state;
     private final ScheduledExecutorService scheduler;
     private final BiFunction<String, AppendEntriesRequest, CompletableFuture<AppendEntriesResponse>> rpcClient;
+    private final Consumer<String> replicationTrigger;
 
     private final AtomicReference<ScheduledFuture<?>> heartbeatTask = new AtomicReference<>();
 
@@ -39,11 +41,22 @@ public class RaftHeartbeatManager {
             RaftNodeState state,
             ScheduledExecutorService scheduler,
             BiFunction<String, AppendEntriesRequest, CompletableFuture<AppendEntriesResponse>> rpcClient) {
+        this(nodeId, config, state, scheduler, rpcClient, ignored -> {});
+    }
+
+    public RaftHeartbeatManager(
+            String nodeId,
+            RaftConfiguration config,
+            RaftNodeState state,
+            ScheduledExecutorService scheduler,
+            BiFunction<String, AppendEntriesRequest, CompletableFuture<AppendEntriesResponse>> rpcClient,
+            Consumer<String> replicationTrigger) {
         this.nodeId = nodeId;
         this.config = config;
         this.state = state;
         this.scheduler = scheduler;
         this.rpcClient = rpcClient;
+        this.replicationTrigger = replicationTrigger;
     }
 
     /**
@@ -118,10 +131,7 @@ public class RaftHeartbeatManager {
             long prevLogTerm = 0;
 
             if (prevLogIndex > 0) {
-                prevLogTerm = state.getLog()
-                        .getEntry(prevLogIndex)
-                        .map(entry -> entry.term())
-                        .orElse(0L);
+                prevLogTerm = state.getLog().getTerm(prevLogIndex).orElse(0L);
             }
 
             AppendEntriesRequest request = AppendEntriesRequest.newBuilder()
@@ -173,8 +183,8 @@ public class RaftHeartbeatManager {
         }
 
         if (!response.getSuccess()) {
-            // Log inconsistency detected - this will be handled by replication manager
             log.debug("[{}] Heartbeat to {} failed due to log inconsistency", nodeId, peerId);
+            replicationTrigger.accept(peerId);
         } else {
             log.trace("[{}] Heartbeat to {} succeeded", nodeId, peerId);
         }

@@ -5,19 +5,27 @@ import com.danieljhkim.kvdb.kvclustercoordinator.raft.election.RaftElectionTimer
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.election.RaftVoteHandler;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLog;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftPersistentStateStore;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftSnapshotStore;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.replication.RaftAppendEntriesHandler;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.replication.RaftHeartbeatManager;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.replication.RaftInstallSnapshotHandler;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.replication.RaftReplicationManager;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.replication.RaftSnapshotManager;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.replication.RaftStateMachineApplier;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.state.RaftNodeState;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.state.RaftRole;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine.RaftStateMachine;
 import com.danieljhkim.kvdb.proto.raft.AppendEntriesRequest;
 import com.danieljhkim.kvdb.proto.raft.AppendEntriesResponse;
+import com.danieljhkim.kvdb.proto.raft.InstallSnapshotRequest;
+import com.danieljhkim.kvdb.proto.raft.InstallSnapshotResponse;
 import com.danieljhkim.kvdb.proto.raft.RequestVoteRequest;
 import com.danieljhkim.kvdb.proto.raft.RequestVoteResponse;
 import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.file.Path;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.BiFunction;
@@ -64,12 +72,18 @@ public class RaftNode {
     @Getter
     private final RaftAppendEntriesHandler appendEntriesHandler;
 
+    @Getter
+    private final RaftInstallSnapshotHandler installSnapshotHandler;
+
     private final RaftStateMachineApplier stateMachineApplier;
+    private final RaftSnapshotManager snapshotManager;
 
     // RPC clients (to be provided by gRPC layer)
     private final BiFunction<String, RequestVoteRequest, CompletableFuture<RequestVoteResponse>> voteRpcClient;
     private final BiFunction<String, AppendEntriesRequest, CompletableFuture<AppendEntriesResponse>>
             appendEntriesRpcClient;
+    private final BiFunction<String, InstallSnapshotRequest, CompletableFuture<InstallSnapshotResponse>>
+            installSnapshotRpcClient;
 
     // Executor for scheduled tasks
     private final ScheduledExecutorService scheduler;
@@ -99,6 +113,30 @@ public class RaftNode {
             RaftStateMachine stateMachine,
             BiFunction<String, RequestVoteRequest, CompletableFuture<RequestVoteResponse>> voteRpcClient,
             BiFunction<String, AppendEntriesRequest, CompletableFuture<AppendEntriesResponse>> appendEntriesRpcClient) {
+        this(
+                nodeId,
+                config,
+                raftLog,
+                persistentStore,
+                stateMachine,
+                voteRpcClient,
+                appendEntriesRpcClient,
+                (peer, request) -> CompletableFuture.failedFuture(
+                        new IllegalStateException("InstallSnapshot RPC client is not configured")),
+                createSnapshotStore(config));
+    }
+
+    public RaftNode(
+            String nodeId,
+            RaftConfiguration config,
+            RaftLog raftLog,
+            RaftPersistentStateStore persistentStore,
+            RaftStateMachine stateMachine,
+            BiFunction<String, RequestVoteRequest, CompletableFuture<RequestVoteResponse>> voteRpcClient,
+            BiFunction<String, AppendEntriesRequest, CompletableFuture<AppendEntriesResponse>> appendEntriesRpcClient,
+            BiFunction<String, InstallSnapshotRequest, CompletableFuture<InstallSnapshotResponse>>
+                    installSnapshotRpcClient,
+            RaftSnapshotStore snapshotStore) {
 
         this.nodeId = nodeId;
         this.config = config;
@@ -106,9 +144,17 @@ public class RaftNode {
         this.stateMachine = stateMachine;
         this.voteRpcClient = voteRpcClient;
         this.appendEntriesRpcClient = appendEntriesRpcClient;
+        this.installSnapshotRpcClient = installSnapshotRpcClient;
 
         // Initialize state
         this.state = loadOrCreateState(raftLog, persistentStore);
+        this.snapshotManager =
+                new RaftSnapshotManager(nodeId, state, stateMachine, snapshotStore, config.getSnapshotThreshold());
+        try {
+            snapshotManager.restoreOnStartup();
+        } catch (IOException e) {
+            throw new UncheckedIOException("[" + nodeId + "] Failed to restore durable Raft snapshot", e);
+        }
 
         // Create executor
         this.scheduler = Executors.newScheduledThreadPool(2, r -> {
@@ -126,11 +172,14 @@ public class RaftNode {
         this.voteHandler = new RaftVoteHandler(nodeId, state, persistentStore, electionTimer);
 
         // Initialize replication components
-        this.heartbeatManager = new RaftHeartbeatManager(nodeId, config, state, scheduler, appendEntriesRpcClient);
-
-        this.replicationManager = new RaftReplicationManager(nodeId, config, state, appendEntriesRpcClient);
+        this.replicationManager = new RaftReplicationManager(
+                nodeId, config, state, appendEntriesRpcClient, installSnapshotRpcClient, snapshotStore);
+        this.heartbeatManager = new RaftHeartbeatManager(
+                nodeId, config, state, scheduler, appendEntriesRpcClient, replicationManager::replicateToPeer);
 
         this.appendEntriesHandler = new RaftAppendEntriesHandler(nodeId, state, persistentStore, electionTimer);
+        this.installSnapshotHandler = new RaftInstallSnapshotHandler(
+                nodeId, state, persistentStore, snapshotStore, stateMachine, electionTimer);
 
         this.stateMachineApplier = new RaftStateMachineApplier(nodeId, state, stateMachine);
 
@@ -194,7 +243,7 @@ public class RaftNode {
     /**
      * Handles incoming AppendEntries RPC.
      */
-    public AppendEntriesResponse handleAppendEntries(AppendEntriesRequest request) {
+    public synchronized AppendEntriesResponse handleAppendEntries(AppendEntriesRequest request) {
         if (!stateMachineApplier.isRunning()) {
             throw new IllegalStateException("State machine applier is unavailable");
         }
@@ -207,6 +256,15 @@ public class RaftNode {
         }
 
         return response;
+    }
+
+    /** Serializes snapshot installation with AppendEntries application on this node. */
+    public synchronized InstallSnapshotResponse handleInstallSnapshot(InstallSnapshotRequest request) {
+        try {
+            return installSnapshotHandler.handleInstallSnapshot(request);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to install Raft snapshot", e);
+        }
     }
 
     /**
@@ -226,7 +284,7 @@ public class RaftNode {
 
         try {
             // Append to local log
-            long index = state.getLog().size() + 1;
+            long index = state.getLog().lastIndex() + 1;
             long term = state.getCurrentTerm();
             var entry = com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLogEntry.create(
                     index, term, command);
@@ -238,7 +296,7 @@ public class RaftNode {
             return replicationManager.replicateToAll().thenCompose(ignored -> {
                 // After replication, do not acknowledge the command until application succeeds.
                 if (state.getCommitIndex() >= index) {
-                    return stateMachineApplier.applyCommittedEntries();
+                    return stateMachineApplier.applyCommittedEntries().thenRun(this::createSnapshotIfNeeded);
                 }
                 return CompletableFuture.failedFuture(
                         new IllegalStateException("Replication completed without committing entry " + index));
@@ -387,8 +445,23 @@ public class RaftNode {
             var persistedState = store.load();
             return new RaftNodeState(nodeId, raftLog, persistedState.getCurrentTerm(), persistedState.getVotedFor());
         } catch (IOException e) {
-            log.warn("[{}] Failed to load persistent state, starting fresh: {}", nodeId, e.getMessage());
-            return new RaftNodeState(nodeId, raftLog);
+            throw new UncheckedIOException("[" + nodeId + "] Refusing to start with unreadable Raft state", e);
+        }
+    }
+
+    private void createSnapshotIfNeeded() {
+        try {
+            snapshotManager.createIfThresholdReached();
+        } catch (IOException e) {
+            throw new CompletionException("Failed to create durable Raft snapshot", e);
+        }
+    }
+
+    private static RaftSnapshotStore createSnapshotStore(RaftConfiguration config) {
+        try {
+            return new RaftSnapshotStore(Path.of(config.getDataDirectory()).resolve("snapshot"));
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to open Raft snapshot store", e);
         }
     }
 }

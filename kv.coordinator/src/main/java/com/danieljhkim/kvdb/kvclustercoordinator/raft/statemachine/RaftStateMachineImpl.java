@@ -1,9 +1,11 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine;
 
+import com.danieljhkim.kvdb.kvclustercoordinator.converter.ProtoConverter;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftCommand;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ClusterState;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapDelta;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
+import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -104,6 +106,33 @@ public class RaftStateMachineImpl implements RaftStateMachine {
     @Override
     public ShardMapSnapshot getSnapshot() {
         return snapshotRef.get();
+    }
+
+    @Override
+    public byte[] takeSnapshot() {
+        synchronized (writeLock) {
+            return ProtoConverter.toProto(snapshotRef.get()).toByteArray();
+        }
+    }
+
+    @Override
+    public void installSnapshot(byte[] snapshot) throws IOException {
+        synchronized (writeLock) {
+            try {
+                var restored = ProtoConverter.fromProto(
+                        com.danieljhkim.kvdb.proto.coordinator.ClusterState.parseFrom(snapshot));
+                state.restore(
+                        restored.getMapVersion(),
+                        restored.getNodes(),
+                        restored.getShards(),
+                        restored.getNumShards(),
+                        restored.getReplicationFactor());
+                ShardMapSnapshot installed = updateSnapshot();
+                notifyWatchers(ShardMapDelta.fullState(installed));
+            } catch (IllegalArgumentException e) {
+                throw new IOException("Invalid Raft state-machine snapshot", e);
+            }
+        }
     }
 
     @Override

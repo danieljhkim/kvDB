@@ -101,6 +101,7 @@ public class AppConfig {
         private int electionTimeoutMinMs = 150;
         private int electionTimeoutMaxMs = 300;
         private int maxEntriesPerRequest = 100;
+        private long snapshotThreshold = 10000;
 
         @Override
         public String toString() {
@@ -108,7 +109,8 @@ public class AppConfig {
                     + heartbeatIntervalMs + ", electionTimeoutMinMs="
                     + electionTimeoutMinMs + ", electionTimeoutMaxMs="
                     + electionTimeoutMaxMs + ", maxEntriesPerRequest="
-                    + maxEntriesPerRequest + '}';
+                    + maxEntriesPerRequest + ", snapshotThreshold="
+                    + snapshotThreshold + '}';
         }
     }
 

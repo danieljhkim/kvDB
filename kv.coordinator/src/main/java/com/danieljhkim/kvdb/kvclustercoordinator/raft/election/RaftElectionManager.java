@@ -229,17 +229,13 @@ public class RaftElectionManager {
      * Builds a RequestVote request for the current state.
      */
     private RequestVoteRequest buildVoteRequest(long term) {
-        long lastLogIndex = state.getLog().size();
+        long lastLogIndex = state.getLog().lastIndex();
         long lastLogTerm = 0;
         if (lastLogIndex > 0) {
             try {
-                lastLogTerm = state.getLog()
-                        .getEntry(lastLogIndex)
-                        .map(com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLogEntry::term)
-                        .orElse(0L);
+                lastLogTerm = state.getLog().getTerm(lastLogIndex).orElse(0L);
             } catch (IOException e) {
-                log.error("[{}] Failed to read last log entry term", nodeId, e);
-                // Continue with lastLogTerm = 0
+                throw new IllegalStateException("Failed to read safety-critical last log term", e);
             }
         }
 

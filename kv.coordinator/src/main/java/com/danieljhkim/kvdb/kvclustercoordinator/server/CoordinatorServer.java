@@ -6,6 +6,7 @@ import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftNode;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.FileBasedRaftLog;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLog;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftPersistentStateStore;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftSnapshotStore;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.rpc.RaftGrpcClient;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.rpc.RaftGrpcService;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine.RaftStateMachine;
@@ -71,6 +72,7 @@ public class CoordinatorServer {
         RaftLog raftLog = new FileBasedRaftLog(dataDirPath.resolve("log"));
         RaftPersistentStateStore persistentStore =
                 new RaftPersistentStateStore(dataDirPath.resolve("state").toString());
+        RaftSnapshotStore snapshotStore = new RaftSnapshotStore(dataDirPath.resolve("snapshot"));
 
         // Initialize watcher manager
         this.watcherManager = new WatcherManager();
@@ -91,7 +93,9 @@ public class CoordinatorServer {
                 persistentStore,
                 raftStateMachine,
                 raftGrpcClient::sendRequestVote,
-                raftGrpcClient::sendAppendEntries);
+                raftGrpcClient::sendAppendEntries,
+                raftGrpcClient::sendInstallSnapshot,
+                snapshotStore);
 
         // When stepping down from leader, close all watcher connections
         // so clients reconnect to the new leader
@@ -101,7 +105,8 @@ public class CoordinatorServer {
         RaftGrpcService raftGrpcService = new RaftGrpcService(
                 nodeId,
                 raftNode.getVoteHandler(),
-                raftNode.getAppendEntriesHandler(),
+                raftNode::handleAppendEntries,
+                raftNode::handleInstallSnapshot,
                 raftNode::getCurrentTerm,
                 raftNode::getCurrentLeader);
 
@@ -193,6 +198,7 @@ public class CoordinatorServer {
                 .electionTimeoutMin(Duration.ofMillis(raftConfig.getElectionTimeoutMinMs()))
                 .electionTimeoutMax(Duration.ofMillis(raftConfig.getElectionTimeoutMaxMs()))
                 .maxEntriesPerAppendRequest(raftConfig.getMaxEntriesPerRequest())
+                .snapshotThreshold(raftConfig.getSnapshotThreshold())
                 .dataDirectory(dataDir)
                 .build();
     }

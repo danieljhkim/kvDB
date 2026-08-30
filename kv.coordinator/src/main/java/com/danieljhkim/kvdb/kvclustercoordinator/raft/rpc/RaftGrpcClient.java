@@ -233,8 +233,6 @@ public class RaftGrpcClient implements AutoCloseable {
     /**
      * Sends an InstallSnapshot RPC to a peer node.
      *
-     * <p>Note: Not yet implemented (Phase 5).
-     *
      * @param peerId the ID of the peer to send the request to
      * @param request the InstallSnapshot request
      * @return CompletableFuture that completes with the response
@@ -244,8 +242,33 @@ public class RaftGrpcClient implements AutoCloseable {
 
         log.debug("[{}] Sending InstallSnapshot to {} for term {}", nodeId, peerId, request.getTerm());
 
-        // TODO: Implement in Phase 5
-        return CompletableFuture.failedFuture(new UnsupportedOperationException("InstallSnapshot not yet implemented"));
+        RaftServiceGrpc.RaftServiceFutureStub stub = futureStubs.get(peerId);
+        if (stub == null) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException("No connection to peer: " + peerId));
+        }
+
+        CompletableFuture<InstallSnapshotResponse> future = new CompletableFuture<>();
+        try {
+            var rpcFuture = stub.withDeadlineAfter(rpcTimeout.toMillis(), TimeUnit.MILLISECONDS)
+                    .installSnapshot(request);
+            rpcFuture.addListener(
+                    () -> {
+                        try {
+                            future.complete(rpcFuture.get());
+                        } catch (ExecutionException e) {
+                            handleRpcError(peerId, "InstallSnapshot", e.getCause(), future);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            future.completeExceptionally(e);
+                        } catch (Exception e) {
+                            future.completeExceptionally(e);
+                        }
+                    },
+                    Runnable::run);
+        } catch (Exception e) {
+            future.completeExceptionally(e);
+        }
+        return future;
     }
 
     /**

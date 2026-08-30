@@ -3,9 +3,13 @@ package com.danieljhkim.kvdb.kvclustercoordinator.raft.replication;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftConfiguration;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLog;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLogEntry;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftSnapshotStore;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.state.RaftNodeState;
 import com.danieljhkim.kvdb.proto.raft.AppendEntriesRequest;
 import com.danieljhkim.kvdb.proto.raft.AppendEntriesResponse;
+import com.danieljhkim.kvdb.proto.raft.InstallSnapshotRequest;
+import com.danieljhkim.kvdb.proto.raft.InstallSnapshotResponse;
+import com.google.protobuf.ByteString;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -34,6 +38,9 @@ public class RaftReplicationManager {
     private final RaftConfiguration config;
     private final RaftNodeState state;
     private final BiFunction<String, AppendEntriesRequest, CompletableFuture<AppendEntriesResponse>> rpcClient;
+    private final BiFunction<String, InstallSnapshotRequest, CompletableFuture<InstallSnapshotResponse>>
+            snapshotRpcClient;
+    private final RaftSnapshotStore snapshotStore;
 
     // Track which peers are currently being replicated to (prevent concurrent replication to same peer)
     private final Map<String, CompletableFuture<Void>> activeReplications = new ConcurrentHashMap<>();
@@ -43,10 +50,29 @@ public class RaftReplicationManager {
             RaftConfiguration config,
             RaftNodeState state,
             BiFunction<String, AppendEntriesRequest, CompletableFuture<AppendEntriesResponse>> rpcClient) {
+        this(
+                nodeId,
+                config,
+                state,
+                rpcClient,
+                (peer, request) -> CompletableFuture.failedFuture(
+                        new IllegalStateException("InstallSnapshot RPC client is not configured")),
+                null);
+    }
+
+    public RaftReplicationManager(
+            String nodeId,
+            RaftConfiguration config,
+            RaftNodeState state,
+            BiFunction<String, AppendEntriesRequest, CompletableFuture<AppendEntriesResponse>> rpcClient,
+            BiFunction<String, InstallSnapshotRequest, CompletableFuture<InstallSnapshotResponse>> snapshotRpcClient,
+            RaftSnapshotStore snapshotStore) {
         this.nodeId = nodeId;
         this.config = config;
         this.state = state;
         this.rpcClient = rpcClient;
+        this.snapshotRpcClient = snapshotRpcClient;
+        this.snapshotStore = snapshotStore;
     }
 
     /**
@@ -132,6 +158,9 @@ public class RaftReplicationManager {
             }
 
             RaftLog log = state.getLog();
+            if (nextIndex <= log.compactedIndex()) {
+                return sendSnapshot(peerId, 0);
+            }
             long currentTerm = state.getCurrentTerm();
             long commitIndex = state.getCommitIndex();
 
@@ -139,7 +168,7 @@ public class RaftReplicationManager {
             long prevLogIndex = nextIndex - 1;
             long prevLogTerm = 0;
             if (prevLogIndex > 0) {
-                prevLogTerm = log.getEntry(prevLogIndex).map(RaftLogEntry::term).orElse(0L);
+                prevLogTerm = log.getTerm(prevLogIndex).orElse(0L);
             }
 
             // Get entries to send (up to maxEntriesPerAppendRequest)
@@ -186,7 +215,7 @@ public class RaftReplicationManager {
     private List<RaftLogEntry> getEntriesToSend(RaftLog log, long fromIndex) throws IOException {
         List<RaftLogEntry> entries = new ArrayList<>();
         long maxEntries = config.getMaxEntriesPerAppendRequest();
-        long lastIndex = log.size();
+        long lastIndex = log.lastIndex();
 
         for (long i = fromIndex; i <= lastIndex && entries.size() < maxEntries; i++) {
             log.getEntry(i).ifPresent(entries::add);
@@ -218,7 +247,7 @@ public class RaftReplicationManager {
             log.debug("[{}] Successfully replicated to {} up to index {}", nodeId, peerId, newMatchIndex);
 
             // Check if there are more entries to replicate
-            if (newMatchIndex < state.getLog().size()) {
+            if (newMatchIndex < state.getLog().lastIndex()) {
                 log.trace("[{}] More entries to replicate to {}, continuing", nodeId, peerId);
                 return doReplication(peerId);
             }
@@ -264,6 +293,60 @@ public class RaftReplicationManager {
         state.setNextIndex(peerId, newNextIndex);
     }
 
+    private CompletableFuture<Void> sendSnapshot(String peerId, long offset) {
+        if (snapshotStore == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Snapshot store is not configured"));
+        }
+        try {
+            RaftSnapshotStore.Snapshot snapshot = snapshotStore
+                    .load()
+                    .orElseThrow(() -> new IllegalStateException("Compacted log has no durable snapshot"));
+            byte[] data = snapshot.data();
+            if (offset < 0 || offset > data.length) {
+                return CompletableFuture.failedFuture(
+                        new IOException("Follower requested invalid snapshot offset " + offset));
+            }
+            int length = Math.min(RaftSnapshotStore.MAX_CHUNK_BYTES, data.length - Math.toIntExact(offset));
+            byte[] chunk =
+                    java.util.Arrays.copyOfRange(data, Math.toIntExact(offset), Math.toIntExact(offset) + length);
+            long nextOffset = offset + length;
+            InstallSnapshotRequest request = InstallSnapshotRequest.newBuilder()
+                    .setTerm(state.getCurrentTerm())
+                    .setLeaderId(nodeId)
+                    .setLastIncludedIndex(snapshot.lastIncludedIndex())
+                    .setLastIncludedTerm(snapshot.lastIncludedTerm())
+                    .setOffset(offset)
+                    .setData(ByteString.copyFrom(chunk))
+                    .setDone(nextOffset == data.length)
+                    .setChecksum(snapshot.checksum())
+                    .setTotalSize(data.length)
+                    .build();
+            return snapshotRpcClient.apply(peerId, request).thenCompose(response -> {
+                if (response.getTerm() > state.getCurrentTerm()) {
+                    state.updateTerm(response.getTerm());
+                    state.transitionToFollower(null);
+                    return CompletableFuture.failedFuture(
+                            new IllegalStateException("Stepped down during snapshot transfer"));
+                }
+                long resumeOffset = response.getNextOffset();
+                if (resumeOffset < 0 || resumeOffset > data.length) {
+                    return CompletableFuture.failedFuture(
+                            new IOException("Follower returned invalid snapshot resume offset " + resumeOffset));
+                }
+                if (!response.getSuccess()) {
+                    return sendSnapshot(peerId, resumeOffset);
+                }
+                if (resumeOffset < data.length) {
+                    return sendSnapshot(peerId, resumeOffset);
+                }
+                state.setMatchIndex(peerId, snapshot.lastIncludedIndex());
+                return doReplication(peerId);
+            });
+        } catch (Exception e) {
+            return CompletableFuture.failedFuture(e);
+        }
+    }
+
     /**
      * Updates the commit index based on matchIndex values.
      * Raft paper §5.3, §5.4: Leader commits entry when majority has replicated it
@@ -286,8 +369,8 @@ public class RaftReplicationManager {
         if (majorityMatchIndex > currentCommitIndex) {
             try {
                 // Verify the entry is from current term
-                RaftLogEntry entry = state.getLog().getEntry(majorityMatchIndex).orElse(null);
-                if (entry != null && entry.term() == currentTerm) {
+                Long entryTerm = state.getLog().getTerm(majorityMatchIndex).orElse(null);
+                if (entryTerm != null && entryTerm == currentTerm) {
                     state.advanceCommitIndex(majorityMatchIndex);
                     log.info("[{}] Advanced commitIndex to {} (majority replicated)", nodeId, majorityMatchIndex);
                 } else {
@@ -295,7 +378,7 @@ public class RaftReplicationManager {
                             "[{}] Entry at {} is not from current term (entry term={}), not committing",
                             nodeId,
                             majorityMatchIndex,
-                            entry != null ? entry.term() : "null");
+                            entryTerm);
                 }
             } catch (IOException e) {
                 log.error("[{}] Error reading log entry at {}: {}", nodeId, majorityMatchIndex, e.getMessage());

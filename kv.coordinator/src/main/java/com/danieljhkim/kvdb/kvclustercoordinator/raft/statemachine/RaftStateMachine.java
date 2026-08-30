@@ -3,6 +3,7 @@ package com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftCommand;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapDelta;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
+import java.io.IOException;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
@@ -42,6 +43,16 @@ public interface RaftStateMachine {
      * @return the current immutable snapshot
      */
     ShardMapSnapshot getSnapshot();
+
+    /** Serializes a point-in-time state suitable for a durable Raft snapshot. */
+    default byte[] takeSnapshot() throws IOException {
+        throw new UnsupportedOperationException("State-machine snapshots are not supported");
+    }
+
+    /** Atomically replaces the state machine from a validated Raft snapshot payload. */
+    default void installSnapshot(byte[] snapshot) throws IOException {
+        throw new UnsupportedOperationException("State-machine snapshots are not supported");
+    }
 
     /**
      * Returns the current map version. Convenience method equivalent to {@code getSnapshot().getMapVersion()}.

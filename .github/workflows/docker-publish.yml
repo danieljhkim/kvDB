@@ -49,7 +49,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3.12.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3.6.0
+        uses: docker/login-action@v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -133,7 +133,7 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-      - uses: sigstore/cosign-installer@v4.0.0
+      - uses: sigstore/cosign-installer@v4.1.2
 
       - name: Sign immutable image digest
         run: cosign sign --yes "${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}"
@@ -166,13 +166,13 @@ jobs:
       - uses: docker/setup-buildx-action@v3.12.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3.6.0
+        uses: docker/login-action@v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: sigstore/cosign-installer@v4.0.0
+      - uses: sigstore/cosign-installer@v4.1.2
 
       - name: Verify every released digest, signature, SBOM, and provenance attestation
         env:

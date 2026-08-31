@@ -1,5 +1,5 @@
 # Multi-stage build for Node. Maven 3.9.16 / Temurin 21 (pinned 2026-08-22).
-FROM maven:3.9.16-eclipse-temurin-21-noble@sha256:613124833fa6718ded9d655a2ebfab6425818c178f899116b93560b6f1c9ffe9 AS builder
+FROM maven:3-eclipse-temurin-26-noble@sha256:166ca19b6b5fe1e924ab2d66b64ba9854c739f16210b94bbe0074b036c5c7992 AS builder
 
 WORKDIR /build
 

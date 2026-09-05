@@ -3,6 +3,8 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -174,6 +176,102 @@ func TestMissingKeyAndEmptyValueAreDistinct(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "NOT_FOUND") {
 		t.Fatalf("stderr should name the status, got %q", stderr)
+	}
+}
+
+func TestBatchGetWritesOneOrderedJSONDocumentForMixedResults(t *testing.T) {
+	server, connection := localGateway(t, testfixture.Hooks{
+		BatchGet: func(_ context.Context, request *gateway.BatchGetRequest) (*gateway.BatchGetResponse, error) {
+			return &gateway.BatchGetResponse{Status: &gateway.Status{Code: gateway.Status_OK}, Results: []*gateway.BatchGetResult{
+				{Key: request.Keys[0], Status: &gateway.Status{Code: gateway.Status_OK}, Kv: &gateway.KeyValue{Key: request.Keys[0], Value: []byte("value"), Version: 7}, Outcome: gateway.BatchGetOutcome_COMPLETED},
+				{Key: request.Keys[1], Status: &gateway.Status{Code: gateway.Status_OK}, Kv: &gateway.KeyValue{Key: request.Keys[1], Value: []byte{}, Version: 8}, Outcome: gateway.BatchGetOutcome_COMPLETED},
+				{Key: request.Keys[2], Status: &gateway.Status{Code: gateway.Status_NOT_FOUND, Message: "missing"}, Outcome: gateway.BatchGetOutcome_COMPLETED},
+				{Key: request.Keys[3], Status: &gateway.Status{Code: gateway.Status_TIMEOUT, Message: "deadline"}, Outcome: gateway.BatchGetOutcome_DEADLINE_EXCEEDED},
+			}}, nil
+		},
+	})
+	keys := [][]byte{[]byte("duplicate"), {0, 0xff}, []byte("missing"), []byte("duplicate")}
+	encoded := make([]string, len(keys))
+	for index, key := range keys {
+		encoded[index] = base64.StdEncoding.EncodeToString(key)
+	}
+	input, err := json.Marshal(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "keys.json")
+	if err := os.WriteFile(path, input, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, code := run(t, withArgs(connection, "batch-get", "--input", path, "--consistency", "strong")...)
+	if code != ExitApplication {
+		t.Fatalf("mixed results must exit %d, got %d: %s", ExitApplication, code, stderr)
+	}
+	var document batchGetDocument
+	if err := json.Unmarshal([]byte(stdout), &document); err != nil {
+		t.Fatalf("stdout must be one JSON document: %v; %q", err, stdout)
+	}
+	if document.Version != 1 || len(document.Items) != len(keys) {
+		t.Fatalf("unexpected document: %+v", document)
+	}
+	for index, item := range document.Items {
+		if item.RequestIndex != index || item.KeyBase64 != encoded[index] {
+			t.Fatalf("result order or key changed at %d: %+v", index, item)
+		}
+	}
+	if document.Items[1].ValueBase64 == nil || *document.Items[1].ValueBase64 != "" {
+		t.Fatalf("stored empty value must be present as empty base64: %+v", document.Items[1])
+	}
+	if document.Items[2].Status != gateway.Status_NOT_FOUND.String() || document.Items[2].ValueBase64 != nil {
+		t.Fatalf("missing key must not be an empty value: %+v", document.Items[2])
+	}
+	if document.Items[3].Outcome != gateway.BatchGetOutcome_DEADLINE_EXCEEDED.String() {
+		t.Fatalf("terminal outcome lost: %+v", document.Items[3])
+	}
+	calls := server.Calls()
+	if len(calls) != 1 || calls[0].Method != "BatchGet" || len(calls[0].Keys) != len(keys) {
+		t.Fatalf("BatchGet must issue exactly one request: %+v", calls)
+	}
+	if calls[0].Consistency != gateway.Consistency_STRONG {
+		t.Fatalf("read options not propagated: %+v", calls[0])
+	}
+}
+
+func TestBatchGetRejectsMalformedAndOversizedInputBeforeRPC(t *testing.T) {
+	server, connection := localGateway(t, testfixture.Hooks{})
+	badPath := filepath.Join(t.TempDir(), "bad.json")
+	if err := os.WriteFile(badPath, []byte("[\"not base64!\"]"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, code := run(t, withArgs(connection, "batch-get", "--input", badPath)...)
+	if code != ExitUsage || !strings.Contains(stderr, "standard base64") {
+		t.Fatalf("malformed input must fail as usage, got %d %q", code, stderr)
+	}
+	overPath := filepath.Join(t.TempDir(), "over.json")
+	if err := os.WriteFile(overPath, bytes.Repeat([]byte("x"), maxBatchGetInputBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, code = run(t, withArgs(connection, "batch-get", "--input", overPath)...)
+	if code != ExitUsage || !strings.Contains(stderr, "exceeds") {
+		t.Fatalf("oversized input must fail as usage, got %d %q", code, stderr)
+	}
+	if len(server.Calls()) != 0 {
+		t.Fatalf("invalid input must not issue an RPC: %+v", server.Calls())
+	}
+}
+
+func TestBatchGetTransportFailureEmitsNoJSONAndUsesTransportExit(t *testing.T) {
+	_, connection := localGateway(t, testfixture.Hooks{BatchGet: func(context.Context, *gateway.BatchGetRequest) (*gateway.BatchGetResponse, error) {
+		return nil, grpcstatus.Error(grpccodes.DeadlineExceeded, "slow gateway")
+	}})
+	path := filepath.Join(t.TempDir(), "keys.json")
+	if err := os.WriteFile(path, []byte("[\"aw==\"]"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, code := run(t, withArgs(connection, "batch-get", "--input", path)...)
+	if code != ExitTransport || stdout != "" || !strings.Contains(stderr, "DeadlineExceeded") {
+		t.Fatalf("transport failure must produce no JSON and exit %d, got %d stdout=%q stderr=%q", ExitTransport, code, stdout, stderr)
 	}
 }
 

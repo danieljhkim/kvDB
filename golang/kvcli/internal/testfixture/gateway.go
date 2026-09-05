@@ -22,6 +22,7 @@ type Call struct {
 	TenantID           string
 	Principal          string
 	Key                []byte
+	Keys               [][]byte
 	Value              []byte
 	HeadOnly           bool
 	Consistency        gateway.Consistency
@@ -30,9 +31,10 @@ type Call struct {
 
 // Hooks replaces the default in-memory behavior for a single method.
 type Hooks struct {
-	Get    func(context.Context, *gateway.GetRequest) (*gateway.GetResponse, error)
-	Put    func(context.Context, *gateway.PutRequest) (*gateway.PutResponse, error)
-	Delete func(context.Context, *gateway.DeleteRequest) (*gateway.DeleteResponse, error)
+	Get      func(context.Context, *gateway.GetRequest) (*gateway.GetResponse, error)
+	BatchGet func(context.Context, *gateway.BatchGetRequest) (*gateway.BatchGetResponse, error)
+	Put      func(context.Context, *gateway.PutRequest) (*gateway.PutResponse, error)
+	Delete   func(context.Context, *gateway.DeleteRequest) (*gateway.DeleteResponse, error)
 }
 
 type entry struct {
@@ -154,6 +156,44 @@ func (s *Server) Get(ctx context.Context, request *gateway.GetRequest) (*gateway
 		Kv:             kv,
 		AppliedVersion: s.version,
 	}, nil
+}
+
+func (s *Server) BatchGet(ctx context.Context, request *gateway.BatchGetRequest) (*gateway.BatchGetResponse, error) {
+	s.record(Call{
+		Method:      "BatchGet",
+		RequestID:   request.GetCtx().GetRequestId(),
+		TenantID:    request.GetCtx().GetTenantId(),
+		Principal:   request.GetCtx().GetPrincipal(),
+		HeadOnly:    request.GetHeadOnly(),
+		Consistency: request.GetOptions().GetConsistency(),
+		Keys:        append([][]byte(nil), request.GetKeys()...),
+	})
+	if s.hooks.BatchGet != nil {
+		return s.hooks.BatchGet(ctx, request)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	response := &gateway.BatchGetResponse{Status: &gateway.Status{Code: gateway.Status_OK}}
+	for _, key := range request.GetKeys() {
+		item := &gateway.BatchGetResult{
+			Key:     key,
+			Outcome: gateway.BatchGetOutcome_COMPLETED,
+		}
+		stored, found := s.data[string(key)]
+		if !found {
+			item.Status = &gateway.Status{Code: gateway.Status_NOT_FOUND, Message: "key not found"}
+		} else {
+			item.Status = &gateway.Status{Code: gateway.Status_OK}
+			item.AppliedVersion = s.version
+			item.Kv = &gateway.KeyValue{Key: key, Version: stored.version}
+			if !request.GetHeadOnly() {
+				item.Kv.Value = stored.value
+			}
+		}
+		response.Results = append(response.Results, item)
+	}
+	return response, nil
 }
 
 func (s *Server) Put(ctx context.Context, request *gateway.PutRequest) (*gateway.PutResponse, error) {

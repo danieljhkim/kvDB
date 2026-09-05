@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.FileBasedRaftLog;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLog;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLogEntry;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftPersistentStateStore;
@@ -108,6 +109,133 @@ class RaftNodeCommitIntegrationTest {
         }
     }
 
+    @Test
+    void committedMetadataRecoversAfterEveryCoordinatorRestarts() throws Exception {
+        Map<String, String> members = members();
+        PersistentCluster original = createPersistentCluster(members);
+        startAndElect(original, "n1");
+
+        try {
+            RaftNode leader = original.network.nodes.get("n1");
+            leader.submitCommand(new RaftCommand.RegisterNode("storage-1", "storage-1:9000", "zone-a"))
+                    .get(5, TimeUnit.SECONDS);
+            leader.submitCommand(new RaftCommand.RegisterNode("storage-2", "storage-2:9000", "zone-b"))
+                    .get(5, TimeUnit.SECONDS);
+            leader.submitCommand(new RaftCommand.InitShards(8, 2)).get(5, TimeUnit.SECONDS);
+            sendCommitHeartbeat(leader, original.network.nodes.get("n2"));
+            sendCommitHeartbeat(leader, original.network.nodes.get("n3"));
+            await(() -> original.stateMachines.values().stream().allMatch(stateMachine -> {
+                var snapshot = stateMachine.getSnapshot();
+                return snapshot.getMapVersion() == 1
+                        && snapshot.getNodes().keySet().equals(Set.of("storage-1", "storage-2"))
+                        && snapshot.getShards().size() == 8;
+            }));
+        } finally {
+            original.stop();
+        }
+
+        PersistentCluster restarted = createPersistentCluster(members);
+        restarted.network.nodes.values().forEach(RaftNode::start);
+        assertTrue(
+                restarted.stateMachines.values().stream().allMatch(stateMachine -> stateMachine.getMapVersion() == 0));
+
+        try {
+            elect(restarted, "n2");
+            await(() -> restarted.stateMachines.values().stream().allMatch(stateMachine -> {
+                var snapshot = stateMachine.getSnapshot();
+                return snapshot.getMapVersion() == 1
+                        && snapshot.getNodes().keySet().equals(Set.of("storage-1", "storage-2"))
+                        && snapshot.getShards().size() == 8;
+            }));
+        } finally {
+            restarted.stop();
+        }
+    }
+
+    @Test
+    void recoveryDoesNotApplyUncommittedSuffix() throws Exception {
+        Map<String, String> members = members();
+        RaftCommand committed = new RaftCommand.RegisterNode("committed", "committed:9000", "zone-a");
+        RaftCommand uncommitted = new RaftCommand.RegisterNode("uncommitted", "uncommitted:9000", "zone-b");
+
+        for (String nodeId : members.keySet()) {
+            Path dataDirectory = tempDir.resolve(nodeId);
+            try (FileBasedRaftLog log = new FileBasedRaftLog(dataDirectory.resolve("log"))) {
+                log.append(new RaftLogEntry(1, 1, 1, committed));
+                if (nodeId.equals("n3")) {
+                    log.append(new RaftLogEntry(2, 2, 2, uncommitted));
+                }
+            }
+            new RaftPersistentStateStore(dataDirectory.toString()).save(2, null);
+        }
+
+        PersistentCluster restarted = createPersistentCluster(members);
+        restarted.network.nodes.values().forEach(RaftNode::start);
+        assertTrue(
+                restarted.stateMachines.values().stream().allMatch(stateMachine -> stateMachine.getMapVersion() == 0));
+
+        try {
+            elect(restarted, "n1");
+            await(() -> restarted.stateMachines.values().stream().allMatch(stateMachine -> {
+                var snapshot = stateMachine.getSnapshot();
+                return snapshot.getMapVersion() == 0
+                        && snapshot.getNode("committed") != null
+                        && snapshot.getNode("uncommitted") == null;
+            }));
+            assertTrue(
+                    restarted
+                                    .network
+                                    .nodes
+                                    .get("n3")
+                                    .getState()
+                                    .getLog()
+                                    .getEntry(2)
+                                    .orElseThrow()
+                                    .command()
+                            instanceof RaftCommand.NoOp);
+        } finally {
+            restarted.stop();
+        }
+    }
+
+    private PersistentCluster createPersistentCluster(Map<String, String> members) throws IOException {
+        ControlledNetwork network = new ControlledNetwork();
+        Map<String, StubRaftStateMachine> stateMachines = new ConcurrentHashMap<>();
+        for (String nodeId : members.keySet()) {
+            Path dataDirectory = tempDir.resolve(nodeId);
+            StubRaftStateMachine stateMachine = new StubRaftStateMachine();
+            stateMachines.put(nodeId, stateMachine);
+            RaftNode node = new RaftNode(
+                    nodeId,
+                    configuration(nodeId, members, dataDirectory),
+                    new FileBasedRaftLog(dataDirectory.resolve("log")),
+                    new RaftPersistentStateStore(dataDirectory.toString()),
+                    stateMachine,
+                    (peer, request) -> CompletableFuture.failedFuture(new AssertionError("unexpected vote RPC")),
+                    (peer, request) -> network.append(nodeId, peer, request));
+            network.nodes.put(nodeId, node);
+        }
+        return new PersistentCluster(network, stateMachines);
+    }
+
+    private static Map<String, String> members() {
+        return Map.of("n1", "n1:9000", "n2", "n2:9000", "n3", "n3:9000");
+    }
+
+    private static void startAndElect(PersistentCluster cluster, String leaderId) {
+        cluster.network.nodes.values().forEach(RaftNode::start);
+        elect(cluster, leaderId);
+    }
+
+    private static void elect(PersistentCluster cluster, String leaderId) {
+        RaftNode leader = cluster.network.nodes.get(leaderId);
+        leader.getState().becomeCandidate();
+        leader.getState()
+                .becomeLeader(cluster.network.nodes.keySet().stream()
+                        .filter(nodeId -> !nodeId.equals(leaderId))
+                        .toList());
+    }
+
     private static RaftConfiguration configuration(String nodeId, Map<String, String> members, Path dataDirectory) {
         return RaftConfiguration.builder()
                 .nodeId(nodeId)
@@ -145,6 +273,13 @@ class RaftNodeCommitIntegrationTest {
 
     private record PendingAppend(
             String destination, AppendEntriesRequest request, CompletableFuture<AppendEntriesResponse> future) {}
+
+    private record PersistentCluster(ControlledNetwork network, Map<String, StubRaftStateMachine> stateMachines) {
+
+        void stop() {
+            network.nodes.values().forEach(RaftNode::stop);
+        }
+    }
 
     private static final class ControlledNetwork {
 

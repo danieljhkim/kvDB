@@ -49,7 +49,9 @@ public class StubRaftStateMachine implements RaftStateMachine {
             synchronized (writeLock) {
                 try {
                     ShardMapDelta delta = applyCommand(command);
-                    notifyWatchers(delta);
+                    if (delta != null) {
+                        notifyWatchers(delta);
+                    }
                     logger.info("Applied command: {}", command.describe());
                     return null;
                 } catch (Exception e) {
@@ -68,6 +70,7 @@ public class StubRaftStateMachine implements RaftStateMachine {
         ShardMapDelta delta;
 
         switch (command) {
+            case RaftCommand.NoOp ignored -> delta = null;
             case RaftCommand.InitShards cmd -> {
                 List<String> createdShards = state.initializeShards(cmd.numShards(), cmd.replicationFactor());
                 ShardMapSnapshot snapshot = updateSnapshot();

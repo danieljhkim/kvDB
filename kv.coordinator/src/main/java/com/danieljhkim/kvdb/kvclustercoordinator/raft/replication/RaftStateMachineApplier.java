@@ -1,5 +1,6 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.raft.replication;
 
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftCommand;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLog;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLogEntry;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.state.RaftNodeState;
@@ -152,12 +153,14 @@ public class RaftStateMachineApplier {
             log.debug(
                     "[{}] Applying entry at index {} (term={}) to state machine", nodeId, entry.index(), entry.term());
 
-            // Completion is the state machine's acknowledgement that the operation succeeded.
-            CompletableFuture<Void> application = stateMachine.apply(entry.command());
-            if (application == null) {
-                throw new IllegalStateException("State machine returned a null application future");
+            if (!(entry.command() instanceof RaftCommand.NoOp)) {
+                // Completion is the state machine's acknowledgement that the operation succeeded.
+                CompletableFuture<Void> application = stateMachine.apply(entry.command());
+                if (application == null) {
+                    throw new IllegalStateException("State machine returned a null application future");
+                }
+                application.join();
             }
-            application.join();
 
             // Advance only after the corresponding operation completed successfully.
             state.advanceLastApplied(entry.index());

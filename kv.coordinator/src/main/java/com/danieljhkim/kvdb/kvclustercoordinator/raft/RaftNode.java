@@ -386,11 +386,26 @@ public class RaftNode {
     private void onBecomeLeader() {
         log.info("[{}] Became LEADER in term {}", nodeId, state.getCurrentTerm());
 
+        CompletableFuture<Void> recoveryBarrier;
+        if (state.getLog().lastIndex() > state.getLog().compactedIndex()) {
+            // Raft section 5.4.2: a current-term entry must be committed before a new leader can
+            // safely advance commitIndex across entries inherited from earlier terms.
+            recoveryBarrier =
+                    submitCommand(new RaftCommand.NoOp()).thenCompose(ignored -> replicationManager.replicateToAll());
+        } else {
+            recoveryBarrier = replicationManager.replicateToAll();
+        }
+
         // Start sending heartbeats
         heartbeatManager.start();
 
-        // Initial replication to establish authority
-        replicationManager.replicateToAll();
+        recoveryBarrier.whenComplete((ignored, error) -> {
+            if (error == null) {
+                log.info("[{}] Established current-term commit barrier", nodeId);
+            } else if (state.isLeader()) {
+                log.warn("[{}] Failed to establish current-term commit barrier", nodeId, error);
+            }
+        });
 
         log.info("[{}] Started heartbeat manager and initial replication", nodeId);
     }

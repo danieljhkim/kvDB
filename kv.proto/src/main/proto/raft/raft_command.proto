@@ -14,8 +14,12 @@ message RaftCommand {
     SetNodeStatus set_node_status = 3;
     SetShardReplicas set_shard_replicas = 4;
     SetShardLeader set_shard_leader = 5;
+    NoOp no_op = 6;
   }
 }
+
+// Internal leader barrier used to commit entries from earlier terms.
+message NoOp {}
 
 message InitShards {
   int32 num_shards = 1;

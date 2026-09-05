@@ -18,6 +18,7 @@ import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
+import org.springframework.context.annotation.Profile;
 
 class AdminHealthGroupsIntegrationTest {
 
@@ -26,7 +27,7 @@ class AdminHealthGroupsIntegrationTest {
         try (ConfigurableApplicationContext context = new SpringApplicationBuilder(
                         AdminApplication.class, FakeCoordinatorConfiguration.class)
                 .web(WebApplicationType.NONE)
-                .run("--kvdb.admin.security.api-key=test-api-key")) {
+                .run("--kvdb.admin.security.api-key=test-api-key", "--spring.profiles.active=admin-health-test")) {
             HealthContributorRegistry contributors = context.getBean(HealthContributorRegistry.class);
             assertNotNull(contributors.getContributor("readinessIndicator"));
             assertNotNull(contributors.getContributor("livenessIndicator"));
@@ -46,6 +47,7 @@ class AdminHealthGroupsIntegrationTest {
     }
 
     @Configuration(proxyBeanMethods = false)
+    @Profile("admin-health-test")
     static class FakeCoordinatorConfiguration {
 
         @Bean

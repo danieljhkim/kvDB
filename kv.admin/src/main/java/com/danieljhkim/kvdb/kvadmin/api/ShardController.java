@@ -1,5 +1,7 @@
 package com.danieljhkim.kvdb.kvadmin.api;
 
+import com.danieljhkim.kvdb.kvadmin.api.dto.KeyPlacementDto;
+import com.danieljhkim.kvdb.kvadmin.api.dto.ResolveKeyRequestDto;
 import com.danieljhkim.kvdb.kvadmin.api.dto.ShardDto;
 import com.danieljhkim.kvdb.kvadmin.api.dto.TriggerRequestDto;
 import com.danieljhkim.kvdb.kvadmin.service.ShardAdminService;
@@ -18,8 +20,9 @@ import org.springframework.web.bind.annotation.RestController;
  *
  * <p>
  * Endpoints: - GET /admin/shards - List all shards - GET /admin/shards/{shardId} - Get shard details - POST
- * /admin/shards/{shardId}/replicas - Update shard replicas - POST /admin/shards/{shardId}/leader - Update shard leader
- * - POST /admin/shards/rebalance - Trigger shard rebalancing
+ * /admin/shards/resolve-key - Coordinator placement for a binary key - POST /admin/shards/{shardId}/replicas - Update
+ * shard replicas - POST /admin/shards/{shardId}/leader - Update shard leader - POST /admin/shards/rebalance - Trigger
+ * shard rebalancing
  */
 @RestController
 @RequestMapping("/admin/shards")
@@ -38,6 +41,15 @@ public class ShardController {
     public ResponseEntity<ShardDto> getShard(@PathVariable("shardId") String shardId) {
         ShardDto shard = shardAdminService.getShard(shardId);
         return ResponseEntity.ok(shard);
+    }
+
+    /**
+     * Return coordinator placement for a base64-encoded binary key at observation time. This is not
+     * a value existence check and does not inspect the gateway cache.
+     */
+    @PostMapping("/resolve-key")
+    public ResponseEntity<KeyPlacementDto> resolveKey(@RequestBody ResolveKeyRequestDto request) {
+        return ResponseEntity.ok(shardAdminService.resolveKeyPlacement(request));
     }
 
     @PostMapping("/{shardId}/replicas")

@@ -21,4 +21,10 @@ public class AdminServerConfig {
      * Maximum number of nodes queried in parallel.
      */
     private int maxNodeFanout = 8;
+
+    /**
+     * Maximum decoded key size accepted by routing diagnostics. Matches the data-plane
+     * {@code maxKeyBytes} default of 4 KiB.
+     */
+    private int maxKeyBytes = 4 * 1024;
 }

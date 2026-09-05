@@ -1,8 +1,10 @@
 package com.danieljhkim.kvdb.kvadmin.client;
 
 import com.danieljhkim.kvdb.kvadmin.api.dto.*;
+import com.danieljhkim.kvdb.kvcommon.exception.ShardMapUnavailableException;
 import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthChannels;
 import com.danieljhkim.kvdb.proto.coordinator.*;
+import com.google.protobuf.ByteString;
 import io.grpc.ManagedChannel;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
@@ -30,22 +32,34 @@ public class CoordinatorReadClient {
     private final List<String> coordinatorAddresses;
     private final AtomicReference<String> leaderAddress = new AtomicReference<>();
     private final long timeoutSeconds;
+    private final ChannelFactory channelFactory;
 
     public CoordinatorReadClient(String host, int port, long timeout, TimeUnit timeUnit) {
         this(List.of(host + ":" + port), timeout, timeUnit);
     }
 
     public CoordinatorReadClient(List<String> coordinatorAddresses, long timeout, TimeUnit timeUnit) {
+        this(coordinatorAddresses, timeout, timeUnit, InternalAuthChannels::forAddress);
+    }
+
+    CoordinatorReadClient(
+            List<String> coordinatorAddresses, long timeout, TimeUnit timeUnit, ChannelFactory channelFactory) {
         this.coordinatorAddresses = new ArrayList<>(coordinatorAddresses);
         this.timeoutSeconds = timeUnit.toSeconds(timeout);
+        this.channelFactory = channelFactory;
         logger.info("CoordinatorReadClient created for: {}", coordinatorAddresses);
+    }
+
+    @FunctionalInterface
+    interface ChannelFactory {
+        ManagedChannel create(String host, int port);
     }
 
     private CoordinatorGrpc.CoordinatorBlockingStub getStub(String address) {
         return stubs.computeIfAbsent(address, addr -> {
                     ManagedChannel channel = channels.computeIfAbsent(addr, a -> {
                         String[] parts = a.split(":");
-                        return InternalAuthChannels.forAddress(parts[0], Integer.parseInt(parts[1]));
+                        return channelFactory.create(parts[0], Integer.parseInt(parts[1]));
                     });
                     return CoordinatorGrpc.newBlockingStub(channel);
                 })
@@ -176,6 +190,22 @@ public class CoordinatorReadClient {
                 throw new StatusRuntimeException(Status.NOT_FOUND.withDescription("Node not found: " + nodeId));
             }
             return convertNode(response.getNode());
+        });
+    }
+
+    /**
+     * Resolve coordinator placement for a binary key. The key bytes are forwarded to ResolveShard
+     * as-is; this client does not hash, stringify, or read the key's value.
+     */
+    public ShardDto resolveShard(byte[] key) {
+        ByteString keyBytes = ByteString.copyFrom(key);
+        return execute(stub -> {
+            ResolveShardResponse response = stub.resolveShard(
+                    ResolveShardRequest.newBuilder().setKey(keyBytes).build());
+            if (!response.hasShard()) {
+                throw new ShardMapUnavailableException("Coordinator did not resolve a shard for the requested key");
+            }
+            return convertShard(response.getShard());
         });
     }
 

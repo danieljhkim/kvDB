@@ -1,3 +1,22 @@
+# kvcli talks to the KvDB gateway data plane (KvGateway gRPC service).
+# Flags override these values; environment variables override the file.
 server:
-  host: kvdb-coordinator # when using docker / use localhost otherwise
-  port: 5000
+  host: localhost # kvdb-gateway when running inside docker compose
+  port: 7000
+
+# Transport security follows the same policy as the cluster
+# (KVDB_GRPC_SECURITY_MODE). mtls is the default; development-plaintext is
+# refused unless KVDB_ENV is dev, development, local, or test.
+security:
+  mode: mtls
+  # server_name: kvdb-gateway
+  # trust_bundle: /run/secrets/kvdb/gateway-client-ca-bundle.pem
+  # cert_chain: /run/secrets/kvdb/client/tls.crt
+  # private_key: /run/secrets/kvdb/client/tls.key
+
+request:
+  # Deadline applied to every RPC.
+  timeout: 5s
+  # Informational only; the gateway authorizes on the client certificate.
+  # tenant_id: tenant-1
+  # principal: operator-1

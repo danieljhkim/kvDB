@@ -8,6 +8,15 @@ COORD := kv.coordinator
 NODE := kv.node
 GATEWAY := kv.gateway
 
+# Go CLI protocol generation. Pinned so regeneration is reproducible.
+PROTOC ?= protoc
+PROTO_DIR := kv.proto/src/main/proto
+PROTOC_GEN_GO_VERSION := v1.36.6
+PROTOC_GEN_GO_GRPC_VERSION := v1.5.1
+PROTO_TOOLS_DIR ?= $(HOME)/.cache/kvdb/proto-tools
+GO_GATEWAY_PACKAGE := github.com/danieljhkim/kv/internal/gen/kvdb/gateway
+GO_GATEWAY_OUT := $(GOCLI)/internal/gen/kvdb/gateway
+
 # -----------------------------------
 # Targets
 # -----------------------------------
@@ -67,6 +76,34 @@ wipe-data:
 
 
 # -----------------
+# Go CLI
+# -----------------
+proto-tools:
+	@echo "Installing pinned protoc plugins into $(PROTO_TOOLS_DIR)..."
+	GOBIN=$(PROTO_TOOLS_DIR) go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
+	GOBIN=$(PROTO_TOOLS_DIR) go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)
+
+# Regenerates the Go gateway bindings from the authoritative proto. Rerunning
+# this with the pinned plugin versions produces byte-identical output.
+proto-go: proto-tools
+	@echo "Generating Go bindings for $(PROTO_DIR)/kvgateway.proto..."
+	mkdir -p $(GO_GATEWAY_OUT)
+	PATH="$(PROTO_TOOLS_DIR):$$PATH" $(PROTOC) -I $(PROTO_DIR) \
+		--go_out=$(GO_GATEWAY_OUT) \
+		--go_opt=paths=source_relative \
+		--go_opt=Mkvgateway.proto=$(GO_GATEWAY_PACKAGE) \
+		--go-grpc_out=$(GO_GATEWAY_OUT) \
+		--go-grpc_opt=paths=source_relative \
+		--go-grpc_opt=Mkvgateway.proto=$(GO_GATEWAY_PACKAGE) \
+		kvgateway.proto
+
+go-build:
+	cd $(GOCLI) && go build -o kv
+
+go-test:
+	cd $(GOCLI) && go test -race ./...
+
+# -----------------
 # Format and lint
 # -----------------
 format:
@@ -94,4 +131,4 @@ vegeta-admin-bench:
 	chmod +x benchmark/scripts/run_vegeta_admin.sh
 	./benchmark/scripts/run_vegeta_admin.sh
 
-.PHONY: all build clean run-cluster run-gateway stop bootstrap-cluster smoke-test logs cluster-status wipe-data format lint k6-gateway-bench k6-admin-bench ghz-gateway-bench vegeta-admin-bench
+.PHONY: all build clean proto-tools proto-go go-build go-test run-cluster run-gateway stop bootstrap-cluster smoke-test logs cluster-status wipe-data format lint k6-gateway-bench k6-admin-bench ghz-gateway-bench vegeta-admin-bench

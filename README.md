@@ -8,7 +8,10 @@
 
 KvDB is a Redis-like distributed key-value store implemented in Java, built around a clear separation between the **control plane** (cluster metadata) and the **data plane** (storage nodes). The system uses gRPC for service-to-service communication and is designed to evolve toward production-grade correctness (leader routing, topology epochs, retries, and consistent metadata propagation).
 
-> Note: KvDB currently exposes a gRPC API. There is no CLI included at this stage.
+> Note: KvDB exposes a gRPC API. A non-interactive command line client for the
+> gateway data plane ships in [`golang/kvcli`](golang/kvcli/README.md); it
+> supports `get`, `put`/`set`, `del`/`delete`, and `ping` only. There is no
+> interactive shell and no line protocol.
 
 ---
 
@@ -155,6 +158,37 @@ Metadata and control plane operations:
 - Shard map snapshot reads
 - Shard map watch (delta streaming)
 - Node/shard admin mutations (e.g., register node, init shards, set node status, set shard replicas/leader)
+
+### Client → Gateway (command line)
+
+`golang/kvcli` is a non-interactive client for the gateway data plane. It uses
+the generated bindings for `kv.proto/src/main/proto/kvgateway.proto`; run
+`make proto-go` to regenerate them with the pinned plugin versions.
+
+```bash
+make go-build                       # builds golang/kvcli/kv
+kv put greeting hello               # writes, prints status and version
+kv get greeting --raw > value.bin   # stdout receives exactly the stored bytes
+kv del greeting
+kv ping                             # bounded head-only reachability probe
+```
+
+Supported commands are `get`, `put` (alias `set`), `del` (alias `delete`), and
+`ping`. Keys and values are byte strings: `--key-file`, `--value-file`, and
+`--output-file` (with `-` for standard input) move arbitrary binary data,
+including zero bytes and data that is not valid UTF-8. The removed interactive
+line protocol is rejected explicitly: `kv connect` and `kv --interactive`
+fail with an explanation rather than opening a session.
+
+The client uses the same transport policy as the cluster
+(`KVDB_GRPC_SECURITY_MODE`): mutual TLS by default, and `development-plaintext`
+only when `KVDB_ENV` is `dev`, `development`, `local`, or `test`. Client
+credentials come from `KVDB_CLIENT_TLS_TRUST_BUNDLE`,
+`KVDB_CLIENT_TLS_CERT_CHAIN`, and `KVDB_CLIENT_TLS_PRIVATE_KEY` (or the
+matching flags). Every RPC is deadline-bounded, non-OK application and
+transport statuses exit nonzero with stable status names, and an ambiguous
+write outcome is reported rather than retried. See
+[golang/kvcli/README.md](golang/kvcli/README.md).
 
 ### Admin API (HTTP)
 The Admin API provides a control-plane management surface intended for local operations and cluster bootstrapping:

@@ -1,40 +1,30 @@
 package cmd
 
 import (
-	"fmt"
-	"os"
-
-	"github.com/danieljhkim/kv/internal/client"
 	"github.com/spf13/cobra"
 )
 
+// connectCmd survives only to reject the removed interactive line protocol
+// with an explanation instead of an unknown-command error.
 var connectCmd = &cobra.Command{
 	Use:   "connect",
-	Short: "Connect to a KV database server in interactive mode",
-	Long: `Connect to a KV database server using the specified host and port in interactive mode.
-    
-Example:
-  kv connect --host 127.0.0.1 --port 7379`,
-	Run: func(cmd *cobra.Command, args []string) {
-		host, _ := cmd.Flags().GetString("host")
-		port, _ := cmd.Flags().GetInt("port")
+	Short: "Unsupported: the interactive line protocol was removed",
+	Long: `kvcli no longer opens an interactive session.
 
-		fmt.Printf("Connecting to KV server at %s:%d\n", host, port)
+The gateway exposes a gRPC data plane (Get, Put, Delete) over authenticated
+TLS, so there is no line protocol to connect to. Configure the endpoint and
+credentials once, then run individual commands:
 
-		kv := client.NewClient()
-		if !kv.Connect(host, port) {
-			fmt.Println("Failed to connect to the server")
-			os.Exit(1)
-		}
-
-		kv.RunCLI()
-		kv.Disconnect()
+  kv put greeting hello
+  kv get greeting
+  kv del greeting`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return errLegacyInteractive
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(connectCmd)
-
-	connectCmd.Flags().StringP("host", "H", "127.0.0.1", "Server hostname or IP address")
-	connectCmd.Flags().IntP("port", "p", 7379, "Server port")
 }

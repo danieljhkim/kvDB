@@ -3,8 +3,12 @@ Copyright © 2025 danieljhkim
 */
 package main
 
-import "github.com/danieljhkim/kv/cmd"
+import (
+	"os"
+
+	"github.com/danieljhkim/kv/cmd"
+)
 
 func main() {
-	cmd.Execute()
+	os.Exit(cmd.Execute())
 }

@@ -5,8 +5,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
+import com.danieljhkim.kvdb.kvcommon.config.AppConfig;
 import com.danieljhkim.kvdb.kvcommon.grpc.GrpcIdentity;
 import com.danieljhkim.kvdb.kvcommon.grpc.GrpcPeerIdentity;
+import com.danieljhkim.kvdb.kvcommon.limits.KvRequestLimits;
 import com.danieljhkim.kvdb.kvgateway.cache.NodeFailureTracker;
 import com.danieljhkim.kvdb.kvgateway.client.NodeConnectionPool;
 import com.danieljhkim.kvdb.kvgateway.retry.RequestExecutor;
@@ -16,6 +18,8 @@ import com.danieljhkim.kvdb.proto.coordinator.NodeRecord;
 import com.danieljhkim.kvdb.proto.coordinator.NodeStatus;
 import com.danieljhkim.kvdb.proto.coordinator.PartitioningConfig;
 import com.danieljhkim.kvdb.proto.coordinator.ShardRecord;
+import com.danieljhkim.kvdb.proto.gateway.BatchGetRequest;
+import com.danieljhkim.kvdb.proto.gateway.BatchGetResponse;
 import com.danieljhkim.kvdb.proto.gateway.Consistency;
 import com.danieljhkim.kvdb.proto.gateway.GetRequest;
 import com.danieljhkim.kvdb.proto.gateway.GetResponse;
@@ -78,6 +82,45 @@ class KvGatewayConsistencyTest {
         assertEquals(7, observer.value.getKv().getVersion());
         assertEquals(11, observer.value.getAppliedVersion());
         assertEquals("node-2", executor.candidates.getFirst().getNodeId());
+    }
+
+    @Test
+    void batchGetUsesTheSameStrongAndEventualRoutingSeamAsUnaryGet() {
+        CapturingExecutor executor = new CapturingExecutor();
+        executor.nextResult = RequestExecutor.ExecutionResult.success(
+                ValueResponse.newBuilder()
+                        .setFound(true)
+                        .setVersion(9)
+                        .setAppliedVersion(12)
+                        .build(),
+                "node:9000");
+        AppConfig.LimitsConfig config = new AppConfig.LimitsConfig();
+        config.setMaxBatchGetConcurrency(1);
+        KvGatewayServiceImpl service = new KvGatewayServiceImpl(cache(), executor, new KvRequestLimits(config));
+
+        CapturingObserver<BatchGetResponse> strong = new CapturingObserver<>();
+        service.batchGet(
+                BatchGetRequest.newBuilder()
+                        .addKeys(ByteString.copyFromUtf8("strong"))
+                        .setOptions(ReadOptions.newBuilder().setConsistency(Consistency.STRONG))
+                        .build(),
+                strong);
+        assertEquals(
+                List.of("node-1"),
+                executor.candidates.stream().map(NodeRecord::getNodeId).toList());
+        assertEquals(12, strong.value.getResults(0).getAppliedVersion());
+
+        CapturingObserver<BatchGetResponse> eventual = new CapturingObserver<>();
+        service.batchGet(
+                BatchGetRequest.newBuilder()
+                        .addKeys(ByteString.copyFromUtf8("eventual"))
+                        .setOptions(ReadOptions.newBuilder().setConsistency(Consistency.EVENTUAL))
+                        .build(),
+                eventual);
+        assertEquals(
+                List.of("node-2", "node-1"),
+                executor.candidates.stream().map(NodeRecord::getNodeId).toList());
+        assertEquals(12, eventual.value.getResults(0).getAppliedVersion());
     }
 
     @Test

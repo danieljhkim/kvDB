@@ -5,6 +5,7 @@ import com.danieljhkim.kvdb.kvcommon.exception.InvalidRequestException;
 import com.danieljhkim.kvdb.kvcommon.exception.KeyNotFoundException;
 import com.danieljhkim.kvdb.kvcommon.exception.KvException;
 import com.danieljhkim.kvdb.kvcommon.exception.NodeUnavailableException;
+import com.danieljhkim.kvdb.kvcommon.exception.PayloadTooLargeException;
 import com.danieljhkim.kvdb.kvcommon.exception.ShardMapUnavailableException;
 import com.danieljhkim.kvdb.kvcommon.grpc.GrpcIdentity;
 import com.danieljhkim.kvdb.kvcommon.grpc.GrpcPeerIdentity;
@@ -13,6 +14,10 @@ import com.danieljhkim.kvdb.kvgateway.retry.RequestExecutor;
 import com.danieljhkim.kvdb.kvgateway.retry.RequestExecutor.ExecutionResult;
 import com.danieljhkim.kvdb.proto.coordinator.NodeRecord;
 import com.danieljhkim.kvdb.proto.coordinator.NodeStatus;
+import com.danieljhkim.kvdb.proto.gateway.BatchGetOutcome;
+import com.danieljhkim.kvdb.proto.gateway.BatchGetRequest;
+import com.danieljhkim.kvdb.proto.gateway.BatchGetResponse;
+import com.danieljhkim.kvdb.proto.gateway.BatchGetResult;
 import com.danieljhkim.kvdb.proto.gateway.Consistency;
 import com.danieljhkim.kvdb.proto.gateway.DeleteRequest;
 import com.danieljhkim.kvdb.proto.gateway.DeleteResponse;
@@ -23,6 +28,7 @@ import com.danieljhkim.kvdb.proto.gateway.KvGatewayGrpc;
 import com.danieljhkim.kvdb.proto.gateway.PutRequest;
 import com.danieljhkim.kvdb.proto.gateway.PutResponse;
 import com.danieljhkim.kvdb.proto.gateway.ReadMode;
+import com.danieljhkim.kvdb.proto.gateway.ReadOptions;
 import com.danieljhkim.kvdb.proto.gateway.Status;
 import com.danieljhkim.kvdb.proto.gateway.WriteDurability;
 import com.danieljhkim.kvdb.proto.gateway.WriteOptions;
@@ -34,7 +40,16 @@ import com.kvdb.proto.kvstore.ValueResponse;
 import io.grpc.stub.StreamObserver;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -49,6 +64,7 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
     private final ShardMapCache shardMapCache;
     private final RequestExecutor requestExecutor;
     private final KvRequestLimits limits;
+    private final ExecutorService batchExecutor;
 
     public KvGatewayServiceImpl(ShardMapCache shardMapCache, RequestExecutor requestExecutor) {
         this(shardMapCache, requestExecutor, new KvRequestLimits(null));
@@ -58,14 +74,78 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
         this.shardMapCache = shardMapCache;
         this.requestExecutor = requestExecutor;
         this.limits = limits;
+        this.batchExecutor = Executors.newFixedThreadPool(
+                limits.maxBatchGetConcurrency(),
+                Thread.ofVirtual().name("batch-get-", 0).factory());
     }
 
     @Override
     public void get(GetRequest request, StreamObserver<GetResponse> responseObserver) {
+        responseObserver.onNext(read(request));
+        responseObserver.onCompleted();
+    }
+
+    @Override
+    public void batchGet(BatchGetRequest request, StreamObserver<BatchGetResponse> responseObserver) {
+        try {
+            limits.validateMessage(request);
+            limits.validateBatchKeys(request.getKeysList());
+            validateReadOptions(request.getOptions());
+
+            List<BatchGetResult> reservationResults = request.getKeysList().stream()
+                    .map(KvGatewayServiceImpl::responseReservationResult)
+                    .toList();
+            BatchGetResponse reservationOnly = BatchGetResponse.newBuilder()
+                    .setStatus(okStatus(null))
+                    .addAllResults(reservationResults)
+                    .build();
+            if (reservationOnly.getSerializedSize() > limits.maxBatchGetResponseBytes()) {
+                throw new PayloadTooLargeException(
+                        "BatchGet response budget cannot represent one outcome per input key");
+            }
+
+            io.grpc.Context context = io.grpc.Context.current();
+            BatchGetResult initiallyStopped = stoppedBatchResult(request.getKeys(0), context);
+            if (initiallyStopped != null) {
+                BatchGetResponse.Builder stoppedResponse =
+                        BatchGetResponse.newBuilder().setStatus(okStatus(null));
+                appendStoppedResults(
+                        stoppedResponse, request, 0, initiallyStopped.getOutcome(), initiallyStopped.getStatus());
+                responseObserver.onNext(stoppedResponse.build());
+                responseObserver.onCompleted();
+                return;
+            }
+            List<Future<GetResponse>> futures =
+                    new CopyOnWriteArrayList<>(Collections.nCopies(request.getKeysCount(), null));
+            int initialReads = Math.min(request.getKeysCount(), limits.maxBatchGetConcurrency());
+            for (int index = 0; index < initialReads; index++) {
+                submitBatchRead(request, futures, context, index);
+            }
+
+            io.grpc.Context.CancellationListener cancellationListener = ignored -> cancelAll(futures);
+            context.addListener(cancellationListener, Runnable::run);
+            BatchGetResponse response;
+            try {
+                response = collectBatchResponse(request, futures, reservationResults, context);
+            } finally {
+                context.removeListener(cancellationListener);
+                cancelAll(futures);
+            }
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
+        } catch (KvException e) {
+            responseObserver.onNext(BatchGetResponse.newBuilder()
+                    .setStatus(exceptionToStatus(e))
+                    .build());
+            responseObserver.onCompleted();
+        }
+    }
+
+    private GetResponse read(GetRequest request) {
         try {
             limits.validateMessage(request);
             limits.validateKey(request.getKey());
-            validateReadOptions(request);
+            validateReadOptions(request.getOptions());
             byte[] keyBytes = request.getKey().toByteArray();
             final String shardId = resolveShardId(keyBytes);
             Consistency consistency = normalizedConsistency(request.getOptions().getConsistency());
@@ -84,7 +164,7 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
             if (!nodeResponse.getFound()) {
                 throw new KeyNotFoundException(printableKey(request.getKey()), shardId);
             }
-            responseObserver.onNext(GetResponse.newBuilder()
+            return GetResponse.newBuilder()
                     .setStatus(okStatus(shardId))
                     .setKv(KeyValue.newBuilder()
                             .setKey(request.getKey())
@@ -95,14 +175,187 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
                             .setExpireTimeMs(nodeResponse.getExpireTimeMs())
                             .build())
                     .setAppliedVersion(nodeResponse.getAppliedVersion())
-                    .build());
-            responseObserver.onCompleted();
-
+                    .build();
         } catch (KvException e) {
-            responseObserver.onNext(
-                    GetResponse.newBuilder().setStatus(exceptionToStatus(e)).build());
-            responseObserver.onCompleted();
+            return GetResponse.newBuilder().setStatus(exceptionToStatus(e)).build();
         }
+    }
+
+    private BatchGetResponse collectBatchResponse(
+            BatchGetRequest request,
+            List<Future<GetResponse>> futures,
+            List<BatchGetResult> reservationResults,
+            io.grpc.Context context) {
+        BatchGetResponse.Builder response = BatchGetResponse.newBuilder().setStatus(okStatus(null));
+        for (int index = 0; index < futures.size(); index++) {
+            BatchGetResult stopped = stoppedBatchResult(request.getKeys(index), context);
+            if (stopped != null) {
+                cancelAll(futures.subList(index, futures.size()));
+                appendStoppedResults(response, request, index, stopped.getOutcome(), stopped.getStatus());
+                break;
+            }
+
+            BatchGetResult candidate;
+            try {
+                GetResponse itemResponse = await(futures.get(index), context);
+                candidate = completedBatchResult(request.getKeys(index), itemResponse);
+            } catch (TimeoutException e) {
+                cancelAll(futures.subList(index, futures.size()));
+                appendStoppedResults(
+                        response,
+                        request,
+                        index,
+                        BatchGetOutcome.DEADLINE_EXCEEDED,
+                        Status.newBuilder()
+                                .setCode(Status.Code.TIMEOUT)
+                                .setMessage("BatchGet deadline exceeded")
+                                .build());
+                break;
+            } catch (CancellationException e) {
+                BatchGetResult cancelled = stoppedBatchResult(request.getKeys(index), context);
+                Status status = cancelled == null
+                        ? Status.newBuilder()
+                                .setCode(Status.Code.CANCELLED)
+                                .setMessage("BatchGet item was cancelled")
+                                .build()
+                        : cancelled.getStatus();
+                BatchGetOutcome outcome = cancelled == null ? BatchGetOutcome.CANCELLED : cancelled.getOutcome();
+                appendStoppedResults(response, request, index, outcome, status);
+                break;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                cancelAll(futures.subList(index, futures.size()));
+                appendStoppedResults(
+                        response,
+                        request,
+                        index,
+                        BatchGetOutcome.CANCELLED,
+                        Status.newBuilder()
+                                .setCode(Status.Code.CANCELLED)
+                                .setMessage("BatchGet interrupted")
+                                .build());
+                break;
+            } catch (ExecutionException e) {
+                candidate = BatchGetResult.newBuilder()
+                        .setKey(request.getKeys(index))
+                        .setStatus(Status.newBuilder()
+                                .setCode(Status.Code.INTERNAL)
+                                .setMessage("BatchGet item failed internally"))
+                        .setOutcome(BatchGetOutcome.COMPLETED)
+                        .build();
+            }
+
+            BatchGetResponse prospective = response.clone()
+                    .addResults(candidate)
+                    .addAllResults(reservationResults.subList(index + 1, reservationResults.size()))
+                    .build();
+            if (prospective.getSerializedSize() <= limits.maxBatchGetResponseBytes()) {
+                response.addResults(candidate);
+                int nextIndex = index + limits.maxBatchGetConcurrency();
+                if (nextIndex < request.getKeysCount()) {
+                    submitBatchRead(request, futures, context, nextIndex);
+                }
+                continue;
+            }
+
+            cancelAll(futures.subList(index, futures.size()));
+            response.addAllResults(request.getKeysList().subList(index, request.getKeysCount()).stream()
+                    .map(KvGatewayServiceImpl::responseBudgetResult)
+                    .toList());
+            break;
+        }
+        return response.build();
+    }
+
+    private void submitBatchRead(
+            BatchGetRequest request, List<Future<GetResponse>> futures, io.grpc.Context context, int index) {
+        GetRequest itemRequest = GetRequest.newBuilder()
+                .setCtx(request.getCtx())
+                .setKey(request.getKeys(index))
+                .setOptions(request.getOptions())
+                .setHeadOnly(request.getHeadOnly())
+                .build();
+        futures.set(index, batchExecutor.submit(() -> context.call(() -> read(itemRequest))));
+    }
+
+    private static GetResponse await(Future<GetResponse> future, io.grpc.Context context)
+            throws InterruptedException, ExecutionException, TimeoutException {
+        io.grpc.Deadline deadline = context.getDeadline();
+        if (deadline == null) {
+            return future.get();
+        }
+        long remainingNanos = deadline.timeRemaining(TimeUnit.NANOSECONDS);
+        if (remainingNanos <= 0) {
+            throw new TimeoutException("deadline expired");
+        }
+        return future.get(remainingNanos, TimeUnit.NANOSECONDS);
+    }
+
+    private static BatchGetResult completedBatchResult(com.google.protobuf.ByteString key, GetResponse response) {
+        BatchGetResult.Builder result = BatchGetResult.newBuilder()
+                .setKey(key)
+                .setStatus(response.getStatus())
+                .setAppliedVersion(response.getAppliedVersion())
+                .setOutcome(BatchGetOutcome.COMPLETED);
+        if (response.hasKv()) {
+            result.setKv(response.getKv());
+        }
+        return result.build();
+    }
+
+    private static BatchGetResult stoppedBatchResult(com.google.protobuf.ByteString key, io.grpc.Context context) {
+        io.grpc.Deadline deadline = context.getDeadline();
+        if (deadline != null && deadline.isExpired()) {
+            return BatchGetResult.newBuilder()
+                    .setKey(key)
+                    .setStatus(
+                            Status.newBuilder().setCode(Status.Code.TIMEOUT).setMessage("BatchGet deadline exceeded"))
+                    .setOutcome(BatchGetOutcome.DEADLINE_EXCEEDED)
+                    .build();
+        }
+        if (context.isCancelled()) {
+            return BatchGetResult.newBuilder()
+                    .setKey(key)
+                    .setStatus(
+                            Status.newBuilder().setCode(Status.Code.CANCELLED).setMessage("BatchGet cancelled"))
+                    .setOutcome(BatchGetOutcome.CANCELLED)
+                    .build();
+        }
+        return null;
+    }
+
+    private static BatchGetResult responseBudgetResult(com.google.protobuf.ByteString key) {
+        return BatchGetResult.newBuilder()
+                .setKey(key)
+                .setStatus(Status.newBuilder().setCode(Status.Code.PAYLOAD_TOO_LARGE))
+                .setOutcome(BatchGetOutcome.RESPONSE_BUDGET_EXHAUSTED)
+                .build();
+    }
+
+    private static BatchGetResult responseReservationResult(com.google.protobuf.ByteString key) {
+        return BatchGetResult.newBuilder()
+                .setKey(key)
+                .setStatus(Status.newBuilder().setCode(Status.Code.TIMEOUT).setMessage("BatchGet deadline exceeded"))
+                .setOutcome(BatchGetOutcome.DEADLINE_EXCEEDED)
+                .build();
+    }
+
+    private static void appendStoppedResults(
+            BatchGetResponse.Builder response,
+            BatchGetRequest request,
+            int start,
+            BatchGetOutcome outcome,
+            Status status) {
+        for (int index = start; index < request.getKeysCount(); index++) {
+            response.addResults(BatchGetResult.newBuilder()
+                    .setKey(request.getKeys(index))
+                    .setStatus(status)
+                    .setOutcome(outcome));
+        }
+    }
+
+    private static void cancelAll(List<? extends Future<?>> futures) {
+        futures.stream().filter(java.util.Objects::nonNull).forEach(future -> future.cancel(true));
     }
 
     @Override
@@ -278,7 +531,7 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
             case RESOURCE_EXHAUSTED -> Status.Code.PAYLOAD_TOO_LARGE;
             case UNAVAILABLE -> Status.Code.UNAVAILABLE;
             case DEADLINE_EXCEEDED -> Status.Code.TIMEOUT;
-            case CANCELLED -> Status.Code.UNAVAILABLE;
+            case CANCELLED -> Status.Code.CANCELLED;
             default -> Status.Code.INTERNAL;
         };
     }
@@ -352,15 +605,15 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
         return consistency == Consistency.CONSISTENCY_UNSPECIFIED ? Consistency.STRONG : consistency;
     }
 
-    private static void validateReadOptions(GetRequest request) {
-        if (request.getOptions().getMaxStalenessMs() != 0) {
+    private static void validateReadOptions(ReadOptions options) {
+        if (options.getMaxStalenessMs() != 0) {
             throw new InvalidRequestException("max_staleness_ms is not supported");
         }
-        if (request.getOptions().getConsistency() == Consistency.UNRECOGNIZED) {
+        if (options.getConsistency() == Consistency.UNRECOGNIZED) {
             throw new InvalidRequestException("consistency is unrecognized");
         }
-        Consistency consistency = normalizedConsistency(request.getOptions().getConsistency());
-        ReadMode mode = request.getOptions().getReadMode();
+        Consistency consistency = normalizedConsistency(options.getConsistency());
+        ReadMode mode = options.getReadMode();
         if (mode == ReadMode.UNRECOGNIZED) {
             throw new InvalidRequestException("read_mode is unrecognized");
         }

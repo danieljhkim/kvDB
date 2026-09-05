@@ -100,6 +100,7 @@ Storage nodes consult the coordinator shard map to validate:
 ### Client → Gateway (gRPC)
 Core operations:
 - `Get`
+- `BatchGet`
 - `Put`
 - `Delete`
 
@@ -108,6 +109,46 @@ The Gateway is responsible for:
 - Routing reads/writes to appropriate nodes
 - Retrying with backoff where safe
 - Interpreting routing hints from trailers
+
+#### BatchGet semantics and limits
+
+`BatchGet` accepts binary `keys`, shared `ReadOptions`, and a shared optional
+`head_only` flag. For every accepted request, `results` contains exactly one
+entry per input key in input order. Duplicate keys remain duplicate results.
+Each result echoes its binary key and carries the same status, value/version
+metadata, and serving-node `applied_version` as unary `Get`.
+
+**There is no cross-key snapshot or atomic-read guarantee.** Each key is routed
+and read independently. `STRONG`, `EVENTUAL`, and `head_only` therefore have
+exactly the unary `Get` semantics for that item; results from different keys
+may reflect different instants or shard versions.
+
+Example request (protobuf text notation):
+
+```protobuf
+keys: "\000customer-1"
+keys: "\377customer-2"
+keys: "\000customer-1"  // intentionally repeated
+options { consistency: STRONG }
+head_only: false
+ctx { request_id: "read-set-42" }
+```
+
+The default gateway bounds are configured under `limits`:
+
+- `maxBatchEntries: 128`
+- `maxBatchAggregateKeyBytes: 65536`
+- `maxBatchGetConcurrency: 16`
+- `maxBatchGetResponseBytes: 2097152`
+
+Key-count, aggregate-key-size, individual-key, option, and inbound-message
+violations fail request-wide validation before any storage read is dispatched.
+After dispatch, found, not-found, and unavailable results can coexist. Deadline
+and cancellation outcomes explicitly mark every remaining key. If a successful
+item would exceed the response budget, it and all remaining items are returned
+as `RESPONSE_BUDGET_EXHAUSTED`; the serialized response remains within the
+configured budget. The budget must be large enough to encode one termination
+outcome per admitted key, or the request is rejected before dispatch.
 
 ### Gateway/Nodes → Coordinator (gRPC)
 Metadata and control plane operations:
@@ -198,6 +239,23 @@ independent crash-consistency qualification.
 ## Benchmarking
 
 Detailed benchmark results and analysis are documented in [docs/performance.md](docs/performance.md).
+
+### BatchGet fixed-fixture baseline
+
+`KvGatewayContractTest.fixedMultiShardBaselineShowsOneClientRpcWithEqualBackendReadsAndBoundedFanout`
+is a reproducible comparison using eight one-byte keys spread across four
+shards, a deterministic 15 ms storage-call fixture, and BatchGet concurrency of
+four. One run on 2026-09-04 produced:
+
+| Path | Client RPCs | Elapsed | Backend reads | Max active reads |
+|---|---:|---:|---:|---:|
+| 8 sequential unary `Get`s | 8 | 152 ms | 8 | 1 |
+| 1 `BatchGet` | 1 | 45 ms | 8 | 4 |
+
+This controlled baseline demonstrates the saved client round trips and bounded
+fanout. It does **not** show fewer backend reads: both paths issued eight. The
+elapsed values are test-fixture observations, not production latency claims;
+rerun the named test on the target hardware for a local baseline.
 
 Gateway (gRPC)
 ```bash

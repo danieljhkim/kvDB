@@ -1,0 +1,138 @@
+package com.danieljhkim.kvdb.kvadmin.client;
+
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
+import com.danieljhkim.kvdb.kvadmin.api.dto.ShardDto;
+import com.danieljhkim.kvdb.proto.coordinator.CoordinatorGrpc;
+import com.danieljhkim.kvdb.proto.coordinator.GetCoordinatorLeaderRequest;
+import com.danieljhkim.kvdb.proto.coordinator.GetCoordinatorLeaderResponse;
+import com.danieljhkim.kvdb.proto.coordinator.ResolveShardRequest;
+import com.danieljhkim.kvdb.proto.coordinator.ResolveShardResponse;
+import com.danieljhkim.kvdb.proto.coordinator.ShardConfigState;
+import com.danieljhkim.kvdb.proto.coordinator.ShardRecord;
+import io.grpc.Server;
+import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
+import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
+import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
+import io.grpc.stub.StreamObserver;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+class CoordinatorReadClientResolveShardTest {
+
+    private static final ShardRecord PLACEMENT = ShardRecord.newBuilder()
+            .setShardId("shard-7")
+            .setEpoch(42)
+            .addReplicas("node-a")
+            .addReplicas("node-b")
+            .setLeader("node-a")
+            .setConfigState(ShardConfigState.STABLE)
+            .build();
+
+    private FakeCoordinatorService service;
+    private Server server;
+    private CoordinatorReadClient client;
+
+    @BeforeEach
+    void startCoordinator() throws Exception {
+        service = new FakeCoordinatorService();
+        server = NettyServerBuilder.forPort(0).addService(service).build().start();
+        client = new CoordinatorReadClient(
+                List.of("localhost:" + server.getPort()),
+                1,
+                TimeUnit.SECONDS,
+                (host, port) -> NettyChannelBuilder.forAddress(host, port)
+                        .usePlaintext()
+                        .build());
+    }
+
+    @AfterEach
+    void shutdown() throws InterruptedException {
+        if (client != null) {
+            client.shutdown();
+        }
+        if (server != null) {
+            server.shutdownNow();
+            server.awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void resolveShardForwardsBinaryKeyIncludingNulAndInvalidUtf8() {
+        byte[] key = new byte[] {0x00, (byte) 0xFF, (byte) 0xFE, 'k'};
+
+        ShardDto placement = client.resolveShard(key);
+
+        assertArrayEquals(key, service.lastKey.get());
+        assertEquals("shard-7", placement.getShardId());
+        assertEquals(42, placement.getEpoch());
+        assertEquals("node-a", placement.getLeader());
+        assertEquals(List.of("node-a", "node-b"), placement.getReplicas());
+        assertEquals("STABLE", placement.getConfigState());
+    }
+
+    @Test
+    void resolveShardSurfacesUnavailable() {
+        service.resolveStatus.set(Status.UNAVAILABLE.withDescription("coordinator down"));
+
+        StatusRuntimeException thrown =
+                assertThrows(StatusRuntimeException.class, () -> client.resolveShard(new byte[] {0x01}));
+        assertEquals(Status.Code.UNAVAILABLE, thrown.getStatus().getCode());
+    }
+
+    @Test
+    void resolveShardSurfacesDeadlineExceeded() {
+        service.delayMs.set(TimeUnit.SECONDS.toMillis(2));
+
+        StatusRuntimeException thrown =
+                assertThrows(StatusRuntimeException.class, () -> client.resolveShard(new byte[] {0x01}));
+        assertEquals(Status.Code.DEADLINE_EXCEEDED, thrown.getStatus().getCode());
+    }
+
+    private static final class FakeCoordinatorService extends CoordinatorGrpc.CoordinatorImplBase {
+        private final AtomicReference<byte[]> lastKey = new AtomicReference<>();
+        private final AtomicReference<Status> resolveStatus = new AtomicReference<>(Status.OK);
+        private final AtomicLong delayMs = new AtomicLong();
+
+        @Override
+        public void getCoordinatorLeader(
+                GetCoordinatorLeaderRequest request, StreamObserver<GetCoordinatorLeaderResponse> responseObserver) {
+            responseObserver.onNext(
+                    GetCoordinatorLeaderResponse.newBuilder().setIsLeader(true).build());
+            responseObserver.onCompleted();
+        }
+
+        @Override
+        public void resolveShard(ResolveShardRequest request, StreamObserver<ResolveShardResponse> responseObserver) {
+            lastKey.set(request.getKey().toByteArray());
+            long delay = delayMs.get();
+            if (delay > 0) {
+                try {
+                    Thread.sleep(delay);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    responseObserver.onError(Status.CANCELLED.asRuntimeException());
+                    return;
+                }
+            }
+            Status status = resolveStatus.get();
+            if (!status.isOk()) {
+                responseObserver.onError(status.asRuntimeException());
+                return;
+            }
+            responseObserver.onNext(ResolveShardResponse.newBuilder()
+                    .setShardId(PLACEMENT.getShardId())
+                    .setShard(PLACEMENT)
+                    .build());
+            responseObserver.onCompleted();
+        }
+    }
+}

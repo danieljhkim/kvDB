@@ -33,6 +33,13 @@ type UsageError struct {
 	Err error
 }
 
+// BatchPartialError follows a successful BatchGet envelope whose individual
+// results include non-OK statuses or fanout termination. The JSON document was
+// written before this error is returned so scripts can inspect every position.
+type BatchPartialError struct{}
+
+func (*BatchPartialError) Error() string { return "BatchGet completed with partial failures" }
+
 func (e *UsageError) Error() string { return e.Err.Error() }
 
 func (e *UsageError) Unwrap() error { return e.Err }
@@ -44,6 +51,10 @@ var errLegacyInteractive = &UsageError{Err: errors.New(
 		"use `kv get`, `kv put`, and `kv del` instead")}
 
 func exitCode(err error) int {
+	var partial *BatchPartialError
+	if errors.As(err, &partial) {
+		return ExitApplication
+	}
 	var statusErr *client.StatusError
 	if errors.As(err, &statusErr) {
 		switch statusErr.Code {
@@ -65,6 +76,10 @@ func exitCode(err error) int {
 // statusName renders the stable protocol name for an error, for operators
 // and scripts that key on names rather than message text.
 func statusName(err error) string {
+	var partial *BatchPartialError
+	if errors.As(err, &partial) {
+		return "PARTIAL_FAILURE"
+	}
 	var statusErr *client.StatusError
 	if errors.As(err, &statusErr) {
 		return statusErr.StatusName()

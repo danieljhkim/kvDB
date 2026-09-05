@@ -21,7 +21,7 @@ var rootCmd = &cobra.Command{
 	Short: "KV CLI - a non-interactive client for the KvDB gRPC gateway",
 	Long: `kv is a non-interactive client for the KvDB gateway data plane.
 
-It speaks the KvGateway gRPC contract (Get, Put, Delete) over mutually
+It speaks the KvGateway gRPC contract (Get, BatchGet, Put, Delete) over mutually
 authenticated TLS. Keys and values are byte strings: use the file and stdin
 options to move arbitrary binary data without corrupting it.
 

@@ -55,6 +55,29 @@ type ReadOptions struct {
 	HeadOnly    bool
 }
 
+// BatchReadResult reports one ordered BatchGet response. Results always align
+// with the supplied keys; a response that cannot preserve that contract is
+// rejected instead of being interpreted as successful zero values.
+type BatchReadResult struct {
+	RequestID string
+	Results   []BatchReadItem
+}
+
+// BatchReadItem is an individual BatchGet terminal result. Found distinguishes
+// a stored empty value from a missing key; Value is present whenever Found is
+// true unless HeadOnly was requested.
+type BatchReadItem struct {
+	Status         *StatusError
+	Outcome        gateway.BatchGetOutcome
+	Found          bool
+	Value          []byte
+	Version        uint64
+	AppliedVersion uint64
+	CreateTimeMs   uint64
+	UpdateTimeMs   uint64
+	ExpireTimeMs   uint64
+}
+
 // WriteOptions carries the request identity of a Put or Delete.
 type WriteOptions struct {
 	// RequestID is reused verbatim when set; otherwise a fresh identifier is
@@ -185,6 +208,65 @@ func (c *Client) Get(ctx context.Context, key []byte, options ReadOptions) (*Rea
 	}, nil
 }
 
+// BatchGet reads keys in one RPC. It preserves duplicate keys and input order;
+// per-key application statuses are returned as items so callers can report
+// partial outcomes without pretending that a missing value is success.
+func (c *Client) BatchGet(ctx context.Context, keys [][]byte, options ReadOptions) (*BatchReadResult, error) {
+	requestID := newRequestID()
+	request := &gateway.BatchGetRequest{
+		Ctx:      c.requestContext(requestID),
+		Keys:     keys,
+		HeadOnly: options.HeadOnly,
+	}
+	if options.Consistency != gateway.Consistency_CONSISTENCY_UNSPECIFIED {
+		request.Options = &gateway.ReadOptions{Consistency: options.Consistency}
+	}
+
+	response, err := c.api.BatchGet(ctx, request)
+	if err != nil {
+		return nil, &TransportError{Err: err}
+	}
+	if err := applicationError(response.GetStatus()); err != nil {
+		return nil, err
+	}
+	if len(response.GetResults()) != len(keys) {
+		return nil, malformedBatchResponse("result count does not match request key count")
+	}
+
+	result := &BatchReadResult{RequestID: requestID, Results: make([]BatchReadItem, len(keys))}
+	for index, item := range response.GetResults() {
+		if item == nil {
+			return nil, malformedBatchResponse(fmt.Sprintf("result %d is missing", index))
+		}
+		if item.GetStatus() == nil {
+			return nil, malformedBatchResponse(fmt.Sprintf("result %d has no status", index))
+		}
+		if item.GetOutcome() == gateway.BatchGetOutcome_BATCH_GET_OUTCOME_UNSPECIFIED {
+			return nil, malformedBatchResponse(fmt.Sprintf("result %d has no terminal outcome", index))
+		}
+		status := statusError(item.GetStatus())
+		kv := item.GetKv()
+		result.Results[index] = BatchReadItem{
+			Status:         status,
+			Outcome:        item.GetOutcome(),
+			Found:          status.Code == gateway.Status_OK && kv != nil,
+			AppliedVersion: item.GetAppliedVersion(),
+		}
+		if kv != nil {
+			result.Results[index].Value = kv.GetValue()
+			result.Results[index].Version = kv.GetVersion()
+			result.Results[index].CreateTimeMs = kv.GetCreateTimeMs()
+			result.Results[index].UpdateTimeMs = kv.GetUpdateTimeMs()
+			result.Results[index].ExpireTimeMs = kv.GetExpireTimeMs()
+		}
+	}
+	return result, nil
+}
+
+func malformedBatchResponse(message string) error {
+	return &StatusError{Code: gateway.Status_INTERNAL, Message: "malformed BatchGet response: " + message}
+}
+
 // Put writes one key. The write is attempted exactly once: an ambiguous
 // outcome is reported, never retried here.
 func (c *Client) Put(ctx context.Context, key, value []byte, options WriteOptions) (*WriteResult, error) {
@@ -240,12 +322,16 @@ func (o WriteOptions) requestID() string {
 // other than OK. A response without a status is treated as INTERNAL rather
 // than as success.
 func applicationError(status *gateway.Status) error {
-	if status.GetCode() == gateway.Status_OK {
-		return nil
-	}
 	if status == nil {
 		return &StatusError{Code: gateway.Status_INTERNAL, Message: "gateway returned no status"}
 	}
+	if status.GetCode() == gateway.Status_OK {
+		return nil
+	}
+	return statusError(status)
+}
+
+func statusError(status *gateway.Status) *StatusError {
 	return &StatusError{
 		Code:         status.GetCode(),
 		Message:      status.GetMessage(),

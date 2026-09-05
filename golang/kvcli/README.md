@@ -13,13 +13,15 @@ uses internally.
 | Command | Aliases | Description |
 | --- | --- | --- |
 | `kv get [key]` | — | Read one key. Value bytes go to stdout, outcome to stderr. |
+| `kv batch-get --input path` | — | Read an ordered JSON array of base64 keys in one RPC. |
 | `kv put [key] [value]` | `set` | Write one key. |
 | `kv del [key]` | `delete` | Delete one key. |
 | `kv ping [key]` | — | One bounded, head-only `Get` that proves reachability. |
 
 There is **no interactive mode and no line protocol**. `kv connect` and
 `kv --interactive` exist only to reject the removed behavior with an
-explanation. `BatchGet` is not exposed by the CLI.
+explanation. `batch-get` is the only multi-key command; it uses one `BatchGet`
+RPC and does not retry it automatically.
 
 ---
 
@@ -126,6 +128,7 @@ cat payload.bin | kv put config --value-file -
 kv get --key-file ./key.bin --raw > value.bin   # stdout gets only the value
 kv get --key-file ./key.bin --output-file value.bin
 kv get config --head                            # metadata only, no value bytes
+printf '["Y29uZmln","AAH/"]' | kv batch-get --input - > results.json
 ```
 
 Output rules:
@@ -137,6 +140,12 @@ Output rules:
 - `put` and `del` write `status=OK version=... request_id=...` to stdout.
 - `--consistency strong|eventual` selects the read consistency; the default
   leaves the server policy in place.
+- `batch-get --input <path|->` accepts one JSON array of standard-base64 key
+  strings (up to 1 MiB and 1024 keys) from a file or stdin. Its stdout is one
+  versioned JSON document. Each item retains `request_index` and `key_base64`,
+  with an item `status`, terminal `outcome`, and metadata. A found empty value
+  has `value_base64: ""`; a missing key has `status: "NOT_FOUND"` and omits
+  `value_base64`. This preserves duplicates and partial outcomes for scripts.
 
 ---
 
@@ -154,6 +163,12 @@ the proto for application failures, the gRPC code name for transport failures.
 | `3` | Transport failure (for example `DeadlineExceeded`, `Unauthenticated`). |
 | `4` | `NOT_FOUND` — the key does not exist, which is distinct from an empty value. |
 | `5` | `WRITE_OUTCOME_UNKNOWN` — the write may or may not have been applied. |
+
+For `batch-get`, a response with any non-OK item status or non-`COMPLETED`
+terminal outcome writes the full JSON document and exits `2`. A top-level
+application failure writes no document and exits `2`; a deadline, cancellation,
+or other gRPC transport failure writes no document and exits `3`. The command
+never replays or retries a BatchGet request.
 
 ### Write identity and retries
 

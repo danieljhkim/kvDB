@@ -10,6 +10,7 @@ option java_multiple_files = true;
 // ============================
 service KvGateway {
   rpc Get(GetRequest) returns (GetResponse);
+  rpc BatchGet(BatchGetRequest) returns (BatchGetResponse);
   rpc Put(PutRequest) returns (PutResponse);
   rpc Delete(DeleteRequest) returns (DeleteResponse);
 }
@@ -123,6 +124,7 @@ message Status {
     // The node may have committed a non-idempotent write, but the gateway did
     // not receive a definitive response and therefore did not replay it.
     WRITE_OUTCOME_UNKNOWN = 14;
+    CANCELLED = 15;
   }
 
   Code code = 1;
@@ -156,6 +158,54 @@ message GetResponse {
   // Shard-wide committed high-water mark applied by the serving node. Clients
   // may compare this across EVENTUAL reads to make staleness decisions.
   uint64 applied_version = 3;
+}
+
+// ============================
+// BatchGet
+// ============================
+
+message BatchGetRequest {
+  RequestContext ctx = 1;
+
+  // Results preserve this order exactly. Repeated and binary keys are not
+  // coalesced or converted to text.
+  repeated bytes keys = 2;
+
+  // Shared by every independent read in this request.
+  ReadOptions options = 3;
+
+  // If true, every found result omits value bytes while retaining metadata.
+  bool head_only = 4;
+}
+
+enum BatchGetOutcome {
+  BATCH_GET_OUTCOME_UNSPECIFIED = 0;
+  COMPLETED = 1;
+  DEADLINE_EXCEEDED = 2;
+  CANCELLED = 3;
+  RESPONSE_BUDGET_EXHAUSTED = 4;
+}
+
+message BatchGetResult {
+  // Echoes the corresponding input key, including for errors.
+  bytes key = 1;
+  Status status = 2;
+
+  // Present if found. Version and timestamps have the same meaning as Get.
+  KeyValue kv = 3;
+
+  // The serving node's shard-wide committed high-water mark, as in Get.
+  uint64 applied_version = 4;
+
+  // Distinguishes normal per-key completion from fanout termination.
+  BatchGetOutcome outcome = 5;
+}
+
+message BatchGetResponse {
+  // Request-wide validation status. OK means results contains exactly one
+  // entry per input key; individual results can still be unsuccessful.
+  Status status = 1;
+  repeated BatchGetResult results = 2;
 }
 
 // ============================

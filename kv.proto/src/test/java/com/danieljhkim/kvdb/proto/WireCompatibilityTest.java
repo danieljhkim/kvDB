@@ -5,6 +5,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.danieljhkim.kvdb.proto.gateway.BatchGetRequest;
+import com.danieljhkim.kvdb.proto.gateway.BatchGetResult;
+import com.danieljhkim.kvdb.proto.gateway.GetRequest;
+import com.danieljhkim.kvdb.proto.gateway.GetResponse;
+import com.danieljhkim.kvdb.proto.gateway.KvGatewayGrpc;
 import com.danieljhkim.kvdb.proto.gateway.PutRequest;
 import com.danieljhkim.kvdb.proto.gateway.WriteOptions;
 import com.google.protobuf.ByteString;
@@ -65,6 +70,29 @@ class WireCompatibilityTest {
         PutRequest forwarded = PutRequest.parseFrom(parsed.toByteArray());
 
         assertEquals(List.of(7L), forwarded.getUnknownFields().getField(99).getVarintList());
+    }
+
+    @Test
+    void batchGetIsAdditiveAndUnaryGetWireFieldsRemainUnchanged() {
+        assertField(GetRequest.getDescriptor().findFieldByName("ctx"), 1, Type.MESSAGE);
+        assertField(GetRequest.getDescriptor().findFieldByName("key"), 2, Type.BYTES);
+        assertField(GetRequest.getDescriptor().findFieldByName("options"), 3, Type.MESSAGE);
+        assertField(GetRequest.getDescriptor().findFieldByName("head_only"), 4, Type.BOOL);
+        assertField(GetResponse.getDescriptor().findFieldByName("status"), 1, Type.MESSAGE);
+        assertField(GetResponse.getDescriptor().findFieldByName("kv"), 2, Type.MESSAGE);
+        assertField(GetResponse.getDescriptor().findFieldByName("applied_version"), 3, Type.UINT64);
+
+        assertField(BatchGetRequest.getDescriptor().findFieldByName("ctx"), 1, Type.MESSAGE);
+        assertField(BatchGetRequest.getDescriptor().findFieldByName("keys"), 2, Type.BYTES);
+        assertField(BatchGetRequest.getDescriptor().findFieldByName("options"), 3, Type.MESSAGE);
+        assertField(BatchGetRequest.getDescriptor().findFieldByName("head_only"), 4, Type.BOOL);
+        assertField(BatchGetResult.getDescriptor().findFieldByName("key"), 1, Type.BYTES);
+        assertField(BatchGetResult.getDescriptor().findFieldByName("status"), 2, Type.MESSAGE);
+        assertEquals(
+                List.of("Get", "BatchGet", "Put", "Delete"),
+                KvGatewayGrpc.getServiceDescriptor().getMethods().stream()
+                        .map(method -> method.getBareMethodName())
+                        .toList());
     }
 
     private static void assertField(com.google.protobuf.Descriptors.FieldDescriptor field, int number, Type type) {

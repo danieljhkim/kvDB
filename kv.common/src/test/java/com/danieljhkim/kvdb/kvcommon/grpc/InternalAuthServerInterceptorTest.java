@@ -6,7 +6,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.danieljhkim.kvdb.kvcommon.grpc.GrpcIdentity.Role;
 import com.danieljhkim.kvdb.proto.coordinator.CoordinatorGrpc;
+import com.danieljhkim.kvdb.proto.gateway.BatchGetRequest;
+import com.danieljhkim.kvdb.proto.gateway.BatchGetResponse;
 import com.danieljhkim.kvdb.proto.gateway.KvGatewayGrpc;
+import com.danieljhkim.kvdb.proto.gateway.RequestContext;
 import com.danieljhkim.kvdb.proto.raft.RaftServiceGrpc;
 import com.kvdb.proto.kvstore.KVServiceGrpc;
 import io.grpc.Metadata;
@@ -38,6 +41,7 @@ class InternalAuthServerInterceptorTest {
         assertAllowed(KVServiceGrpc.getRepairReplicaMethod(), "storage-node/node-1");
         assertAllowed(KVServiceGrpc.getFetchReplicaStateMethod(), "storage-node/node-1");
         assertAllowed(RaftServiceGrpc.getAppendEntriesMethod(), "coordinator/coordinator-1");
+        assertAllowed(KvGatewayGrpc.getBatchGetMethod(), "client/tenant-a/alice");
     }
 
     @Test
@@ -70,6 +74,24 @@ class InternalAuthServerInterceptorTest {
         intercept(call, new Metadata(), new AtomicReference<>());
 
         assertEquals(Status.Code.UNAUTHENTICATED, call.closedStatus.getCode());
+    }
+
+    @Test
+    void batchGetContextCannotOverrideVerifiedClientIdentity() {
+        RecordingCall<BatchGetRequest, BatchGetResponse> call = new RecordingCall<>(KvGatewayGrpc.getBatchGetMethod());
+        InternalAuthServerInterceptor interceptor =
+                new InternalAuthServerInterceptor(GrpcSecurityConfig.development(Role.COORDINATOR, "test-server"));
+        ServerCall.Listener<BatchGetRequest> listener = interceptor.interceptCall(
+                call,
+                identity("client/tenant-a/alice"),
+                (ignoredCall, ignoredHeaders) -> new ServerCall.Listener<>() {});
+
+        listener.onMessage(BatchGetRequest.newBuilder()
+                .setCtx(RequestContext.newBuilder().setTenantId("tenant-b").setPrincipal("mallory"))
+                .build());
+
+        assertEquals(Status.Code.PERMISSION_DENIED, call.closedStatus.getCode());
+        assertTrue(call.closedStatus.getDescription().contains("verified client identity"));
     }
 
     private static void assertAllowed(MethodDescriptor<?, ?> method, String identity) {

@@ -78,6 +78,7 @@ public final class InternalAuthServerInterceptor implements ServerInterceptor {
             entry(RaftServiceGrpc.getAddServerMethod(), Role.ADMIN),
             entry(RaftServiceGrpc.getRemoveServerMethod(), Role.ADMIN),
             entry(KvGatewayGrpc.getGetMethod(), Role.EXTERNAL_CLIENT, Role.ADMIN),
+            entry(KvGatewayGrpc.getBatchGetMethod(), Role.EXTERNAL_CLIENT, Role.ADMIN),
             entry(KvGatewayGrpc.getPutMethod(), Role.EXTERNAL_CLIENT, Role.ADMIN),
             entry(KvGatewayGrpc.getDeleteMethod(), Role.EXTERNAL_CLIENT, Role.ADMIN));
 
@@ -146,6 +147,9 @@ public final class InternalAuthServerInterceptor implements ServerInterceptor {
 
     private static RequestContext gatewayRequestContext(Object message) {
         if (message instanceof com.danieljhkim.kvdb.proto.gateway.GetRequest request) {
+            return request.getCtx();
+        }
+        if (message instanceof com.danieljhkim.kvdb.proto.gateway.BatchGetRequest request) {
             return request.getCtx();
         }
         if (message instanceof com.danieljhkim.kvdb.proto.gateway.PutRequest request) {

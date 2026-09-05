@@ -48,6 +48,9 @@ limits:
   maxValueBytes: 1048576
   maxMessageBytes: 2097152
   maxBatchEntries: 128
+  maxBatchAggregateKeyBytes: 65536
+  maxBatchGetConcurrency: 16
+  maxBatchGetResponseBytes: 2097152
   maxConcurrentRequestsPerConnection: 128
   maxContextFieldBytes: 512
 

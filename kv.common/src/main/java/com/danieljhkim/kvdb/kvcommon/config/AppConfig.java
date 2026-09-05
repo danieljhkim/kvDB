@@ -101,6 +101,9 @@ public class AppConfig {
         private int maxValueBytes = 1024 * 1024;
         private int maxMessageBytes = 2 * 1024 * 1024;
         private int maxBatchEntries = 128;
+        private int maxBatchAggregateKeyBytes = 64 * 1024;
+        private int maxBatchGetConcurrency = 16;
+        private int maxBatchGetResponseBytes = 2 * 1024 * 1024;
         private int maxConcurrentRequestsPerConnection = 128;
         private int maxContextFieldBytes = 512;
     }

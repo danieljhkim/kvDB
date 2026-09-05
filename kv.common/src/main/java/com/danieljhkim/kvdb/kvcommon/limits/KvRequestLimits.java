@@ -6,6 +6,7 @@ import com.danieljhkim.kvdb.kvcommon.exception.PayloadTooLargeException;
 import com.danieljhkim.kvdb.proto.gateway.RequestContext;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.MessageLite;
+import java.util.List;
 import java.util.Objects;
 import java.util.regex.Pattern;
 
@@ -19,6 +20,9 @@ public final class KvRequestLimits {
     private final int maxValueBytes;
     private final int maxMessageBytes;
     private final int maxBatchEntries;
+    private final int maxBatchAggregateKeyBytes;
+    private final int maxBatchGetConcurrency;
+    private final int maxBatchGetResponseBytes;
     private final int maxConcurrentRequestsPerConnection;
     private final int maxContextFieldBytes;
 
@@ -28,6 +32,10 @@ public final class KvRequestLimits {
         this.maxValueBytes = positive(effective.getMaxValueBytes(), "maxValueBytes");
         this.maxMessageBytes = positive(effective.getMaxMessageBytes(), "maxMessageBytes");
         this.maxBatchEntries = positive(effective.getMaxBatchEntries(), "maxBatchEntries");
+        this.maxBatchAggregateKeyBytes =
+                positive(effective.getMaxBatchAggregateKeyBytes(), "maxBatchAggregateKeyBytes");
+        this.maxBatchGetConcurrency = positive(effective.getMaxBatchGetConcurrency(), "maxBatchGetConcurrency");
+        this.maxBatchGetResponseBytes = positive(effective.getMaxBatchGetResponseBytes(), "maxBatchGetResponseBytes");
         this.maxConcurrentRequestsPerConnection =
                 positive(effective.getMaxConcurrentRequestsPerConnection(), "maxConcurrentRequestsPerConnection");
         this.maxContextFieldBytes = positive(effective.getMaxContextFieldBytes(), "maxContextFieldBytes");
@@ -58,6 +66,23 @@ public final class KvRequestLimits {
         bounded("batch entries", entries, maxBatchEntries);
     }
 
+    public void validateBatchKeys(List<ByteString> keys) {
+        Objects.requireNonNull(keys, "keys");
+        if (keys.isEmpty()) {
+            throw new InvalidRequestException("BatchGet requires at least one key");
+        }
+        validateBatchSize(keys.size());
+        long aggregateBytes = 0;
+        for (ByteString key : keys) {
+            validateKey(key);
+            aggregateBytes += key.size();
+            if (aggregateBytes > maxBatchAggregateKeyBytes) {
+                throw new PayloadTooLargeException("aggregate key bytes exceeds configured limit (actual="
+                        + aggregateBytes + ", max=" + maxBatchAggregateKeyBytes + ")");
+            }
+        }
+    }
+
     public void validateWriteContext(RequestContext context) {
         Objects.requireNonNull(context, "context");
         if (context.getRequestId().isBlank()) {
@@ -83,6 +108,14 @@ public final class KvRequestLimits {
 
     public int maxBatchEntries() {
         return maxBatchEntries;
+    }
+
+    public int maxBatchGetConcurrency() {
+        return maxBatchGetConcurrency;
+    }
+
+    public int maxBatchGetResponseBytes() {
+        return maxBatchGetResponseBytes;
     }
 
     private void boundedUtf8(String field, String value) {

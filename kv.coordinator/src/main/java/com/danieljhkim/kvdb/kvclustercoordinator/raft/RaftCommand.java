@@ -16,7 +16,8 @@ public sealed interface RaftCommand
                 RaftCommand.RegisterNode,
                 RaftCommand.SetNodeStatus,
                 RaftCommand.SetShardReplicas,
-                RaftCommand.SetShardLeader {
+                RaftCommand.SetShardLeader,
+                RaftCommand.NoOp {
 
     /**
      * Returns a human-readable description of this command.
@@ -26,6 +27,14 @@ public sealed interface RaftCommand
     // ============================
     // Command Types
     // ============================
+
+    /** Internal command appended by a new leader to establish a commit in its current term. */
+    record NoOp() implements RaftCommand {
+        @Override
+        public String describe() {
+            return "NoOp";
+        }
+    }
 
     /**
      * Initializes the shard map with the given configuration. Should only be called once when bootstrapping the

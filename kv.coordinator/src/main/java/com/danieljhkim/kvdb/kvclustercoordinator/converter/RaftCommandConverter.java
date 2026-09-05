@@ -14,6 +14,7 @@ public class RaftCommandConverter {
                 com.danieljhkim.kvdb.proto.raft.RaftCommand.newBuilder();
 
         switch (command) {
+            case RaftCommand.NoOp ignored -> builder.setNoOp(com.danieljhkim.kvdb.proto.raft.NoOp.getDefaultInstance());
             case RaftCommand.InitShards cmd ->
                 builder.setInitShards(com.danieljhkim.kvdb.proto.raft.InitShards.newBuilder()
                         .setNumShards(cmd.numShards())
@@ -51,6 +52,7 @@ public class RaftCommandConverter {
      */
     public static RaftCommand fromProto(com.danieljhkim.kvdb.proto.raft.RaftCommand proto) {
         return switch (proto.getCommandCase()) {
+            case NO_OP -> new RaftCommand.NoOp();
             case INIT_SHARDS -> {
                 com.danieljhkim.kvdb.proto.raft.InitShards initShards = proto.getInitShards();
                 yield new RaftCommand.InitShards(initShards.getNumShards(), initShards.getReplicationFactor());

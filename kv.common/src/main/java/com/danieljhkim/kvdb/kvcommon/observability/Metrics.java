@@ -36,16 +36,21 @@ public final class Metrics {
         COUNTERS.forEach((key, counter) ->
                 output.append(key).append(' ').append(counter.sum()).append('\n'));
         SUMS.forEach((key, sum) -> {
-            output.append(key).append("_sum ").append(sum.sum()).append('\n');
+            output.append(sampleName(key, "_sum")).append(' ').append(sum.sum()).append('\n');
             LongAdder count = COUNTS.get(key);
-            output.append(key)
-                    .append("_count ")
+            output.append(sampleName(key, "_count"))
+                    .append(' ')
                     .append(count == null ? 0 : count.sum())
                     .append('\n');
         });
         GAUGES.forEach((key, gauge) ->
                 output.append(key).append(' ').append(gauge.getAsDouble()).append('\n'));
         return output.toString();
+    }
+
+    private static String sampleName(String key, String suffix) {
+        int labelsStart = key.indexOf('{');
+        return labelsStart < 0 ? key + suffix : key.substring(0, labelsStart) + suffix + key.substring(labelsStart);
     }
 
     private static String key(String name, String service, String method, String outcome) {

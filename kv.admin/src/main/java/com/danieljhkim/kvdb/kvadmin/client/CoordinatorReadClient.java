@@ -15,6 +15,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,6 +27,8 @@ public class CoordinatorReadClient {
 
     private static final Logger logger = LoggerFactory.getLogger(CoordinatorReadClient.class);
     private static final int MAX_RETRIES = 5;
+    private static final Pattern HOST = Pattern.compile(
+            "[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*");
 
     private final Map<String, ManagedChannel> channels = new ConcurrentHashMap<>();
     private final Map<String, CoordinatorGrpc.CoordinatorBlockingStub> stubs = new ConcurrentHashMap<>();
@@ -58,7 +61,7 @@ public class CoordinatorReadClient {
     private CoordinatorGrpc.CoordinatorBlockingStub getStub(String address) {
         return stubs.computeIfAbsent(address, addr -> {
                     ManagedChannel channel = channels.computeIfAbsent(addr, a -> {
-                        String[] parts = a.split(":");
+                        String[] parts = splitUsableAddress(a);
                         return channelFactory.create(parts[0], Integer.parseInt(parts[1]));
                     });
                     return CoordinatorGrpc.newBlockingStub(channel);
@@ -95,8 +98,8 @@ public class CoordinatorReadClient {
                     logger.info("Discovered leader: {}", address);
                     return getStub(address);
                 }
-                if (!response.getLeaderAddress().isEmpty()) {
-                    String hint = response.getLeaderAddress();
+                String hint = usableAddress(response.getLeaderAddress());
+                if (hint != null) {
                     // Verify the hinted leader
                     try {
                         GetCoordinatorLeaderResponse hintResponse =
@@ -159,7 +162,42 @@ public class CoordinatorReadClient {
         if (description == null) return null;
         String prefix = "Leader hint: ";
         int idx = description.indexOf(prefix);
-        return idx >= 0 ? description.substring(idx + prefix.length()).trim() : null;
+        return idx >= 0
+                ? usableAddress(description.substring(idx + prefix.length()).trim())
+                : null;
+    }
+
+    private String usableAddress(String address) {
+        return splitUsableAddressOrNull(address) == null ? null : address;
+    }
+
+    private String[] splitUsableAddress(String address) {
+        String[] parts = splitUsableAddressOrNull(address);
+        if (parts == null) {
+            throw Status.INVALID_ARGUMENT
+                    .withDescription("Invalid coordinator address")
+                    .asRuntimeException();
+        }
+        return parts;
+    }
+
+    private String[] splitUsableAddressOrNull(String address) {
+        if (address == null || !address.equals(address.trim())) return null;
+
+        int separator = address.lastIndexOf(':');
+        if (separator <= 0 || separator != address.indexOf(':')) return null;
+
+        String host = address.substring(0, separator);
+        String portText = address.substring(separator + 1);
+        if (!HOST.matcher(host).matches() || portText.isEmpty() || portText.length() > 5) return null;
+
+        int port = 0;
+        for (int i = 0; i < portText.length(); i++) {
+            char digit = portText.charAt(i);
+            if (digit < '0' || digit > '9') return null;
+            port = port * 10 + (digit - '0');
+        }
+        return port >= 1 && port <= 65535 ? new String[] {host, portText} : null;
     }
 
     public ShardMapSnapshotDto getShardMap() {

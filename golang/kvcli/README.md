@@ -134,6 +134,24 @@ printf '["bG9jYWwta2V5","bG9jYWwta2V5"]' | ./kv --security-mode development-plai
 ./kv --security-mode development-plaintext --address 127.0.0.1:7000 ping
 ```
 
+### Conditional writes and expiry
+
+`put` and `del` accept `--if-version <uint64>` to require the current version.
+Supplying `--if-version 0` is distinct from omitting it: it requires a missing
+key (whose current version is zero). `put` also accepts `--if-not-exists` for a
+create-only write and `--ttl <duration>` for expiry. Durations use Go syntax,
+such as `10m`, `500ms`, or `0s`; they must be exact milliseconds. `--ttl 0s`
+(and the default of no `--ttl`) means no expiry. Negative, overflow, and
+sub-millisecond TTL values are rejected before an RPC. Delete deliberately has
+neither a TTL nor create-only option.
+
+```bash
+kv put config initial --if-not-exists
+kv put config replacement --if-version 7
+kv put temporary value --ttl 10m
+kv del config --if-version 8
+```
+
 ---
 
 ## Binary-safe input and output

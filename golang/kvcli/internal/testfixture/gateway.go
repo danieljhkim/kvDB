@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -27,6 +28,9 @@ type Call struct {
 	HeadOnly           bool
 	Consistency        gateway.Consistency
 	RequireIdempotency bool
+	TtlMs              uint64
+	IfVersionEquals    *uint64
+	IfNotExists        bool
 }
 
 // Hooks replaces the default in-memory behavior for a single method.
@@ -38,8 +42,9 @@ type Hooks struct {
 }
 
 type entry struct {
-	value   []byte
-	version uint64
+	value     []byte
+	version   uint64
+	expiresAt time.Time
 }
 
 // Server is a KvGateway implementation backed by an in-memory store.
@@ -140,6 +145,7 @@ func (s *Server) Get(ctx context.Context, request *gateway.GetRequest) (*gateway
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.expireIfNeededLocked(string(request.GetKey()))
 	stored, found := s.data[string(request.GetKey())]
 	if !found {
 		return &gateway.GetResponse{
@@ -176,6 +182,7 @@ func (s *Server) BatchGet(ctx context.Context, request *gateway.BatchGetRequest)
 	defer s.mu.Unlock()
 	response := &gateway.BatchGetResponse{Status: &gateway.Status{Code: gateway.Status_OK}}
 	for _, key := range request.GetKeys() {
+		s.expireIfNeededLocked(string(key))
 		item := &gateway.BatchGetResult{
 			Key:     key,
 			Outcome: gateway.BatchGetOutcome_COMPLETED,
@@ -197,6 +204,7 @@ func (s *Server) BatchGet(ctx context.Context, request *gateway.BatchGetRequest)
 }
 
 func (s *Server) Put(ctx context.Context, request *gateway.PutRequest) (*gateway.PutResponse, error) {
+	options := request.GetOptions()
 	s.record(Call{
 		Method:             "Put",
 		RequestID:          request.GetCtx().GetRequestId(),
@@ -204,7 +212,10 @@ func (s *Server) Put(ctx context.Context, request *gateway.PutRequest) (*gateway
 		Principal:          request.GetCtx().GetPrincipal(),
 		Key:                request.GetKey(),
 		Value:              request.GetValue(),
-		RequireIdempotency: request.GetOptions().GetRequireIdempotency(),
+		RequireIdempotency: options.GetRequireIdempotency(),
+		TtlMs:              options.GetTtlMs(),
+		IfVersionEquals:    optionalVersion(options),
+		IfNotExists:        options.GetIfNotExists(),
 	})
 	if s.hooks.Put != nil {
 		return s.hooks.Put(ctx, request)
@@ -212,19 +223,40 @@ func (s *Server) Put(ctx context.Context, request *gateway.PutRequest) (*gateway
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	key := string(request.GetKey())
+	s.expireIfNeededLocked(key)
+	current, found := s.data[key]
+	if options.GetIfNotExists() && found {
+		return &gateway.PutResponse{Status: &gateway.Status{Code: gateway.Status_ALREADY_EXISTS, Message: "key already exists"}}, nil
+	}
+	if expected := optionalVersion(options); expected != nil {
+		actual := uint64(0)
+		if found {
+			actual = current.version
+		}
+		if actual != *expected {
+			return &gateway.PutResponse{Status: &gateway.Status{Code: gateway.Status_VERSION_MISMATCH, Message: "version mismatch"}}, nil
+		}
+	}
 	s.version++
-	s.data[string(request.GetKey())] = entry{value: request.GetValue(), version: s.version}
+	stored := entry{value: request.GetValue(), version: s.version}
+	if options.GetTtlMs() != 0 {
+		stored.expiresAt = time.Now().Add(time.Duration(options.GetTtlMs()) * time.Millisecond)
+	}
+	s.data[key] = stored
 	return &gateway.PutResponse{Status: &gateway.Status{Code: gateway.Status_OK}, Version: s.version}, nil
 }
 
 func (s *Server) Delete(ctx context.Context, request *gateway.DeleteRequest) (*gateway.DeleteResponse, error) {
+	options := request.GetOptions()
 	s.record(Call{
 		Method:             "Delete",
 		RequestID:          request.GetCtx().GetRequestId(),
 		TenantID:           request.GetCtx().GetTenantId(),
 		Principal:          request.GetCtx().GetPrincipal(),
 		Key:                request.GetKey(),
-		RequireIdempotency: request.GetOptions().GetRequireIdempotency(),
+		RequireIdempotency: options.GetRequireIdempotency(),
+		IfVersionEquals:    optionalVersion(options),
 	})
 	if s.hooks.Delete != nil {
 		return s.hooks.Delete(ctx, request)
@@ -232,12 +264,39 @@ func (s *Server) Delete(ctx context.Context, request *gateway.DeleteRequest) (*g
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, found := s.data[string(request.GetKey())]; !found {
+	key := string(request.GetKey())
+	s.expireIfNeededLocked(key)
+	current, found := s.data[key]
+	if expected := optionalVersion(options); expected != nil {
+		actual := uint64(0)
+		if found {
+			actual = current.version
+		}
+		if actual != *expected {
+			return &gateway.DeleteResponse{Status: &gateway.Status{Code: gateway.Status_VERSION_MISMATCH, Message: "version mismatch"}}, nil
+		}
+	}
+	if !found {
 		return &gateway.DeleteResponse{
 			Status: &gateway.Status{Code: gateway.Status_NOT_FOUND, Message: "key not found"},
 		}, nil
 	}
-	delete(s.data, string(request.GetKey()))
+	delete(s.data, key)
 	s.version++
 	return &gateway.DeleteResponse{Status: &gateway.Status{Code: gateway.Status_OK}, Version: s.version}, nil
+}
+
+func optionalVersion(options *gateway.WriteOptions) *uint64 {
+	if options == nil || options.IfVersionEquals == nil {
+		return nil
+	}
+	version := *options.IfVersionEquals
+	return &version
+}
+
+func (s *Server) expireIfNeededLocked(key string) {
+	stored, found := s.data[key]
+	if found && !stored.expiresAt.IsZero() && !time.Now().Before(stored.expiresAt) {
+		delete(s.data, key)
+	}
 }

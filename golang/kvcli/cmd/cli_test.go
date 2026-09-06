@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -365,6 +366,95 @@ func TestRequestIdIsGeneratedAndCanBeReusedDeliberately(t *testing.T) {
 	}
 	if calls[1].RequestID != reused || !calls[1].RequireIdempotency {
 		t.Fatalf("deliberate reuse was not sent: %+v", calls[1])
+	}
+}
+
+func TestConditionalWriteFlagsPreservePresenceAndSupportBinaryOperands(t *testing.T) {
+	server, connection := localGateway(t, testfixture.Hooks{})
+	keyPath := filepath.Join(t.TempDir(), "key.bin")
+	valuePath := filepath.Join(t.TempDir(), "value.bin")
+	if err := os.WriteFile(keyPath, binaryValue, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(valuePath, binaryValue, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, stderr, code := run(t, withArgs(connection,
+		"put", "--key-file", keyPath, "--value-file", valuePath, "--if-version", "0", "--if-not-exists", "--ttl", "10ms")...); code != ExitOK {
+		t.Fatalf("conditional binary put failed with %d: %s", code, stderr)
+	}
+	if _, stderr, code := run(t, withArgs(connection, "del", "--key-file", keyPath, "--if-version", "1")...); code != ExitOK {
+		t.Fatalf("conditional binary delete failed with %d: %s", code, stderr)
+	}
+
+	calls := server.Calls()
+	if len(calls) != 2 || calls[0].IfVersionEquals == nil || *calls[0].IfVersionEquals != 0 || !calls[0].IfNotExists || calls[0].TtlMs != 10 || !bytes.Equal(calls[0].Key, binaryValue) || !bytes.Equal(calls[0].Value, binaryValue) {
+		t.Fatalf("put flags were not carried byte-for-byte with presence: %+v", calls)
+	}
+	if calls[1].IfVersionEquals == nil || *calls[1].IfVersionEquals != 1 || calls[1].IfNotExists || calls[1].TtlMs != 0 {
+		t.Fatalf("delete should carry only its version condition: %+v", calls[1])
+	}
+}
+
+func TestConditionalConflictsLeaveStoredValuesUnchanged(t *testing.T) {
+	_, connection := localGateway(t, testfixture.Hooks{})
+	if _, stderr, code := run(t, withArgs(connection, "put", "key", "initial", "--if-not-exists")...); code != ExitOK {
+		t.Fatalf("create-only put failed with %d: %s", code, stderr)
+	}
+	_, stderr, code := run(t, withArgs(connection, "put", "key", "replacement", "--if-not-exists")...)
+	if code != ExitApplication || !strings.Contains(stderr, "ALREADY_EXISTS") {
+		t.Fatalf("create-only conflict must keep the stable application outcome, got %d %q", code, stderr)
+	}
+	_, stderr, code = run(t, withArgs(connection, "put", "key", "replacement", "--if-version", "999")...)
+	if code != ExitApplication || !strings.Contains(stderr, "VERSION_MISMATCH") {
+		t.Fatalf("stale update must keep the stable application outcome, got %d %q", code, stderr)
+	}
+	stdout, stderr, code := run(t, withArgs(connection, "get", "key", "--raw")...)
+	if code != ExitOK || stdout != "initial" {
+		t.Fatalf("conflicts must not alter the stored value, got %d %q (%s)", code, stdout, stderr)
+	}
+
+	_, stderr, code = run(t, withArgs(connection, "del", "key", "--if-version", "999")...)
+	if code != ExitApplication || !strings.Contains(stderr, "VERSION_MISMATCH") {
+		t.Fatalf("stale delete must keep the stable application outcome, got %d %q", code, stderr)
+	}
+	if _, stderr, code = run(t, withArgs(connection, "get", "key", "--raw")...); code != ExitOK {
+		t.Fatalf("stale delete changed the stored value: %d %s", code, stderr)
+	}
+
+	if _, stderr, code = run(t, withArgs(connection, "put", "key", "replacement", "--if-version", "1")...); code != ExitOK {
+		t.Fatalf("current-version update failed with %d: %s", code, stderr)
+	}
+	if _, stderr, code = run(t, withArgs(connection, "del", "key", "--if-version", "2")...); code != ExitOK {
+		t.Fatalf("current-version delete failed with %d: %s", code, stderr)
+	}
+}
+
+func TestTTLAndInvalidWriteFlagsFailBeforeRPC(t *testing.T) {
+	server, connection := localGateway(t, testfixture.Hooks{})
+	if _, stderr, code := run(t, withArgs(connection, "put", "ephemeral", "value", "--ttl", "20ms")...); code != ExitOK {
+		t.Fatalf("TTL put failed with %d: %s", code, stderr)
+	}
+	time.Sleep(40 * time.Millisecond)
+	if _, _, code := run(t, withArgs(connection, "get", "ephemeral", "--raw")...); code != ExitNotFound {
+		t.Fatalf("expired value should be missing, got exit %d", code)
+	}
+
+	for _, args := range [][]string{
+		{"put", "k", "v", "--ttl=-1s"},
+		{"put", "k", "v", "--ttl=1ns"},
+		{"put", "k", "v", "--ttl=999999999999999999999999h"},
+		{"put", "k", "v", "--if-version=-1"},
+		{"put", "k", "v", "--if-version=18446744073709551616"},
+	} {
+		_, stderr, code := run(t, withArgs(connection, args...)...)
+		if code != ExitUsage {
+			t.Fatalf("invalid flags %v must fail as usage, got %d %q", args, code, stderr)
+		}
+	}
+	if len(server.Calls()) != 2 {
+		t.Fatalf("invalid flags must not issue RPCs: %+v", server.Calls())
 	}
 }
 

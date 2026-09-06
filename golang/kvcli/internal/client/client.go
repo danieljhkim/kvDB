@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -81,7 +82,9 @@ type BatchReadItem struct {
 	ExpireTimeMs   uint64
 }
 
-// WriteOptions carries the request identity of a Put or Delete.
+// WriteOptions carries the request identity and conditional write options of a
+// Put or Delete. TTL is valid for Put only; callers must leave it at zero for
+// Delete. A zero TTL means the value does not expire.
 type WriteOptions struct {
 	// RequestID is reused verbatim when set; otherwise a fresh identifier is
 	// generated for this attempt.
@@ -90,6 +93,15 @@ type WriteOptions struct {
 	// reports WRITE_OUTCOME_UNKNOWN instead of replaying an ambiguous write;
 	// this client never retries a write on its own.
 	AllowServerReplay bool
+	// IfVersionEquals, when non-nil, requires the current version to match.
+	// A pointer preserves the distinction between no condition and version zero.
+	IfVersionEquals *uint64
+	// IfNotExists requires that a Put create a missing key. It is not valid for
+	// Delete.
+	IfNotExists bool
+	// TTL is the lifetime for a Put. It must be non-negative and an exact
+	// number of milliseconds because the wire contract uses milliseconds.
+	TTL time.Duration
 }
 
 // StatusError is a non-OK application status carried inside a response body.
@@ -299,12 +311,16 @@ func malformedBatchResponse(message string) error {
 // Put writes one key. The write is attempted exactly once: an ambiguous
 // outcome is reported, never retried here.
 func (c *Client) Put(ctx context.Context, key, value []byte, options WriteOptions) (*WriteResult, error) {
+	writeOptions, err := options.protoWriteOptions()
+	if err != nil {
+		return nil, err
+	}
 	requestID := options.requestID()
 	response, err := c.api.Put(ctx, &gateway.PutRequest{
 		Ctx:     c.requestContext(requestID),
 		Key:     key,
 		Value:   value,
-		Options: &gateway.WriteOptions{RequireIdempotency: options.AllowServerReplay},
+		Options: writeOptions,
 	})
 	if err != nil {
 		return nil, &TransportError{Err: err}
@@ -317,11 +333,21 @@ func (c *Client) Put(ctx context.Context, key, value []byte, options WriteOption
 
 // Delete removes one key with the same single-attempt guarantee as Put.
 func (c *Client) Delete(ctx context.Context, key []byte, options WriteOptions) (*WriteResult, error) {
+	if options.IfNotExists {
+		return nil, errors.New("if-not-exists is not valid for delete")
+	}
+	if options.TTL != 0 {
+		return nil, errors.New("TTL is not valid for delete")
+	}
+	writeOptions, err := options.protoWriteOptions()
+	if err != nil {
+		return nil, err
+	}
 	requestID := options.requestID()
 	response, err := c.api.Delete(ctx, &gateway.DeleteRequest{
 		Ctx:     c.requestContext(requestID),
 		Key:     key,
-		Options: &gateway.WriteOptions{RequireIdempotency: options.AllowServerReplay},
+		Options: writeOptions,
 	})
 	if err != nil {
 		return nil, &TransportError{Err: err}
@@ -345,6 +371,21 @@ func (o WriteOptions) requestID() string {
 		return o.RequestID
 	}
 	return newRequestID()
+}
+
+func (o WriteOptions) protoWriteOptions() (*gateway.WriteOptions, error) {
+	if o.TTL < 0 {
+		return nil, errors.New("TTL must not be negative")
+	}
+	if o.TTL%time.Millisecond != 0 {
+		return nil, errors.New("TTL must be an exact number of milliseconds")
+	}
+	return &gateway.WriteOptions{
+		RequireIdempotency: o.AllowServerReplay,
+		TtlMs:              uint64(o.TTL / time.Millisecond),
+		IfVersionEquals:    o.IfVersionEquals,
+		IfNotExists:        o.IfNotExists,
+	}, nil
 }
 
 // applicationError converts a response Status into an error for every code

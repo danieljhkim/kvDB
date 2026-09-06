@@ -90,6 +90,7 @@ func TestConfigFileConfiguresSecurity(t *testing.T) {
 		"request:",
 		"  timeout: 250ms",
 		"  tenant_id: tenant-9",
+		"  principal: alice",
 		"",
 	}, "\n"))
 
@@ -100,7 +101,7 @@ func TestConfigFileConfiguresSecurity(t *testing.T) {
 	if cfg.Security.Mode != ModeDevelopmentPlaintext || cfg.Security.Deployment != "local" {
 		t.Fatalf("file did not configure security: %+v", cfg.Security)
 	}
-	if cfg.Request.Timeout != 250*time.Millisecond || cfg.Request.TenantID != "tenant-9" {
+	if cfg.Request.Timeout != 250*time.Millisecond || cfg.Request.TenantID != "tenant-9" || cfg.Request.Principal != "alice" {
 		t.Fatalf("file did not configure requests: %+v", cfg.Request)
 	}
 	if err := cfg.Validate(); err != nil {
@@ -122,6 +123,35 @@ func TestPlaintextRequiresADevelopmentDeployment(t *testing.T) {
 		if err := cfg.Validate(); err != nil {
 			t.Fatalf("plaintext must be allowed for KVDB_ENV=%q: %v", deployment, err)
 		}
+	}
+}
+
+func TestPlaintextRequiresACompleteDevelopmentIdentity(t *testing.T) {
+	for _, request := range []Request{
+		{},
+		{TenantID: "tenant-a"},
+		{Principal: "alice"},
+		{TenantID: "tenant/a", Principal: "alice"},
+		{TenantID: "tenant-a", Principal: "alice/bob"},
+		{TenantID: "tenant-a", Principal: " alice"},
+	} {
+		cfg := validPlaintextConfig()
+		cfg.Request = request
+		cfg.Request.Timeout = DefaultTimeout
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("plaintext identity %+v must be rejected", request)
+		}
+	}
+
+	cfg := validPlaintextConfig()
+	cfg.Request.TenantID = "tenant-a"
+	cfg.Request.Principal = "alice"
+	identity, err := cfg.DevelopmentIdentity()
+	if err != nil {
+		t.Fatalf("complete development identity was rejected: %v", err)
+	}
+	if identity != "client/tenant-a/alice" {
+		t.Fatalf("unexpected development identity %q", identity)
 	}
 }
 
@@ -205,5 +235,7 @@ func validPlaintextConfig() *Config {
 	cfg := baseConfig()
 	cfg.Security.Mode = ModeDevelopmentPlaintext
 	cfg.Security.Deployment = "test"
+	cfg.Request.TenantID = "tenant-1"
+	cfg.Request.Principal = "operator-1"
 	return cfg
 }

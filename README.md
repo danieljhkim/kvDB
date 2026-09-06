@@ -10,7 +10,8 @@ KvDB is a Redis-like distributed key-value store implemented in Java, built arou
 
 > Note: KvDB exposes a gRPC API. A non-interactive command line client for the
 > gateway data plane ships in [`golang/kvcli`](golang/kvcli/README.md); it
-> supports `get`, `put`/`set`, `del`/`delete`, and `ping` only. There is no
+> supports `get`, ordered `batch-get`, `put`/`set`, `del`/`delete`, and `ping`.
+> There is no
 > interactive shell and no line protocol.
 
 ---
@@ -169,12 +170,13 @@ the generated bindings for `kv.proto/src/main/proto/kvgateway.proto`; run
 make go-build                       # builds golang/kvcli/kv
 kv put greeting hello               # writes, prints status and version
 kv get greeting --raw > value.bin   # stdout receives exactly the stored bytes
+printf '["Z3JlZXRpbmc="]' | kv batch-get --input -
 kv del greeting
 kv ping                             # bounded head-only reachability probe
 ```
 
-Supported commands are `get`, `put` (alias `set`), `del` (alias `delete`), and
-`ping`. Keys and values are byte strings: `--key-file`, `--value-file`, and
+Supported commands are `get`, ordered `batch-get`, `put` (alias `set`), `del`
+(alias `delete`), and `ping`. Keys and values are byte strings: `--key-file`, `--value-file`, and
 `--output-file` (with `-` for standard input) move arbitrary binary data,
 including zero bytes and data that is not valid UTF-8. The removed interactive
 line protocol is rejected explicitly: `kv connect` and `kv --interactive`
@@ -185,7 +187,10 @@ The client uses the same transport policy as the cluster
 only when `KVDB_ENV` is `dev`, `development`, `local`, or `test`. Client
 credentials come from `KVDB_CLIENT_TLS_TRUST_BUNDLE`,
 `KVDB_CLIENT_TLS_CERT_CHAIN`, and `KVDB_CLIENT_TLS_PRIVATE_KEY` (or the
-matching flags). Every RPC is deadline-bounded, non-OK application and
+matching flags). Local plaintext also requires `KVDB_CLIENT_TENANT_ID` and
+`KVDB_CLIENT_PRINCIPAL` (or `--tenant` and `--principal`); it sends the
+development-only `client/<tenant>/<principal>` identity required by the local
+gateway. Every RPC is deadline-bounded, non-OK application and
 transport statuses exit nonzero with stable status names, and an ambiguous
 write outcome is reported rather than retried. See
 [golang/kvcli/README.md](golang/kvcli/README.md).

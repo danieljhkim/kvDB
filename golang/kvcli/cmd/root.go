@@ -58,8 +58,8 @@ func init() {
 	flags.String("tls-cert", "", "client certificate chain presented to the gateway")
 	flags.String("tls-key", "", "private key for the client certificate chain")
 	flags.String("server-name", "", "name verified against the gateway certificate (defaults to the host)")
-	flags.String("tenant", "", "informational RequestContext.tenant_id")
-	flags.String("principal", "", "informational RequestContext.principal")
+	flags.String("tenant", "", "RequestContext tenant; required for development-plaintext identity")
+	flags.String("principal", "", "RequestContext principal; required for development-plaintext identity")
 
 	rootCmd.Flags().BoolP("interactive", "i", false, "unsupported: the interactive line protocol was removed")
 }

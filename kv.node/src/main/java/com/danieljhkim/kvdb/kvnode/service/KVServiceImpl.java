@@ -70,9 +70,9 @@ public class KVServiceImpl extends KVServiceGrpc.KVServiceImplBase {
         this.shardStores = shardStores;
         this.shardRouter = new ShardRouter(shardMapCache, nodeId);
         this.leadershipValidator = new ShardLeadershipValidator(shardMapCache, nodeId);
-        this.replicationManager =
-                new ReplicationManager(nodeId, shardMapCache, shardStores, replicaWriteClient, replicationTimeout);
         this.limits = new KvRequestLimits(limitsConfig);
+        this.replicationManager = new ReplicationManager(
+                nodeId, shardMapCache, shardStores, replicaWriteClient, replicationTimeout, limits);
     }
 
     /**

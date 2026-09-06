@@ -6,8 +6,11 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
+import com.danieljhkim.kvdb.kvcommon.config.AppConfig;
 import com.danieljhkim.kvdb.kvcommon.exception.NodeUnavailableException;
+import com.danieljhkim.kvdb.kvcommon.limits.KvRequestLimits;
 import com.danieljhkim.kvdb.kvnode.client.ReplicaWriteClient;
+import com.danieljhkim.kvdb.kvnode.service.KVServiceImpl;
 import com.danieljhkim.kvdb.kvnode.storage.ShardKVStore;
 import com.danieljhkim.kvdb.kvnode.storage.ShardStoreRegistry;
 import com.danieljhkim.kvdb.proto.coordinator.ClusterState;
@@ -25,6 +28,7 @@ import com.kvdb.proto.kvstore.ReplicatedMutation;
 import com.kvdb.proto.kvstore.ReplicationAck;
 import com.kvdb.proto.kvstore.ReplicationPhase;
 import com.kvdb.proto.kvstore.WriteDurability;
+import io.grpc.stub.StreamObserver;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -203,6 +207,87 @@ class ReplicationManagerTest {
 
         fixture.leader.shutdown();
         fixture.followers.values().forEach(ShardKVStore::shutdown);
+    }
+
+    @Test
+    void repairBatchesStayWithinReceiverLimitsAndConvergeNearLimitValuesAndTombstones() {
+        ShardRecord shard = repairShard();
+        AppConfig.LimitsConfig limits = limits(128, 300, 2);
+        ShardStoreRegistry leader = registry("bounded-repair-leader");
+        ShardStoreRegistry follower = registry("bounded-repair-follower");
+        KVServiceImpl receiver =
+                new KVServiceImpl("node-2", cache(shard), follower, null, Duration.ofMillis(40), limits);
+        ReceiverValidatingReplicaClient client = new ReceiverValidatingReplicaClient(receiver);
+        manager = new ReplicationManager(
+                "node-1", cache(shard), leader, client, Duration.ofMillis(40), new KvRequestLimits(limits));
+        try {
+            String nearLimit = "v".repeat(128);
+            manager.replicateSet("shard-0", shard, "first", nearLimit, "near-limit-1", WriteDurability.LOCAL_SYNC);
+            manager.replicateSet("shard-0", shard, "removed", nearLimit, "near-limit-2", WriteDurability.LOCAL_SYNC);
+            manager.replicateDelete("shard-0", shard, "removed", "near-limit-delete", WriteDurability.LOCAL_SYNC);
+            manager.replicateSet("shard-0", shard, "last", nearLimit, "near-limit-3", WriteDurability.LOCAL_SYNC);
+
+            for (int pass = 0; pass < 8; pass++) {
+                manager.repairReplicas("shard-0", shard);
+                if (manager.repairProgress("node-2:9000", "shard-0").complete()) {
+                    break;
+                }
+            }
+
+            ShardKVStore repaired = follower.getOrCreate("shard-0");
+            assertEquals(nearLimit, repaired.get("first"));
+            assertEquals("(nil)", repaired.get("removed"));
+            assertEquals(nearLimit, repaired.get("last"));
+            assertTrue(manager.repairProgress("node-2:9000", "shard-0").complete());
+            assertTrue(client.repairRequests.size() >= 2);
+            client.repairRequests.forEach(request -> {
+                assertTrue(request.getCommittedMutationsCount() <= 2);
+                assertTrue(request.getSerializedSize() <= 300);
+            });
+        } finally {
+            receiver.shutdownReplication();
+            leader.shutdown();
+            follower.shutdown();
+        }
+    }
+
+    @Test
+    void repairSkipsAnIndividuallyUntransferableMutationAndAdvancesToLaterMutations() {
+        ShardRecord shard = repairShard();
+        AppConfig.LimitsConfig limits = limits(128, 150, 1);
+        ShardStoreRegistry leader = registry("untransferable-repair-leader");
+        ShardStoreRegistry follower = registry("untransferable-repair-follower");
+        KVServiceImpl receiver =
+                new KVServiceImpl("node-2", cache(shard), follower, null, Duration.ofMillis(40), limits);
+        ReceiverValidatingReplicaClient client = new ReceiverValidatingReplicaClient(receiver);
+        manager = new ReplicationManager(
+                "node-1", cache(shard), leader, client, Duration.ofMillis(40), new KvRequestLimits(limits));
+        try {
+            manager.replicateSet(
+                    "shard-0", shard, "too-large", "v".repeat(128), "untransferable", WriteDurability.LOCAL_SYNC);
+            manager.replicateSet("shard-0", shard, "after", "ok", "after-untransferable", WriteDurability.LOCAL_SYNC);
+
+            manager.repairReplicas("shard-0", shard);
+            assertTrue(client.repairRequests.isEmpty());
+            assertFalse(manager.repairProgress("node-2:9000", "shard-0").complete());
+
+            manager.repairReplicas("shard-0", shard);
+            assertEquals("ok", follower.getOrCreate("shard-0").get("after"));
+            assertEquals("(nil)", follower.getOrCreate("shard-0").get("too-large"));
+            assertEquals(1, client.repairRequests.size());
+            assertEquals(
+                    "after",
+                    client.repairRequests
+                            .getFirst()
+                            .getCommittedMutations(0)
+                            .getKey()
+                            .toStringUtf8());
+            assertTrue(manager.repairProgress("node-2:9000", "shard-0").complete());
+        } finally {
+            receiver.shutdownReplication();
+            leader.shutdown();
+            follower.shutdown();
+        }
     }
 
     @Test
@@ -414,6 +499,25 @@ class ReplicationManagerTest {
                 .build();
     }
 
+    private static ShardRecord repairShard() {
+        return ShardRecord.newBuilder()
+                .setShardId("shard-0")
+                .setEpoch(3)
+                .setLeader("node-1")
+                .addReplicas("node-1")
+                .addReplicas("node-2")
+                .build();
+    }
+
+    private static AppConfig.LimitsConfig limits(int maxValueBytes, int maxMessageBytes, int maxBatchEntries) {
+        AppConfig.LimitsConfig limits = new AppConfig.LimitsConfig();
+        limits.setMaxKeyBytes(64);
+        limits.setMaxValueBytes(maxValueBytes);
+        limits.setMaxMessageBytes(maxMessageBytes);
+        limits.setMaxBatchEntries(maxBatchEntries);
+        return limits;
+    }
+
     private static ReplicatedMutation mutation(long version, MutationKind kind, String key, String value) {
         return ReplicatedMutation.newBuilder()
                 .setRequestId("request-" + version)
@@ -615,6 +719,49 @@ class ReplicationManagerTest {
                 }
             }
         }
+    }
+
+    private static final class ReceiverValidatingReplicaClient extends ReplicaWriteClient {
+        private final KVServiceImpl receiver;
+        private final List<ReplicaRepairRequest> repairRequests = new ArrayList<>();
+
+        private ReceiverValidatingReplicaClient(KVServiceImpl receiver) {
+            super(Duration.ofMillis(20));
+            this.receiver = receiver;
+        }
+
+        @Override
+        public ReplicaRepairResponse repairReplica(String targetAddress, ReplicaRepairRequest request) {
+            repairRequests.add(request);
+            CapturingObserver<ReplicaRepairResponse> observer = new CapturingObserver<>();
+            receiver.repairReplica(request, observer);
+            return observer.value;
+        }
+
+        @Override
+        public ReplicaStateResponse fetchReplicaState(String targetAddress, ReplicaStateRequest request) {
+            return ReplicaStateResponse.newBuilder()
+                    .setSuccess(true)
+                    .setDurable(true)
+                    .build();
+        }
+    }
+
+    private static final class CapturingObserver<T> implements StreamObserver<T> {
+        private T value;
+
+        @Override
+        public void onNext(T value) {
+            this.value = value;
+        }
+
+        @Override
+        public void onError(Throwable throwable) {
+            throw new AssertionError(throwable);
+        }
+
+        @Override
+        public void onCompleted() {}
     }
 
     private static final class FixedRegistry extends ShardStoreRegistry {

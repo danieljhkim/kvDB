@@ -57,7 +57,7 @@ type Server struct {
 
 // Start listens on an ephemeral loopback port and serves until the test ends.
 // Passing nil credentials serves plaintext.
-func Start(t *testing.T, hooks Hooks, creds credentials.TransportCredentials) *Server {
+func Start(t *testing.T, hooks Hooks, creds credentials.TransportCredentials, options ...grpc.ServerOption) *Server {
 	t.Helper()
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -67,11 +67,11 @@ func Start(t *testing.T, hooks Hooks, creds credentials.TransportCredentials) *S
 
 	server := &Server{data: map[string]entry{}, hooks: hooks, address: listener.Addr().String()}
 
-	var options []grpc.ServerOption
+	serverOptions := options
 	if creds != nil {
-		options = append(options, grpc.Creds(creds))
+		serverOptions = append(serverOptions, grpc.Creds(creds))
 	}
-	grpcServer := grpc.NewServer(options...)
+	grpcServer := grpc.NewServer(serverOptions...)
 	gateway.RegisterKvGatewayServer(grpcServer, server)
 
 	done := make(chan struct{})

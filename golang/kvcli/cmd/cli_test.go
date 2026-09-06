@@ -75,6 +75,8 @@ func localGateway(t *testing.T, hooks testfixture.Hooks) (*testfixture.Server, [
 		"--config", configPath,
 		"--address", server.Address(),
 		"--security-mode", "development-plaintext",
+		"--tenant", "test-tenant",
+		"--principal", "test-principal",
 		"--timeout", "10s",
 	}
 }

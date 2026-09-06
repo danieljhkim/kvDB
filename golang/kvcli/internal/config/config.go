@@ -55,8 +55,8 @@ type Security struct {
 type Request struct {
 	// Timeout bounds a single RPC including connection establishment.
 	Timeout time.Duration
-	// TenantID and Principal populate RequestContext. Both are informational:
-	// the server authorizes on the verified certificate identity only.
+	// TenantID and Principal populate RequestContext. In development plaintext
+	// they also form the required, forgeable local client identity.
 	TenantID  string `mapstructure:"tenant_id"`
 	Principal string
 }
@@ -154,7 +154,8 @@ func (c *Config) Validate() error {
 			return fmt.Errorf(
 				"%s requires KVDB_ENV to be dev, development, local, or test", ModeDevelopmentPlaintext)
 		}
-		return nil
+		_, err := c.DevelopmentIdentity()
+		return err
 	case ModeMTLS:
 		for _, field := range []struct{ name, value string }{
 			{"KVDB_CLIENT_TLS_TRUST_BUNDLE (--tls-ca)", c.Security.TrustBundle},
@@ -173,6 +174,40 @@ func (c *Config) Validate() error {
 		return fmt.Errorf(
 			"security mode %q is not supported; use %s or %s", c.Security.Mode, ModeMTLS, ModeDevelopmentPlaintext)
 	}
+}
+
+// DevelopmentIdentity returns the identity required by the gateway's
+// development-plaintext authentication boundary. It deliberately validates
+// each segment before dialing so malformed local configuration cannot turn
+// into an unauthenticated RPC.
+func (c *Config) DevelopmentIdentity() (string, error) {
+	tenant, err := developmentIdentityComponent("KVDB_CLIENT_TENANT_ID (--tenant)", c.Request.TenantID)
+	if err != nil {
+		return "", err
+	}
+	principal, err := developmentIdentityComponent("KVDB_CLIENT_PRINCIPAL (--principal)", c.Request.Principal)
+	if err != nil {
+		return "", err
+	}
+	return "client/" + tenant + "/" + principal, nil
+}
+
+func developmentIdentityComponent(name, value string) (string, error) {
+	if value == "" || strings.TrimSpace(value) == "" {
+		return "", fmt.Errorf("%s is required when development-plaintext is enabled", name)
+	}
+	if strings.TrimSpace(value) != value {
+		return "", fmt.Errorf("%s must not have leading or trailing whitespace", name)
+	}
+	if strings.Contains(value, "/") {
+		return "", fmt.Errorf("%s must not contain /", name)
+	}
+	for _, character := range value {
+		if character < 0x21 || character > 0x7e {
+			return "", fmt.Errorf("%s must contain printable ASCII characters only", name)
+		}
+	}
+	return value, nil
 }
 
 func readableFile(path string) error {

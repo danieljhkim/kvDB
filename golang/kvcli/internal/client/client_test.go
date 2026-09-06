@@ -8,7 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
 	grpccodes "google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	grpcstatus "google.golang.org/grpc/status"
 
 	"github.com/danieljhkim/kv/internal/client"
@@ -79,6 +82,66 @@ func TestBinaryRoundTripPreservesEveryByte(t *testing.T) {
 	}
 	if _, err := kv.Get(context.Background(), binaryKey, client.ReadOptions{}); !client.IsStatus(err, gateway.Status_NOT_FOUND) {
 		t.Fatalf("expected NOT_FOUND after delete, got %v", err)
+	}
+}
+
+func TestDevelopmentPlaintextAttachesGatewayIdentity(t *testing.T) {
+	const expectedIdentity = "client/tenant-1/operator-1"
+	authenticate := func(ctx context.Context, request any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		identity := metadata.ValueFromIncomingContext(ctx, "x-kvdb-development-identity")
+		if len(identity) != 1 || identity[0] != expectedIdentity {
+			return nil, grpcstatus.Error(grpccodes.Unauthenticated, "development client identity is missing or malformed")
+		}
+		return handler(ctx, request)
+	}
+	server := testfixture.Start(t, testfixture.Hooks{}, nil, grpc.UnaryInterceptor(authenticate))
+
+	for _, identity := range []string{"", "client/tenant-1"} {
+		rawConnection, err := grpc.NewClient(server.Address(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			t.Fatalf("cannot create raw connection: %v", err)
+		}
+		ctx := context.Background()
+		if identity != "" {
+			ctx = metadata.NewOutgoingContext(ctx, metadata.Pairs("x-kvdb-development-identity", identity))
+		}
+		_, err = gateway.NewKvGatewayClient(rawConnection).Get(ctx, &gateway.GetRequest{})
+		_ = rawConnection.Close()
+		if grpcstatus.Code(err) != grpccodes.Unauthenticated {
+			t.Fatalf("identity %q should be rejected by the gateway authentication boundary, got %v", identity, err)
+		}
+	}
+
+	kv := dial(t, plaintextConfig(server.Address()))
+	_, err := kv.Get(context.Background(), []byte("missing"), client.ReadOptions{})
+	if !client.IsStatus(err, gateway.Status_NOT_FOUND) {
+		t.Fatalf("validated development identity did not pass gateway authentication: %v", err)
+	}
+}
+
+func TestMTLSDoesNotAttachDevelopmentIdentity(t *testing.T) {
+	pki := testfixture.NewPKI(t)
+	assertNoDevelopmentIdentity := func(ctx context.Context, request any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		if identity := metadata.ValueFromIncomingContext(ctx, "x-kvdb-development-identity"); len(identity) != 0 {
+			return nil, grpcstatus.Error(grpccodes.Unauthenticated, "development identity must not accompany mTLS")
+		}
+		return handler(ctx, request)
+	}
+	server := testfixture.Start(t, testfixture.Hooks{}, pki.ServerCredentials(), grpc.UnaryInterceptor(assertNoDevelopmentIdentity))
+	cfg := &config.Config{}
+	cfg.Server.Host, cfg.Server.Port = splitHostPort(server.Address())
+	cfg.Security.Mode = config.ModeMTLS
+	cfg.Security.TrustBundle = pki.CABundlePath
+	cfg.Security.CertChain = pki.ClientCertPath
+	cfg.Security.PrivateKey = pki.ClientKeyPath
+	cfg.Request.Timeout = 5 * time.Second
+	cfg.Request.TenantID = "tenant-1"
+	cfg.Request.Principal = "operator-1"
+
+	kv := dial(t, cfg)
+	_, err := kv.Get(context.Background(), []byte("missing"), client.ReadOptions{})
+	if !client.IsStatus(err, gateway.Status_NOT_FOUND) {
+		t.Fatalf("mTLS call should authenticate without development metadata: %v", err)
 	}
 }
 

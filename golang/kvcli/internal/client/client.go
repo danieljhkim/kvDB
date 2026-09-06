@@ -16,11 +16,14 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	grpcstatus "google.golang.org/grpc/status"
 
 	"github.com/danieljhkim/kv/internal/config"
 	gateway "github.com/danieljhkim/kv/internal/gen/kvdb/gateway"
 )
+
+const developmentIdentityHeader = "x-kvdb-development-identity"
 
 // Client is a bounded, non-interactive KvGateway client.
 type Client struct {
@@ -135,11 +138,37 @@ func Dial(cfg *config.Config) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	conn, err := grpc.NewClient(cfg.Address(), grpc.WithTransportCredentials(creds))
+	options := []grpc.DialOption{grpc.WithTransportCredentials(creds)}
+	if cfg.Security.Mode == config.ModeDevelopmentPlaintext {
+		identity, err := cfg.DevelopmentIdentity()
+		if err != nil {
+			return nil, err
+		}
+		options = append(options, grpc.WithUnaryInterceptor(developmentIdentityInterceptor(identity)))
+	}
+	conn, err := grpc.NewClient(cfg.Address(), options...)
 	if err != nil {
 		return nil, fmt.Errorf("cannot create gateway client for %s: %w", cfg.Address(), err)
 	}
 	return &Client{conn: conn, api: gateway.NewKvGatewayClient(conn), cfg: cfg}, nil
+}
+
+func developmentIdentityInterceptor(identity string) grpc.UnaryClientInterceptor {
+	return func(
+		ctx context.Context,
+		method string,
+		req, reply any,
+		connection *grpc.ClientConn,
+		invoker grpc.UnaryInvoker,
+		options ...grpc.CallOption,
+	) error {
+		outgoing, _ := metadata.FromOutgoingContext(ctx)
+		outgoing = outgoing.Copy()
+		// Set replaces any caller-provided value. Plaintext authentication is
+		// derived only from the validated client configuration.
+		outgoing.Set(developmentIdentityHeader, identity)
+		return invoker(metadata.NewOutgoingContext(ctx, outgoing), method, req, reply, connection, options...)
+	}
 }
 
 // Close releases the underlying connection.

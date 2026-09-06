@@ -95,12 +95,16 @@ The client follows the server policy documented in
 - `development-plaintext` must be selected explicitly **and** requires
   `KVDB_ENV` to be `dev`, `development`, `local`, or `test`. It is for local
   development only; development identities are forgeable and must never be used
-  on an untrusted network.
+  on an untrusted network. It also requires both a tenant and a principal. The
+  CLI sends `x-kvdb-development-identity: client/<tenant>/<principal>` on every
+  RPC, using `--tenant`/`--principal` or the matching environment variables.
+  Empty, partial, or malformed values are rejected before an RPC is attempted.
 - Any other mode, a missing credential file, or plaintext outside a development
   deployment is refused before a connection is attempted.
 
-`RequestContext.tenant_id` and `principal` are informational. The gateway
-authorizes on the verified certificate identity only.
+In mTLS mode, `RequestContext.tenant_id` and `principal` are optional request
+claims that must agree with the verified certificate identity when supplied;
+the CLI does not send development identity metadata in that mode.
 
 ```bash
 export KVDB_GRPC_SECURITY_MODE=mtls
@@ -109,8 +113,25 @@ export KVDB_CLIENT_TLS_CERT_CHAIN=/run/secrets/kvdb/client/tls.crt
 export KVDB_CLIENT_TLS_PRIVATE_KEY=/run/secrets/kvdb/client/tls.key
 kv --address gateway:7000 get greeting
 
-# local cluster started by `make run-cluster`
-KVDB_ENV=local kv --security-mode development-plaintext --address 127.0.0.1:7000 ping
+# local cluster started by `make run-cluster`; this identity is development-only
+export KVDB_ENV=local
+export KVDB_CLIENT_TENANT_ID=local
+export KVDB_CLIENT_PRINCIPAL=kvcli
+kv --security-mode development-plaintext --address 127.0.0.1:7000 ping
+```
+
+### Local cluster smoke path
+
+After `make go-build`, `make run-cluster`, and `make bootstrap-cluster`, use
+the development-only identity above with the built `./kv` binary. These commands
+exercise every supported data-plane operation against the local gateway:
+
+```bash
+./kv --security-mode development-plaintext --address 127.0.0.1:7000 put local-key local-value
+./kv --security-mode development-plaintext --address 127.0.0.1:7000 get local-key --raw
+printf '["bG9jYWwta2V5","bG9jYWwta2V5"]' | ./kv --security-mode development-plaintext --address 127.0.0.1:7000 batch-get --input -
+./kv --security-mode development-plaintext --address 127.0.0.1:7000 del local-key
+./kv --security-mode development-plaintext --address 127.0.0.1:7000 ping
 ```
 
 ---

@@ -20,6 +20,7 @@ import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
@@ -97,16 +98,86 @@ class CoordinatorReadClientResolveShardTest {
         assertEquals(Status.Code.DEADLINE_EXCEEDED, thrown.getStatus().getCode());
     }
 
+    @Test
+    void resolveShardRejectsInvalidHintsAndRecoversFromStaleLeader() throws Exception {
+        FakeCoordinatorService recoveredLeader = new FakeCoordinatorService();
+        Server recoveredServer = NettyServerBuilder.forPort(0)
+                .addService(recoveredLeader)
+                .build()
+                .start();
+        try {
+            String recoveredAddress = "localhost:" + recoveredServer.getPort();
+            for (String invalidHint : List.of(
+                    "null", " ", "", "missing-port", "localhost:not-a-port", "localhost:0", "localhost:65536")) {
+                service.isLeader.set(true);
+                service.leaderHint.set(invalidHint);
+                service.resolveStatus.set(Status.UNAVAILABLE.withDescription("Leader hint: " + invalidHint));
+                service.becomeFollowerAfterResolveFailure.set(true);
+
+                client.shutdown();
+                client = new CoordinatorReadClient(
+                        List.of("localhost:" + server.getPort(), recoveredAddress),
+                        1,
+                        TimeUnit.SECONDS,
+                        (host, port) -> NettyChannelBuilder.forAddress(host, port)
+                                .usePlaintext()
+                                .build());
+
+                ShardDto placement = client.resolveShard(new byte[] {0x01});
+
+                assertEquals("shard-7", placement.getShardId(), "hint: " + invalidHint);
+                service.resolveStatus.set(Status.OK);
+                service.becomeFollowerAfterResolveFailure.set(false);
+            }
+        } finally {
+            recoveredServer.shutdownNow();
+            recoveredServer.awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void resolveShardUsesValidLeaderHint() throws Exception {
+        FakeCoordinatorService hintedLeader = new FakeCoordinatorService();
+        Server hintedServer =
+                NettyServerBuilder.forPort(0).addService(hintedLeader).build().start();
+        try {
+            String hintedAddress = "127.0.0.1:" + hintedServer.getPort();
+            service.isLeader.set(false);
+            service.leaderHint.set(hintedAddress);
+
+            client.shutdown();
+            client = new CoordinatorReadClient(
+                    List.of("localhost:" + server.getPort()),
+                    1,
+                    TimeUnit.SECONDS,
+                    (host, port) -> NettyChannelBuilder.forAddress(host, port)
+                            .usePlaintext()
+                            .build());
+
+            ShardDto placement = client.resolveShard(new byte[] {0x02});
+
+            assertEquals("shard-7", placement.getShardId());
+        } finally {
+            hintedServer.shutdownNow();
+            hintedServer.awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
     private static final class FakeCoordinatorService extends CoordinatorGrpc.CoordinatorImplBase {
         private final AtomicReference<byte[]> lastKey = new AtomicReference<>();
         private final AtomicReference<Status> resolveStatus = new AtomicReference<>(Status.OK);
         private final AtomicLong delayMs = new AtomicLong();
+        private final AtomicBoolean isLeader = new AtomicBoolean(true);
+        private final AtomicReference<String> leaderHint = new AtomicReference<>("");
+        private final AtomicBoolean becomeFollowerAfterResolveFailure = new AtomicBoolean();
 
         @Override
         public void getCoordinatorLeader(
                 GetCoordinatorLeaderRequest request, StreamObserver<GetCoordinatorLeaderResponse> responseObserver) {
-            responseObserver.onNext(
-                    GetCoordinatorLeaderResponse.newBuilder().setIsLeader(true).build());
+            responseObserver.onNext(GetCoordinatorLeaderResponse.newBuilder()
+                    .setIsLeader(isLeader.get())
+                    .setLeaderAddress(leaderHint.get())
+                    .build());
             responseObserver.onCompleted();
         }
 
@@ -126,6 +197,9 @@ class CoordinatorReadClientResolveShardTest {
             Status status = resolveStatus.get();
             if (!status.isOk()) {
                 responseObserver.onError(status.asRuntimeException());
+                if (becomeFollowerAfterResolveFailure.get()) {
+                    isLeader.set(false);
+                }
                 return;
             }
             responseObserver.onNext(ResolveShardResponse.newBuilder()

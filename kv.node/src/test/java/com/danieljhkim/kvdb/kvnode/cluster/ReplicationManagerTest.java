@@ -147,6 +147,9 @@ class ReplicationManagerTest {
                         "must-remain-hidden",
                         "request-late-prepare",
                         WriteDurability.ALL_SYNC));
+        assertTrue(fixture.client.latePrepareStarted.await(1, TimeUnit.SECONDS));
+        assertTrue(fixture.client.abortCompleted.await(1, TimeUnit.SECONDS));
+        fixture.client.releaseLatePrepare();
         assertTrue(fixture.client.latePrepareCompleted.await(1, TimeUnit.SECONDS));
         assertEquals("(nil)", fixture.followers.get("node-2:9000").get("aborted"));
 
@@ -176,6 +179,8 @@ class ReplicationManagerTest {
 
         Set<String> completed = manager.executePhase(List.of("node-2:9000"), mutation, ReplicationPhase.PREPARE);
         assertTrue(completed.isEmpty());
+        assertTrue(fixture.client.latePrepareStarted.await(1, TimeUnit.SECONDS));
+        fixture.client.releaseLatePrepare();
         assertTrue(fixture.client.latePrepareCompleted.await(1, TimeUnit.SECONDS));
         assertTrue(completed.isEmpty());
 
@@ -184,15 +189,14 @@ class ReplicationManagerTest {
     }
 
     @Test
-    void quorumWriteIsIdempotentAndTimedOutReplicaConvergesAfterRejoin() {
+    void quorumWriteIsIdempotentAndTimedOutReplicaConvergesAfterRejoin() throws InterruptedException {
         Fixture fixture = fixture();
         fixture.client.delayed.add("node-3:9000");
-        long started = System.nanoTime();
         ReplicationManager.MutationResult first = manager.replicateSet(
                 "shard-0", fixture.shard, "key", "value", "request-retry", WriteDurability.QUORUM_SYNC);
-        long elapsedMillis = Duration.ofNanos(System.nanoTime() - started).toMillis();
 
-        assertTrue(elapsedMillis < 500, "replication should be bounded by its timeout");
+        assertTrue(fixture.client.delayedRequestStarted.await(1, TimeUnit.SECONDS));
+        assertEquals(2, first.durableAcks());
         assertEquals("value", fixture.leader.getOrCreate("shard-0").get("key"));
         assertEquals("value", fixture.followers.get("node-2:9000").get("key"));
 
@@ -201,6 +205,8 @@ class ReplicationManagerTest {
         assertEquals(first.version(), duplicate.version());
 
         fixture.client.delayed.clear();
+        fixture.client.releaseDelayedRequest();
+        assertTrue(fixture.client.delayedRequestCompleted.await(1, TimeUnit.SECONDS));
         manager.repairReplicas("shard-0", fixture.shard);
         assertEquals("value", fixture.followers.get("node-3:9000").get("key"));
         assertTrue(manager.repairProgress("node-3:9000", "shard-0").complete());
@@ -580,7 +586,13 @@ class ReplicationManagerTest {
         private final Set<String> prepareResponseLost = ConcurrentHashMap.newKeySet();
         private final Set<String> abortDropped = ConcurrentHashMap.newKeySet();
         private final Set<String> latePrepare = ConcurrentHashMap.newKeySet();
+        private final CountDownLatch delayedRequestStarted = new CountDownLatch(1);
+        private final CountDownLatch delayedRequestRelease = new CountDownLatch(1);
+        private final CountDownLatch delayedRequestCompleted = new CountDownLatch(1);
+        private final CountDownLatch latePrepareStarted = new CountDownLatch(1);
+        private final CountDownLatch latePrepareRelease = new CountDownLatch(1);
         private final CountDownLatch latePrepareCompleted = new CountDownLatch(1);
+        private final CountDownLatch abortCompleted = new CountDownLatch(1);
 
         private FakeReplicaClient(Map<String, ShardKVStore> stores) {
             super(Duration.ofMillis(20));
@@ -589,12 +601,13 @@ class ReplicationManagerTest {
 
         @Override
         public ReplicationAck replicateMutation(String targetAddress, ReplicateMutationRequest request) {
-            unavailableIfNeeded(targetAddress);
+            unavailableIfNeeded(targetAddress, true);
             if (request.getPhase() == ReplicationPhase.ABORT && abortDropped.contains(targetAddress)) {
                 throw new IllegalStateException("abort dropped");
             }
             if (request.getPhase() == ReplicationPhase.PREPARE && latePrepare.contains(targetAddress)) {
-                delayIgnoringInterrupts(200);
+                latePrepareStarted.countDown();
+                awaitIgnoringInterrupts(latePrepareRelease);
             }
             if (request.getPhase() == com.kvdb.proto.kvstore.ReplicationPhase.COMMIT
                     && commitFailed.contains(targetAddress)) {
@@ -612,6 +625,9 @@ class ReplicationManagerTest {
             if (request.getPhase() == ReplicationPhase.PREPARE && latePrepare.contains(targetAddress)) {
                 latePrepareCompleted.countDown();
             }
+            if (request.getPhase() == ReplicationPhase.ABORT) {
+                abortCompleted.countDown();
+            }
             if (request.getPhase() == ReplicationPhase.PREPARE && prepareResponseLost.contains(targetAddress)) {
                 throw new IllegalStateException("prepare acknowledgement lost");
             }
@@ -626,7 +642,7 @@ class ReplicationManagerTest {
 
         @Override
         public ReplicaRepairResponse repairReplica(String targetAddress, ReplicaRepairRequest request) {
-            unavailableIfNeeded(targetAddress);
+            unavailableIfNeeded(targetAddress, false);
             ShardKVStore store = stores.get(targetAddress);
             int applied = 0;
             for (var mutation : request.getCommittedMutationsList()) {
@@ -651,7 +667,7 @@ class ReplicationManagerTest {
 
         @Override
         public ReplicaStateResponse fetchReplicaState(String targetAddress, ReplicaStateRequest request) {
-            unavailableIfNeeded(targetAddress);
+            unavailableIfNeeded(targetAddress, false);
             stateFetchCounts
                     .computeIfAbsent(targetAddress, ignored -> new AtomicInteger())
                     .incrementAndGet();
@@ -691,29 +707,30 @@ class ReplicationManagerTest {
                     .get();
         }
 
-        private void unavailableIfNeeded(String targetAddress) {
+        private void unavailableIfNeeded(String targetAddress, boolean delayReplication) {
             if (partitioned.contains(targetAddress)) {
                 throw new IllegalStateException("partitioned");
             }
-            if (delayed.contains(targetAddress)) {
-                try {
-                    Thread.sleep(200);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new IllegalStateException("interrupted", e);
-                }
+            if (delayReplication && delayed.contains(targetAddress)) {
+                delayedRequestStarted.countDown();
+                awaitIgnoringInterrupts(delayedRequestRelease);
+                delayedRequestCompleted.countDown();
             }
         }
 
-        private static void delayIgnoringInterrupts(long delayMs) {
-            long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(delayMs);
+        private void releaseDelayedRequest() {
+            delayedRequestRelease.countDown();
+        }
+
+        private void releaseLatePrepare() {
+            latePrepareRelease.countDown();
+        }
+
+        private static void awaitIgnoringInterrupts(CountDownLatch release) {
             while (true) {
-                long remainingNanos = deadlineNanos - System.nanoTime();
-                if (remainingNanos <= 0) {
-                    break;
-                }
                 try {
-                    TimeUnit.NANOSECONDS.sleep(remainingNanos);
+                    release.await();
+                    break;
                 } catch (InterruptedException e) {
                     // Model a transport that does not honor cancellation and completes after the phase deadline.
                 }

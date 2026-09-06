@@ -28,6 +28,7 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -378,13 +379,25 @@ public class ReplicationManager implements AutoCloseable {
                 .setMutation(mutation)
                 .setPhase(phase)
                 .build();
+        List<String> phaseTargets = new ArrayList<>();
         for (String target : targets) {
+            phaseTargets.add(target);
+        }
+        // Do not charge virtual-thread dispatch latency to a replica's RPC budget. A healthy peer must receive the
+        // same phase window as a sibling whose request blocks immediately.
+        CountDownLatch workersReady = new CountDownLatch(phaseTargets.size());
+        CountDownLatch dispatch = new CountDownLatch(1);
+        for (String target : phaseTargets) {
             threads.add(Thread.startVirtualThread(() -> {
+                workersReady.countDown();
                 try {
+                    dispatch.await();
                     ReplicationAck ack = replicaWriteClient.replicateMutation(target, request);
                     if (ack.getSuccess() && ack.getDurable()) {
                         successful.add(target);
                     }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
                 } catch (RuntimeException e) {
                     log.debug(
                             "Replication phase={} target={} requestId={} failed: {}",
@@ -394,6 +407,22 @@ public class ReplicationManager implements AutoCloseable {
                             e.getMessage());
                 }
             }));
+        }
+
+        boolean workersStarted;
+        try {
+            workersStarted = workersReady.await(replicationTimeout.toNanos(), TimeUnit.NANOSECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            workersStarted = false;
+        } finally {
+            dispatch.countDown();
+        }
+        if (!workersStarted) {
+            for (Thread thread : threads) {
+                thread.interrupt();
+            }
+            return Set.of();
         }
 
         long deadlineNanos = System.nanoTime() + replicationTimeout.toNanos();

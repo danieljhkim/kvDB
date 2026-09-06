@@ -276,14 +276,8 @@ public class ShardKVStore {
             if (mutation.getEpoch() < shardEpoch || mutation.getVersion() <= committedVersion) {
                 return rejected("stale epoch or version");
             }
-            boolean lowerPrepared = mutationsByRequest.values().stream()
-                    .anyMatch(candidate -> mutationStates.get(candidate.getRequestId()) == MutationState.PREPARED
-                            && candidate.getEpoch() <= mutation.getEpoch()
-                            && candidate.getVersion() < mutation.getVersion());
-            if (lowerPrepared) {
-                return rejected("out-of-order commit; an earlier mutation is still prepared");
-            }
 
+            abortSupersededPreparesLocked(mutation);
             replicationWalManager.log("COMMIT", mutation.getRequestId().getBytes(StandardCharsets.UTF_8), null);
             applyVisibleLocked(mutation);
             markCommitted(mutation);
@@ -334,13 +328,24 @@ public class ShardKVStore {
             }
             String versionOwner = requestByVersion.get(mutation.getVersion());
             if (versionOwner != null && !versionOwner.equals(mutation.getRequestId())) {
-                return rejected("version conflicts with a different mutation");
+                ReplicatedMutation preparedOwner = mutationsByRequest.get(versionOwner);
+                if (preparedOwner == null || mutationStates.get(versionOwner) != MutationState.PREPARED) {
+                    return rejected("version conflicts with a different mutation");
+                }
+                // The repair RPC's current epoch is fenced by the service. Its payload can legitimately contain a
+                // committed mutation from an older epoch, which takes precedence over an uncommitted local prepare.
+                abortPreparedLocked(preparedOwner);
+                requestByVersion.remove(mutation.getVersion(), versionOwner);
             }
             ReplicatedMutation current = committedByKey.get(mutation.getKey());
             if (current != null && current.getVersion() >= mutation.getVersion()) {
+                if (known != null && mutationStates.get(mutation.getRequestId()) == MutationState.PREPARED) {
+                    abortPreparedLocked(known);
+                }
                 return accepted("repair entry is already superseded");
             }
 
+            abortSupersededPreparesLocked(mutation);
             replicationWalManager.log(
                     "REPAIR", mutation.getRequestId().getBytes(StandardCharsets.UTF_8), mutation.toByteArray());
             applyVisibleLocked(mutation);
@@ -693,6 +698,25 @@ public class ShardKVStore {
         shardEpoch = Math.max(shardEpoch, mutation.getEpoch());
         highestVersion = Math.max(highestVersion, mutation.getVersion());
         return accepted("prepared");
+    }
+
+    /**
+     * A durable commit at a later version proves that lower prepares from the same or an older epoch can no longer be
+     * committed in order. Persist their terminal state before acknowledging the newer commit so restart cannot restore
+     * the ordering obstruction.
+     */
+    private void abortSupersededPreparesLocked(ReplicatedMutation committed) {
+        List<ReplicatedMutation> superseded = mutationsByRequest.values().stream()
+                .filter(candidate -> mutationStates.get(candidate.getRequestId()) == MutationState.PREPARED)
+                .filter(candidate -> candidate.getEpoch() <= committed.getEpoch())
+                .filter(candidate -> candidate.getVersion() < committed.getVersion())
+                .toList();
+        superseded.forEach(this::abortPreparedLocked);
+    }
+
+    private void abortPreparedLocked(ReplicatedMutation mutation) {
+        replicationWalManager.log("ABORT", mutation.getRequestId().getBytes(StandardCharsets.UTF_8), null);
+        mutationStates.put(mutation.getRequestId(), MutationState.ABORTED);
     }
 
     private String validateMutation(ReplicatedMutation mutation) {

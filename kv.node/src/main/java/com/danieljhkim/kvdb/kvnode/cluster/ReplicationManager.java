@@ -20,7 +20,6 @@ import com.kvdb.proto.kvstore.ReplicationPhase;
 import com.kvdb.proto.kvstore.WriteDurability;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -282,7 +281,9 @@ public class ReplicationManager implements AutoCloseable {
             int durablePrepareAcks = 1 + preparedTargets.size();
             if (durablePrepareAcks < requiredAcks) {
                 local.abortMutation(mutation);
-                sendBestEffort(preparedTargets, mutation, ReplicationPhase.ABORT);
+                // A replica can durably prepare even when its acknowledgement is lost. Abort every attempted target,
+                // not only the targets whose acknowledgements reached us.
+                sendBestEffort(targets, mutation, ReplicationPhase.ABORT);
                 Metrics.increment(
                         "kvdb_replica_quorum_total", "node", kind.name().toLowerCase(), "unavailable");
                 throw unavailable(
@@ -296,10 +297,9 @@ public class ReplicationManager implements AutoCloseable {
             int durableCommitAcks = 1 + committedTargets.size();
             if (durableCommitAcks < requiredAcks) {
                 local.abortMutation(mutation);
-                Set<String> stillPrepared = ConcurrentHashMap.newKeySet();
-                stillPrepared.addAll(preparedTargets);
-                stillPrepared.removeAll(committedTargets);
-                sendBestEffort(stillPrepared, mutation, ReplicationPhase.ABORT);
+                // Include targets whose PREPARE response was lost. ABORT is idempotent, including at a replica that
+                // already committed before its acknowledgement was lost.
+                sendBestEffort(targets, mutation, ReplicationPhase.ABORT);
                 Metrics.increment(
                         "kvdb_replica_quorum_total", "node", kind.name().toLowerCase(), "unavailable");
                 throw unavailable(
@@ -324,7 +324,7 @@ public class ReplicationManager implements AutoCloseable {
         }
     }
 
-    private Set<String> executePhase(Iterable<String> targets, ReplicatedMutation mutation, ReplicationPhase phase) {
+    Set<String> executePhase(Iterable<String> targets, ReplicatedMutation mutation, ReplicationPhase phase) {
         Set<String> successful = ConcurrentHashMap.newKeySet();
         List<Thread> threads = new ArrayList<>();
         ReplicateMutationRequest request = ReplicateMutationRequest.newBuilder()
@@ -362,11 +362,17 @@ public class ReplicationManager implements AutoCloseable {
                 break;
             }
         }
-        return Collections.unmodifiableSet(successful);
+        for (Thread thread : threads) {
+            if (thread.isAlive()) {
+                thread.interrupt();
+            }
+        }
+        // Do not expose the concurrent set: an RPC that ignores interruption may still complete after the deadline.
+        return Set.copyOf(successful);
     }
 
-    private void sendBestEffort(Set<String> targets, ReplicatedMutation mutation, ReplicationPhase phase) {
-        if (!targets.isEmpty()) {
+    private void sendBestEffort(Iterable<String> targets, ReplicatedMutation mutation, ReplicationPhase phase) {
+        if (targets.iterator().hasNext()) {
             executePhase(targets, mutation, phase);
         }
     }

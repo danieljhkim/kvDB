@@ -1,6 +1,7 @@
 package com.danieljhkim.kvdb.kvnode.cluster;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -22,6 +23,7 @@ import com.kvdb.proto.kvstore.ReplicaStateResponse;
 import com.kvdb.proto.kvstore.ReplicateMutationRequest;
 import com.kvdb.proto.kvstore.ReplicatedMutation;
 import com.kvdb.proto.kvstore.ReplicationAck;
+import com.kvdb.proto.kvstore.ReplicationPhase;
 import com.kvdb.proto.kvstore.WriteDurability;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -30,6 +32,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -94,6 +98,88 @@ class ReplicationManagerTest {
     }
 
     @Test
+    void lostPrepareResponseAndDroppedAbortDoNotBlockTheNextAllSyncWrite() {
+        Fixture fixture = fixture();
+        fixture.client.prepareResponseLost.add("node-2:9000");
+        fixture.client.abortDropped.add("node-2:9000");
+
+        assertThrows(
+                NodeUnavailableException.class,
+                () -> manager.replicateSet(
+                        "shard-0",
+                        fixture.shard,
+                        "aborted",
+                        "must-remain-hidden",
+                        "request-lost-prepare-ack",
+                        WriteDurability.ALL_SYNC));
+        assertEquals("(nil)", fixture.followers.get("node-2:9000").get("aborted"));
+
+        fixture.client.prepareResponseLost.clear();
+        fixture.client.abortDropped.clear();
+        manager.replicateSet(
+                "shard-0", fixture.shard, "committed", "visible", "request-after-orphan", WriteDurability.ALL_SYNC);
+
+        assertEquals("(nil)", fixture.leader.getOrCreate("shard-0").get("aborted"));
+        fixture.followers.values().forEach(store -> {
+            assertEquals("(nil)", store.get("aborted"));
+            assertEquals("visible", store.get("committed"));
+        });
+        fixture.leader.shutdown();
+        fixture.followers.values().forEach(ShardKVStore::shutdown);
+    }
+
+    @Test
+    void delayedPrepareAfterAbortIsRecoveredByTheNextAllSyncWrite() throws InterruptedException {
+        Fixture fixture = fixture();
+        fixture.client.latePrepare.add("node-2:9000");
+        fixture.client.partitioned.add("node-3:9000");
+
+        assertThrows(
+                NodeUnavailableException.class,
+                () -> manager.replicateSet(
+                        "shard-0",
+                        fixture.shard,
+                        "aborted",
+                        "must-remain-hidden",
+                        "request-late-prepare",
+                        WriteDurability.ALL_SYNC));
+        assertTrue(fixture.client.latePrepareCompleted.await(1, TimeUnit.SECONDS));
+        assertEquals("(nil)", fixture.followers.get("node-2:9000").get("aborted"));
+
+        fixture.client.latePrepare.clear();
+        fixture.client.partitioned.clear();
+        manager.replicateSet(
+                "shard-0",
+                fixture.shard,
+                "committed",
+                "visible",
+                "request-after-late-prepare",
+                WriteDurability.ALL_SYNC);
+
+        fixture.followers.values().forEach(store -> {
+            assertEquals("(nil)", store.get("aborted"));
+            assertEquals("visible", store.get("committed"));
+        });
+        fixture.leader.shutdown();
+        fixture.followers.values().forEach(ShardKVStore::shutdown);
+    }
+
+    @Test
+    void completedPhaseResultDoesNotChangeWhenAnRpcFinishesLate() throws InterruptedException {
+        Fixture fixture = fixture();
+        fixture.client.latePrepare.add("node-2:9000");
+        ReplicatedMutation mutation = mutation(1, MutationKind.SET, "key", "value");
+
+        Set<String> completed = manager.executePhase(List.of("node-2:9000"), mutation, ReplicationPhase.PREPARE);
+        assertTrue(completed.isEmpty());
+        assertTrue(fixture.client.latePrepareCompleted.await(1, TimeUnit.SECONDS));
+        assertTrue(completed.isEmpty());
+
+        fixture.leader.shutdown();
+        fixture.followers.values().forEach(ShardKVStore::shutdown);
+    }
+
+    @Test
     void quorumWriteIsIdempotentAndTimedOutReplicaConvergesAfterRejoin() {
         Fixture fixture = fixture();
         fixture.client.delayed.add("node-3:9000");
@@ -150,6 +236,53 @@ class ReplicationManagerTest {
 
         fixture.leader.shutdown();
         fixture.followers.values().forEach(ShardKVStore::shutdown);
+    }
+
+    @Test
+    void promotedReplicaReconcilesConflictingOrphanAndPreservesCommittedStateAcrossRestart() {
+        ShardRecord promotedShard = promotedShard();
+        ShardKVStore promotedStore = newStore("orphan-promoted");
+        ReplicatedMutation orphan = mutation(1, MutationKind.SET, "aborted", "hidden");
+        ReplicatedMutation committed = orphan.toBuilder()
+                .setRequestId("request-committed-before-promotion")
+                .setKey(ByteString.copyFromUtf8("preserved"))
+                .setValue(ByteString.copyFromUtf8("committed"))
+                .build();
+        assertTrue(promotedStore.prepareMutation(orphan).success());
+
+        ShardKVStore peer1 = newStore("orphan-peer-1");
+        ShardKVStore peer2 = newStore("orphan-peer-2");
+        assertTrue(peer1.repairMutation(committed).success());
+        assertTrue(peer2.repairMutation(committed).success());
+        FakeReplicaClient promotedClient = new FakeReplicaClient(Map.of(
+                "node-1:9000", peer1,
+                "node-2:9000", peer2));
+        manager = new ReplicationManager(
+                "node-3",
+                cache(promotedShard),
+                new FixedRegistry(tempDir.resolve("orphan-promoted-registry"), promotedStore),
+                promotedClient,
+                Duration.ofMillis(40));
+
+        manager.ensureLeaderReconciled("shard-0", promotedShard);
+        assertEquals("(nil)", promotedStore.get("aborted"));
+        assertEquals("committed", promotedStore.get("preserved"));
+        manager.replicateSet(
+                "shard-0", promotedShard, "new", "value", "request-after-promotion", WriteDurability.ALL_SYNC);
+        assertEquals("committed", promotedStore.get("preserved"));
+        assertEquals("value", promotedStore.get("new"));
+        assertFalse(promotedStore.commitMutation(orphan).success());
+
+        manager.close();
+        manager = null;
+        promotedStore.shutdown();
+        ShardKVStore restarted = newStore("orphan-promoted");
+        assertEquals("(nil)", restarted.get("aborted"));
+        assertEquals("committed", restarted.get("preserved"));
+        assertEquals("value", restarted.get("new"));
+        restarted.shutdown();
+        peer1.shutdown();
+        peer2.shutdown();
     }
 
     @Test
@@ -340,6 +473,10 @@ class ReplicationManagerTest {
         private final Set<String> partitioned = ConcurrentHashMap.newKeySet();
         private final Set<String> delayed = ConcurrentHashMap.newKeySet();
         private final Set<String> commitFailed = ConcurrentHashMap.newKeySet();
+        private final Set<String> prepareResponseLost = ConcurrentHashMap.newKeySet();
+        private final Set<String> abortDropped = ConcurrentHashMap.newKeySet();
+        private final Set<String> latePrepare = ConcurrentHashMap.newKeySet();
+        private final CountDownLatch latePrepareCompleted = new CountDownLatch(1);
 
         private FakeReplicaClient(Map<String, ShardKVStore> stores) {
             super(Duration.ofMillis(20));
@@ -349,6 +486,12 @@ class ReplicationManagerTest {
         @Override
         public ReplicationAck replicateMutation(String targetAddress, ReplicateMutationRequest request) {
             unavailableIfNeeded(targetAddress);
+            if (request.getPhase() == ReplicationPhase.ABORT && abortDropped.contains(targetAddress)) {
+                throw new IllegalStateException("abort dropped");
+            }
+            if (request.getPhase() == ReplicationPhase.PREPARE && latePrepare.contains(targetAddress)) {
+                delayIgnoringInterrupts(200);
+            }
             if (request.getPhase() == com.kvdb.proto.kvstore.ReplicationPhase.COMMIT
                     && commitFailed.contains(targetAddress)) {
                 throw new IllegalStateException("commit acknowledgement lost");
@@ -362,6 +505,12 @@ class ReplicationManagerTest {
                         default ->
                             new ShardKVStore.MutationStatus(false, false, "phase required", store.committedVersion());
                     };
+            if (request.getPhase() == ReplicationPhase.PREPARE && latePrepare.contains(targetAddress)) {
+                latePrepareCompleted.countDown();
+            }
+            if (request.getPhase() == ReplicationPhase.PREPARE && prepareResponseLost.contains(targetAddress)) {
+                throw new IllegalStateException("prepare acknowledgement lost");
+            }
             return ReplicationAck.newBuilder()
                     .setSuccess(status.success())
                     .setDurable(status.durable())
@@ -448,6 +597,21 @@ class ReplicationManagerTest {
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     throw new IllegalStateException("interrupted", e);
+                }
+            }
+        }
+
+        private static void delayIgnoringInterrupts(long delayMs) {
+            long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(delayMs);
+            while (true) {
+                long remainingNanos = deadlineNanos - System.nanoTime();
+                if (remainingNanos <= 0) {
+                    break;
+                }
+                try {
+                    TimeUnit.NANOSECONDS.sleep(remainingNanos);
+                } catch (InterruptedException e) {
+                    // Model a transport that does not honor cancellation and completes after the phase deadline.
                 }
             }
         }

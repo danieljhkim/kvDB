@@ -42,7 +42,7 @@ class VersionedShardMutationTest {
     }
 
     @Test
-    void duplicateConflictStaleVersionAndReorderedCommitAreRejected() {
+    void newerCommitSupersedesAnAbandonedPrepareWithoutExposingIt() {
         ShardKVStore store = newStore("ordering");
         ReplicatedMutation first = store.prepareNewMutation("request-1", 1, MutationKind.SET, "key-1", "one", "leader");
         ReplicatedMutation second = ReplicatedMutation.newBuilder()
@@ -58,10 +58,10 @@ class VersionedShardMutationTest {
 
         assertTrue(store.prepareMutation(first).success());
         assertTrue(store.prepareMutation(second).success());
-        assertFalse(store.commitMutation(second).success());
-        assertEquals("(nil)", store.get("key-2"));
-        assertTrue(store.commitMutation(first).success());
         assertTrue(store.commitMutation(second).success());
+        assertEquals("two", store.get("key-2"));
+        assertEquals("(nil)", store.get("key-1"));
+        assertFalse(store.commitMutation(first).success());
 
         ReplicatedMutation conflictingDuplicate =
                 first.toBuilder().setValue(ByteString.copyFromUtf8("different")).build();
@@ -69,6 +69,63 @@ class VersionedShardMutationTest {
         ReplicatedMutation stale =
                 first.toBuilder().setRequestId("request-stale").build();
         assertFalse(store.prepareMutation(stale).success());
+        store.shutdown();
+    }
+
+    @Test
+    void supersededPrepareStaysAbortedAcrossRestart() {
+        ShardKVStore store = newStore("orphan-restart");
+        ReplicatedMutation orphan =
+                store.prepareNewMutation("request-orphan", 3, MutationKind.SET, "aborted", "hidden", "old-leader");
+        store.shutdown();
+
+        ShardKVStore restarted = newStore("orphan-restart");
+        ReplicatedMutation successor = restarted.prepareNewMutation(
+                "request-successor", 4, MutationKind.SET, "committed", "visible", "new-leader");
+        assertEquals(2, successor.getVersion());
+        assertTrue(restarted.commitMutation(successor).success());
+        assertEquals("(nil)", restarted.get("aborted"));
+        assertEquals("visible", restarted.get("committed"));
+        assertFalse(restarted.commitMutation(orphan).success());
+        restarted.shutdown();
+
+        ShardKVStore recovered = newStore("orphan-restart");
+        assertEquals("(nil)", recovered.get("aborted"));
+        assertEquals("visible", recovered.get("committed"));
+        assertEquals(2, recovered.committedVersion());
+        assertFalse(recovered.commitMutation(orphan).success());
+        recovered.shutdown();
+    }
+
+    @Test
+    void committedRepairSupersedesPreparedConflictWhileWritesRemainEpochFenced() {
+        ShardKVStore store = newStore("repair-orphan");
+        ReplicatedMutation orphan =
+                store.prepareNewMutation("request-orphan", 3, MutationKind.SET, "aborted", "hidden", "old-leader");
+        ReplicatedMutation committed = orphan.toBuilder()
+                .setRequestId("request-committed")
+                .setEpoch(4)
+                .setValue(ByteString.copyFromUtf8("recovered"))
+                .setOriginNodeId("new-leader")
+                .build();
+
+        assertTrue(store.repairMutation(committed).success());
+        assertEquals("recovered", store.get("aborted"));
+        assertFalse(store.commitMutation(orphan).success());
+
+        ReplicatedMutation stale = ReplicatedMutation.newBuilder()
+                .setRequestId("request-stale")
+                .setShardId("shard-0")
+                .setEpoch(3)
+                .setVersion(2)
+                .setKind(MutationKind.SET)
+                .setKey(ByteString.copyFromUtf8("stale"))
+                .setValue(ByteString.copyFromUtf8("must-not-appear"))
+                .setOriginNodeId("old-leader")
+                .build();
+        assertFalse(store.prepareMutation(stale).success());
+        assertFalse(store.commitMutation(stale).success());
+        assertEquals("(nil)", store.get("stale"));
         store.shutdown();
     }
 

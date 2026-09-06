@@ -377,6 +377,55 @@ class ReplicationManagerTest {
     }
 
     @Test
+    void promotedLeaderCompletesAllSyncWithFollowerOnlyOlderEpochPrepareAndStableRetry() {
+        ShardRecord promotedShard = promotedShard();
+        ShardKVStore promotedStore = newStore("promoted-empty");
+        ShardKVStore emptyPeer = newStore("promoted-empty-peer");
+        ShardKVStore orphanPeer = newStore("promoted-orphan-peer");
+        ReplicatedMutation orphan = mutation(1, MutationKind.SET, "orphan", "hidden");
+        assertTrue(orphanPeer.prepareMutation(orphan).success());
+
+        FakeReplicaClient promotedClient = new FakeReplicaClient(Map.of(
+                "node-1:9000", emptyPeer,
+                "node-2:9000", orphanPeer));
+        manager = new ReplicationManager(
+                "node-3",
+                cache(promotedShard),
+                new FixedRegistry(tempDir.resolve("promoted-empty-registry"), promotedStore),
+                promotedClient,
+                Duration.ofMillis(40));
+
+        manager.ensureLeaderReconciled("shard-0", promotedShard);
+        assertEquals("(nil)", promotedStore.get("orphan"));
+        assertEquals("(nil)", orphanPeer.get("orphan"));
+
+        ReplicationManager.MutationResult first = manager.replicateSet(
+                "shard-0", promotedShard, "successor", "visible", "stable-request", WriteDurability.ALL_SYNC);
+        ReplicationManager.MutationResult retry = manager.replicateSet(
+                "shard-0", promotedShard, "successor", "visible", "stable-request", WriteDurability.ALL_SYNC);
+
+        assertEquals(first.version(), retry.version());
+        assertEquals(1, first.version());
+        List.of(promotedStore, emptyPeer, orphanPeer).forEach(store -> {
+            assertEquals("(nil)", store.get("orphan"));
+            assertEquals("visible", store.get("successor"));
+            assertFalse(store.commitMutation(orphan).success());
+        });
+
+        manager.close();
+        manager = null;
+        promotedStore.shutdown();
+        emptyPeer.shutdown();
+        orphanPeer.shutdown();
+
+        ShardKVStore restartedOrphanPeer = newStore("promoted-orphan-peer");
+        assertEquals("(nil)", restartedOrphanPeer.get("orphan"));
+        assertEquals("visible", restartedOrphanPeer.get("successor"));
+        assertFalse(restartedOrphanPeer.commitMutation(orphan).success());
+        restartedOrphanPeer.shutdown();
+    }
+
+    @Test
     void strongReadRefusesPartitionEvenAfterEpochWasPreviouslyReconciled() {
         Fixture fixture = fixture();
         manager.replicateSet(

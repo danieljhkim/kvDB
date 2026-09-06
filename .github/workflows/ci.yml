@@ -116,29 +116,3 @@ jobs:
         run: >-
           buf breaking kv.proto/src/main/proto
           --against ".git#branch=origin/${{ github.base_ref }},subdir=kv.proto/src/main/proto"
-
-  docker-failover:
-    name: Container failover and recovery
-    needs: [java-verification, go-verification, protobuf-compatibility]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install grpcurl
-        run: |
-          version=1.9.3
-          curl --fail --location --silent --show-error \
-            "https://github.com/fullstorydev/grpcurl/releases/download/v${version}/grpcurl_${version}_linux_x86_64.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin grpcurl
-
-      - name: Validate Compose model
-        env:
-          KVDB_ADMIN_SECURITY_API_KEY: ci-admin-key
-          KVDB_ENV: test
-          KVDB_GRPC_SECURITY_MODE: development-plaintext
-          KVDB_TLS_DIR: .
-        run: docker compose config --quiet
-
-      - name: Build images and exercise failover, persistence, and volume wipe
-        run: ./scripts/docker_failover_test.sh

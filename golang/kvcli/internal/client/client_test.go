@@ -344,6 +344,70 @@ func TestWritesGenerateFreshRequestIdsAndAcceptDeliberateReuse(t *testing.T) {
 	}
 }
 
+func TestWriteOptionsPreserveConditionalPresenceAndTTL(t *testing.T) {
+	var putOptions, deleteOptions *gateway.WriteOptions
+	server := testfixture.Start(t, testfixture.Hooks{
+		Put: func(_ context.Context, request *gateway.PutRequest) (*gateway.PutResponse, error) {
+			putOptions = request.GetOptions()
+			return &gateway.PutResponse{Status: &gateway.Status{Code: gateway.Status_OK}, Version: 1}, nil
+		},
+		Delete: func(_ context.Context, request *gateway.DeleteRequest) (*gateway.DeleteResponse, error) {
+			deleteOptions = request.GetOptions()
+			return &gateway.DeleteResponse{Status: &gateway.Status{Code: gateway.Status_OK}, Version: 2}, nil
+		},
+	}, nil)
+	kv := dial(t, plaintextConfig(server.Address()))
+
+	zero := uint64(0)
+	if _, err := kv.Put(context.Background(), []byte("k"), []byte("v"), client.WriteOptions{
+		IfVersionEquals: &zero,
+		IfNotExists:     true,
+		TTL:             10 * time.Millisecond,
+	}); err != nil {
+		t.Fatalf("put failed: %v", err)
+	}
+	version := uint64(7)
+	if _, err := kv.Delete(context.Background(), []byte("k"), client.WriteOptions{IfVersionEquals: &version}); err != nil {
+		t.Fatalf("delete failed: %v", err)
+	}
+
+	if putOptions == nil || putOptions.IfVersionEquals == nil || *putOptions.IfVersionEquals != 0 || !putOptions.GetIfNotExists() || putOptions.GetTtlMs() != 10 {
+		t.Fatalf("put options lost presence or values: %+v", putOptions)
+	}
+	if deleteOptions == nil || deleteOptions.IfVersionEquals == nil || *deleteOptions.IfVersionEquals != 7 || deleteOptions.GetIfNotExists() || deleteOptions.GetTtlMs() != 0 {
+		t.Fatalf("delete options should carry only the version condition: %+v", deleteOptions)
+	}
+}
+
+func TestInvalidTTLIsRejectedBeforeRPC(t *testing.T) {
+	server := testfixture.Start(t, testfixture.Hooks{}, nil)
+	kv := dial(t, plaintextConfig(server.Address()))
+
+	for _, ttl := range []time.Duration{-time.Millisecond, time.Nanosecond} {
+		if _, err := kv.Put(context.Background(), []byte("k"), []byte("v"), client.WriteOptions{TTL: ttl}); err == nil {
+			t.Fatalf("TTL %s should be rejected", ttl)
+		}
+	}
+	if len(server.Calls()) != 0 {
+		t.Fatalf("invalid TTL must not issue an RPC: %+v", server.Calls())
+	}
+}
+
+func TestDeleteRejectsPutOnlyOptionsBeforeRPC(t *testing.T) {
+	server := testfixture.Start(t, testfixture.Hooks{}, nil)
+	kv := dial(t, plaintextConfig(server.Address()))
+
+	if _, err := kv.Delete(context.Background(), []byte("k"), client.WriteOptions{IfNotExists: true}); err == nil {
+		t.Fatal("delete create-only option should be rejected")
+	}
+	if _, err := kv.Delete(context.Background(), []byte("k"), client.WriteOptions{TTL: time.Millisecond}); err == nil {
+		t.Fatal("delete TTL option should be rejected")
+	}
+	if len(server.Calls()) != 0 {
+		t.Fatalf("invalid delete options must not issue an RPC: %+v", server.Calls())
+	}
+}
+
 func TestUnknownWriteOutcomeIsSurfacedWithoutRetrying(t *testing.T) {
 	var attempts atomic.Int64
 	server := testfixture.Start(t, testfixture.Hooks{

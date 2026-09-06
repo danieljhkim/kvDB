@@ -5,7 +5,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/danieljhkim/kv/internal/client"
 	gateway "github.com/danieljhkim/kv/internal/gen/kvdb/gateway"
 )
 
@@ -25,8 +24,10 @@ without an automatic retry.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		flags := cmd.Flags()
 		keyFile, _ := flags.GetString("key-file")
-		requestID, _ := flags.GetString("request-id")
-		allowReplay, _ := flags.GetBool("allow-server-replay")
+		writeOptions, err := writeOptionsFromFlags(cmd)
+		if err != nil {
+			return err
+		}
 
 		source := &bytesSource{}
 		key, err := source.operand("key", positional(args, 0), keyFile)
@@ -40,10 +41,7 @@ without an automatic retry.`,
 		}
 		defer op.close()
 
-		result, err := op.client.Delete(op.ctx, key, client.WriteOptions{
-			RequestID:         requestID,
-			AllowServerReplay: allowReplay,
-		})
+		result, err := op.client.Delete(op.ctx, key, writeOptions)
 		if err != nil {
 			return err
 		}

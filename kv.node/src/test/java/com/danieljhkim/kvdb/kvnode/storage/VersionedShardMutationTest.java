@@ -98,6 +98,63 @@ class VersionedShardMutationTest {
     }
 
     @Test
+    void higherEpochPrepareReplacesOnlyAnOlderPreparedVersionOwnerAcrossRestart() {
+        ShardKVStore store = newStore("higher-epoch-replacement");
+        ReplicatedMutation orphan =
+                store.prepareNewMutation("request-orphan", 3, MutationKind.SET, "orphan", "hidden", "old-leader");
+        ReplicatedMutation successor = orphan.toBuilder()
+                .setRequestId("request-successor")
+                .setEpoch(4)
+                .setKey(ByteString.copyFromUtf8("successor"))
+                .setValue(ByteString.copyFromUtf8("visible"))
+                .setOriginNodeId("new-leader")
+                .build();
+
+        assertTrue(store.prepareMutation(successor).success());
+        assertEquals("(nil)", store.get("orphan"));
+        assertFalse(store.commitMutation(orphan).success());
+        assertTrue(store.commitMutation(successor).success());
+        assertEquals("visible", store.get("successor"));
+        store.shutdown();
+
+        ShardKVStore restarted = newStore("higher-epoch-replacement");
+        assertEquals("(nil)", restarted.get("orphan"));
+        assertEquals("visible", restarted.get("successor"));
+        assertFalse(restarted.commitMutation(orphan).success());
+        restarted.shutdown();
+    }
+
+    @Test
+    void versionOwnerReplacementRejectsCommittedSameAndLowerEpochConflicts() {
+        ShardKVStore committedStore = newStore("committed-version-owner");
+        ReplicatedMutation committed =
+                committedStore.prepareNewMutation("request-committed", 3, MutationKind.SET, "key", "value", "leader");
+        assertTrue(committedStore.commitMutation(committed).success());
+        assertFalse(committedStore
+                .prepareMutation(committed.toBuilder()
+                        .setRequestId("request-conflict")
+                        .setEpoch(4)
+                        .build())
+                .success());
+        committedStore.shutdown();
+
+        ShardKVStore preparedStore = newStore("prepared-version-owner");
+        ReplicatedMutation prepared =
+                preparedStore.prepareNewMutation("request-prepared", 4, MutationKind.SET, "key", "value", "leader");
+        assertFalse(preparedStore
+                .prepareMutation(
+                        prepared.toBuilder().setRequestId("request-same-epoch").build())
+                .success());
+        assertFalse(preparedStore
+                .prepareMutation(prepared.toBuilder()
+                        .setRequestId("request-lower-epoch")
+                        .setEpoch(3)
+                        .build())
+                .success());
+        preparedStore.shutdown();
+    }
+
+    @Test
     void committedRepairSupersedesPreparedConflictWhileWritesRemainEpochFenced() {
         ShardKVStore store = newStore("repair-orphan");
         ReplicatedMutation orphan =

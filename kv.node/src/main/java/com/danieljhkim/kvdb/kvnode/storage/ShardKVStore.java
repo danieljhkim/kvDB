@@ -682,12 +682,21 @@ public class ShardKVStore {
             }
             return accepted(state == MutationState.COMMITTED ? "already committed" : "already prepared");
         }
-        String versionOwner = requestByVersion.get(mutation.getVersion());
-        if (versionOwner != null && !versionOwner.equals(mutation.getRequestId())) {
-            return rejected("version conflicts with a different mutation");
-        }
         if (mutation.getEpoch() < shardEpoch || mutation.getVersion() <= committedVersion) {
             return rejected("stale epoch or version");
+        }
+        String versionOwner = requestByVersion.get(mutation.getVersion());
+        if (versionOwner != null && !versionOwner.equals(mutation.getRequestId())) {
+            ReplicatedMutation existingOwner = mutationsByRequest.get(versionOwner);
+            if (existingOwner == null
+                    || mutationStates.get(versionOwner) != MutationState.PREPARED
+                    || mutation.getEpoch() <= existingOwner.getEpoch()) {
+                return rejected("version conflicts with a different mutation");
+            }
+            // A newer leader can reclaim a version held only by an older prepared mutation. Persist the abort before
+            // recording its PREPARE so a restart cannot resurrect the orphan as the version owner.
+            abortPreparedLocked(existingOwner);
+            requestByVersion.remove(mutation.getVersion(), versionOwner);
         }
 
         replicationWalManager.log(

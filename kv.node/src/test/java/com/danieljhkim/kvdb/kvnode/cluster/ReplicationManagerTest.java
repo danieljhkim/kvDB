@@ -13,18 +13,24 @@ import com.danieljhkim.kvdb.proto.coordinator.ClusterState;
 import com.danieljhkim.kvdb.proto.coordinator.NodeRecord;
 import com.danieljhkim.kvdb.proto.coordinator.PartitioningConfig;
 import com.danieljhkim.kvdb.proto.coordinator.ShardRecord;
+import com.google.protobuf.ByteString;
+import com.kvdb.proto.kvstore.MutationKind;
 import com.kvdb.proto.kvstore.ReplicaRepairRequest;
 import com.kvdb.proto.kvstore.ReplicaRepairResponse;
 import com.kvdb.proto.kvstore.ReplicaStateRequest;
 import com.kvdb.proto.kvstore.ReplicaStateResponse;
 import com.kvdb.proto.kvstore.ReplicateMutationRequest;
+import com.kvdb.proto.kvstore.ReplicatedMutation;
 import com.kvdb.proto.kvstore.ReplicationAck;
 import com.kvdb.proto.kvstore.WriteDurability;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -163,6 +169,87 @@ class ReplicationManagerTest {
         fixture.followers.values().forEach(ShardKVStore::shutdown);
     }
 
+    @Test
+    void promotedReplicaRestoresOlderVersionHolesAndTombstonesAcrossPeerOrderAndRestart() {
+        ShardRecord promotedShard = promotedShard();
+        ShardKVStore promotedStore = newStore("holes-promoted");
+        ReplicatedMutation staleValue = mutation(1, MutationKind.SET, "deleted", "stale");
+        ReplicatedMutation tombstone = mutation(2, MutationKind.DELETE, "deleted", "");
+        ReplicatedMutation missingValue = mutation(3, MutationKind.SET, "missing", "restored");
+        ReplicatedMutation highWatermark = mutation(4, MutationKind.SET, "marker", "latest");
+        assertTrue(promotedStore.repairMutation(staleValue).success());
+        assertTrue(promotedStore.repairMutation(highWatermark).success());
+
+        FakeReplicaClient promotedClient = new FakeReplicaClient(Map.of());
+        // node-1 is visited first and only confirms the high watermark. The older entries exist on node-2.
+        promotedClient.replicaStates.put("node-1:9000", List.of(highWatermark));
+        promotedClient.replicaStates.put("node-2:9000", List.of(staleValue, tombstone, missingValue));
+        manager = new ReplicationManager(
+                "node-3",
+                cache(promotedShard),
+                new FixedRegistry(tempDir.resolve("holes-registry"), promotedStore),
+                promotedClient,
+                Duration.ofMillis(40));
+
+        assertEquals(4, promotedStore.committedVersion());
+        assertEquals("stale", promotedStore.get("deleted"));
+        manager.ensureStrongReadReady("shard-0", promotedShard);
+        assertEquals("(nil)", promotedStore.get("deleted"));
+        assertEquals("restored", promotedStore.get("missing"));
+        assertTrue(promotedStore.committedMutations().stream()
+                .anyMatch(mutation -> mutation.getKey().equals(ByteString.copyFromUtf8("deleted"))
+                        && mutation.getKind() == MutationKind.DELETE));
+
+        manager.close();
+        manager = null;
+        promotedStore.shutdown();
+        ShardKVStore restartedStore = newStore("holes-promoted");
+        assertEquals("(nil)", restartedStore.get("deleted"));
+        assertEquals("restored", restartedStore.get("missing"));
+        assertEquals(4, restartedStore.committedVersion());
+
+        manager = new ReplicationManager(
+                "node-3",
+                cache(promotedShard),
+                new FixedRegistry(tempDir.resolve("holes-restarted-registry"), restartedStore),
+                promotedClient,
+                Duration.ofMillis(40));
+        manager.ensureStrongReadReady("shard-0", promotedShard);
+        assertEquals("(nil)", restartedStore.get("deleted"));
+        restartedStore.shutdown();
+    }
+
+    @Test
+    void paginatedHoleTransferRefusesStrongServiceUntilCompletenessIsEstablished() {
+        ShardRecord promotedShard = promotedShard();
+        ShardKVStore promotedStore = newStore("paginated-promoted");
+        List<ReplicatedMutation> retainedState = new ArrayList<>();
+        for (int version = 1; version <= 1_025; version++) {
+            retainedState.add(mutation(version, MutationKind.SET, "key-" + version, "value-" + version));
+        }
+
+        FakeReplicaClient promotedClient = new FakeReplicaClient(Map.of());
+        promotedClient.replicaStates.put("node-1:9000", retainedState);
+        promotedClient.partitioned.add("node-2:9000");
+        manager = new ReplicationManager(
+                "node-3",
+                cache(promotedShard),
+                new FixedRegistry(tempDir.resolve("paginated-registry"), promotedStore),
+                promotedClient,
+                Duration.ofSeconds(10));
+
+        assertThrows(NodeUnavailableException.class, () -> manager.ensureStrongReadReady("shard-0", promotedShard));
+        assertEquals(8, promotedClient.stateFetchCount("node-1:9000"));
+        assertEquals(128, promotedClient.largestRequestedStateBatch.get());
+        assertEquals("(nil)", promotedStore.get("key-1025"));
+
+        manager.ensureStrongReadReady("shard-0", promotedShard);
+        assertEquals(9, promotedClient.stateFetchCount("node-1:9000"));
+        assertEquals("value-1025", promotedStore.get("key-1025"));
+        assertEquals(1_025, promotedStore.committedVersion());
+        promotedStore.shutdown();
+    }
+
     private Fixture fixture() {
         ShardRecord shard = ShardRecord.newBuilder()
                 .setShardId("shard-0")
@@ -181,6 +268,32 @@ class ReplicationManagerTest {
         FakeReplicaClient client = new FakeReplicaClient(followers);
         manager = new ReplicationManager("node-1", cache, leader, client, Duration.ofMillis(40));
         return new Fixture(shard, leader, followers, client);
+    }
+
+    private static ShardRecord promotedShard() {
+        return ShardRecord.newBuilder()
+                .setShardId("shard-0")
+                .setEpoch(4)
+                .setLeader("node-3")
+                .addReplicas("node-3")
+                .addReplicas("node-1")
+                .addReplicas("node-2")
+                .build();
+    }
+
+    private static ReplicatedMutation mutation(long version, MutationKind kind, String key, String value) {
+        return ReplicatedMutation.newBuilder()
+                .setRequestId("request-" + version)
+                .setShardId("shard-0")
+                .setEpoch(3)
+                .setVersion(version)
+                .setKind(kind)
+                .setKey(ByteString.copyFromUtf8(key))
+                .setValue(ByteString.copyFromUtf8(value))
+                .setOriginNodeId("node-1")
+                .setCreateTimeMs(1_000 + version)
+                .setUpdateTimeMs(1_000 + version)
+                .build();
     }
 
     private static ShardMapCache cache(ShardRecord shard) {
@@ -221,6 +334,9 @@ class ReplicationManagerTest {
 
     private static final class FakeReplicaClient extends ReplicaWriteClient {
         private final Map<String, ShardKVStore> stores;
+        private final Map<String, List<ReplicatedMutation>> replicaStates = new ConcurrentHashMap<>();
+        private final Map<String, AtomicInteger> stateFetchCounts = new ConcurrentHashMap<>();
+        private final AtomicInteger largestRequestedStateBatch = new AtomicInteger();
         private final Set<String> partitioned = ConcurrentHashMap.newKeySet();
         private final Set<String> delayed = ConcurrentHashMap.newKeySet();
         private final Set<String> commitFailed = ConcurrentHashMap.newKeySet();
@@ -283,19 +399,43 @@ class ReplicationManagerTest {
         @Override
         public ReplicaStateResponse fetchReplicaState(String targetAddress, ReplicaStateRequest request) {
             unavailableIfNeeded(targetAddress);
+            stateFetchCounts
+                    .computeIfAbsent(targetAddress, ignored -> new AtomicInteger())
+                    .incrementAndGet();
+            largestRequestedStateBatch.accumulateAndGet(request.getMaxMutations(), Math::max);
+            List<ReplicatedMutation> configuredState = replicaStates.get(targetAddress);
             ShardKVStore store = stores.get(targetAddress);
-            var mutations =
-                    store.committedMutationsAfter(request.getAfterVersion(), Math.max(1, request.getMaxMutations()));
+            var mutations = configuredState == null
+                    ? store.committedMutationsAfter(request.getAfterVersion(), Math.max(1, request.getMaxMutations()))
+                    : configuredState.stream()
+                            .filter(mutation -> mutation.getVersion() > request.getAfterVersion())
+                            .limit(Math.max(1, request.getMaxMutations()))
+                            .toList();
             long lastVersion = mutations.isEmpty()
                     ? request.getAfterVersion()
                     : mutations.getLast().getVersion();
+            boolean hasMore = configuredState == null
+                    ? !store.committedMutationsAfter(lastVersion, 1).isEmpty()
+                    : configuredState.stream().anyMatch(mutation -> mutation.getVersion() > lastVersion);
+            long committedVersion = configuredState == null
+                    ? store.committedVersion()
+                    : configuredState.stream()
+                            .mapToLong(ReplicatedMutation::getVersion)
+                            .max()
+                            .orElse(0);
             return ReplicaStateResponse.newBuilder()
                     .setSuccess(true)
                     .setDurable(true)
                     .addAllCommittedMutations(mutations)
-                    .setHasMore(!store.committedMutationsAfter(lastVersion, 1).isEmpty())
-                    .setCommittedVersion(store.committedVersion())
+                    .setHasMore(hasMore)
+                    .setCommittedVersion(committedVersion)
                     .build();
+        }
+
+        private int stateFetchCount(String targetAddress) {
+            return stateFetchCounts
+                    .getOrDefault(targetAddress, new AtomicInteger())
+                    .get();
         }
 
         private void unavailableIfNeeded(String targetAddress) {

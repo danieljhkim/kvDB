@@ -427,7 +427,10 @@ public class ReplicationManager implements AutoCloseable {
 
     private boolean pullReplicaState(String target, String shardId, long epoch, ShardKVStore local) {
         String cursorKey = target + "/" + shardId + "/" + epoch;
-        long afterVersion = pullCursors.getOrDefault(cursorKey, local.committedVersion());
+        // committedVersion is only a high watermark: this replica may still be missing older keys or tombstones.
+        // Begin each peer's transfer at the start of its retained state and use the cursor only for bounded
+        // continuation. repairMutation applies entries by per-key version, so replaying the retained state is safe.
+        long afterVersion = pullCursors.getOrDefault(cursorKey, 0L);
         for (int batchIndex = 0; batchIndex < MAX_PULL_BATCHES_PER_PASS; batchIndex++) {
             try {
                 ReplicaStateResponse response = replicaWriteClient.fetchReplicaState(

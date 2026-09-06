@@ -2,6 +2,7 @@ package com.danieljhkim.kvdb.kvnode.cluster;
 
 import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
 import com.danieljhkim.kvdb.kvcommon.exception.NodeUnavailableException;
+import com.danieljhkim.kvdb.kvcommon.limits.KvRequestLimits;
 import com.danieljhkim.kvdb.kvcommon.observability.Metrics;
 import com.danieljhkim.kvdb.kvnode.client.ReplicaWriteClient;
 import com.danieljhkim.kvdb.kvnode.storage.ShardKVStore;
@@ -42,7 +43,6 @@ import org.slf4j.LoggerFactory;
 public class ReplicationManager implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(ReplicationManager.class);
-    private static final int REPAIR_BATCH_SIZE = 128;
     private static final int MAX_PULL_BATCHES_PER_PASS = 8;
 
     private final String nodeId;
@@ -50,6 +50,7 @@ public class ReplicationManager implements AutoCloseable {
     private final ShardStoreRegistry shardStores;
     private final ReplicaWriteClient replicaWriteClient;
     private final Duration replicationTimeout;
+    private final KvRequestLimits limits;
     private final ConcurrentMap<String, ReentrantLock> shardLocks = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, ShardRecord> knownShards = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, RepairProgress> repairProgress = new ConcurrentHashMap<>();
@@ -64,11 +65,22 @@ public class ReplicationManager implements AutoCloseable {
             ShardStoreRegistry shardStores,
             ReplicaWriteClient replicaWriteClient,
             Duration replicationTimeout) {
+        this(nodeId, shardMapCache, shardStores, replicaWriteClient, replicationTimeout, new KvRequestLimits(null));
+    }
+
+    public ReplicationManager(
+            String nodeId,
+            ShardMapCache shardMapCache,
+            ShardStoreRegistry shardStores,
+            ReplicaWriteClient replicaWriteClient,
+            Duration replicationTimeout,
+            KvRequestLimits limits) {
         this.nodeId = Objects.requireNonNull(nodeId, "nodeId");
         this.shardMapCache = Objects.requireNonNull(shardMapCache, "shardMapCache");
         this.shardStores = Objects.requireNonNull(shardStores, "shardStores");
         this.replicaWriteClient = replicaWriteClient;
         this.replicationTimeout = replicationTimeout != null ? replicationTimeout : Duration.ofMillis(500);
+        this.limits = Objects.requireNonNull(limits, "limits");
         this.repairExecutor = Executors.newSingleThreadScheduledExecutor(
                 Thread.ofPlatform().daemon().name("kvdb-replica-repair-", 0).factory());
         long repairIntervalMs = Math.max(1_000L, this.replicationTimeout.toMillis() * 4L);
@@ -154,10 +166,19 @@ public class ReplicationManager implements AutoCloseable {
         for (String target : getReplicationTargets(shard)) {
             String progressKey = target + "/" + shardId;
             long cursor = repairCursors.getOrDefault(progressKey, 0L);
-            List<ReplicatedMutation> batch = mutations.stream()
-                    .filter(mutation -> mutation.getVersion() > cursor)
-                    .limit(REPAIR_BATCH_SIZE)
-                    .toList();
+            RepairBatch repairBatch = boundedRepairBatch(mutations, cursor, shardId, shard.getEpoch());
+            if (repairBatch.untransferableVersion() > cursor) {
+                repairCursors.put(progressKey, repairBatch.untransferableVersion());
+                boolean complete = mutations.getLast().getVersion() <= repairBatch.untransferableVersion();
+                repairProgress.put(progressKey, new RepairProgress(0, 0, complete));
+                log.warn(
+                        "Skipping untransferable replica repair mutation target={} shard={} version={}",
+                        target,
+                        shardId,
+                        repairBatch.untransferableVersion());
+                continue;
+            }
+            List<ReplicatedMutation> batch = repairBatch.mutations();
             if (batch.isEmpty()) {
                 repairCursors.put(progressKey, 0L);
                 repairProgress.put(progressKey, new RepairProgress(0, 0, true));
@@ -200,6 +221,32 @@ public class ReplicationManager implements AutoCloseable {
 
     public RepairProgress repairProgress(String target, String shardId) {
         return repairProgress.getOrDefault(target + "/" + shardId, new RepairProgress(0, 0, false));
+    }
+
+    private RepairBatch boundedRepairBatch(
+            List<ReplicatedMutation> mutations, long cursor, String shardId, long epoch) {
+        ReplicaRepairRequest.Builder request =
+                ReplicaRepairRequest.newBuilder().setShardId(shardId).setEpoch(epoch);
+        List<ReplicatedMutation> batch = new ArrayList<>();
+        for (ReplicatedMutation mutation : mutations) {
+            if (mutation.getVersion() <= cursor) {
+                continue;
+            }
+            if (batch.size() == limits.maxBatchEntries()) {
+                break;
+            }
+            ReplicaRepairRequest candidate =
+                    request.clone().addCommittedMutations(mutation).build();
+            if (candidate.getSerializedSize() > limits.maxMessageBytes()) {
+                if (batch.isEmpty()) {
+                    return new RepairBatch(List.of(), mutation.getVersion());
+                }
+                break;
+            }
+            batch.add(mutation);
+            request.addCommittedMutations(mutation);
+        }
+        return new RepairBatch(List.copyOf(batch), 0);
     }
 
     /** Pulls committed state from a replica quorum before this node serves as a newly elected leader. */
@@ -445,7 +492,7 @@ public class ReplicationManager implements AutoCloseable {
                                 .setShardId(shardId)
                                 .setEpoch(epoch)
                                 .setAfterVersion(afterVersion)
-                                .setMaxMutations(REPAIR_BATCH_SIZE)
+                                .setMaxMutations(limits.maxBatchEntries())
                                 .build());
                 if (!response.getSuccess() || !response.getDurable()) {
                     return false;
@@ -508,4 +555,6 @@ public class ReplicationManager implements AutoCloseable {
     public record MutationResult(String requestId, long version, int durableAcks) {}
 
     public record RepairProgress(int sent, int applied, boolean complete) {}
+
+    private record RepairBatch(List<ReplicatedMutation> mutations, long untransferableVersion) {}
 }

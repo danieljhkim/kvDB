@@ -33,7 +33,7 @@ git log -1 --format='%H %s' "$RELEASE_SHA"
 Record the candidate SHA, previous release tag, operator, UTC timestamp, Java
 version, Go version, OS, CPU architecture, Docker version, and Compose version.
 
-## 2. Reproduce CI locally
+## 2. Reproduce non-Docker CI locally
 
 ```bash
 mvn -B -ntp clean verify
@@ -49,7 +49,14 @@ test -f coverage/target/site/jacoco-aggregate/jacoco.xml
 buf lint kv.proto/src/main/proto
 buf breaking kv.proto/src/main/proto \
   --against ".git#tag=${PREVIOUS_TAG},subdir=kv.proto/src/main/proto"
+```
 
+## 3. Run manual Docker validation
+
+Docker Compose and failover validation are manual release checks; they are not
+scheduled by the GitHub Actions CI workflow.
+
+```bash
 KVDB_ADMIN_SECURITY_API_KEY=release-check \
 KVDB_ENV=test \
 KVDB_GRPC_SECURITY_MODE=development-plaintext \
@@ -65,7 +72,7 @@ log. The failover log must show an elected coordinator replacement, successful
 reads of acknowledged data before and after failover, rolling restarts, and a
 clean named-volume wipe.
 
-## 3. Rehearse forward migration
+## 4. Rehearse forward migration
 
 The previous images must exist in GHCR. Build candidate images from the pinned
 checkout so this rehearsal tests the exact candidate source before its tag is
@@ -126,7 +133,7 @@ Record the old and new image digests and attach logs proving the candidate read
 data written by the previous release. Stop the release if any persisted Raft,
 snapshot, WAL, or shard file is silently reinitialized.
 
-## 4. Verify backup and restore
+## 5. Verify backup and restore
 
 Back up every labeled volume after the forward-migration rehearsal, wipe the
 isolated project, restore the archives into newly created volumes, then rerun
@@ -164,7 +171,7 @@ STORAGE_NODE_ADDRS=node1:8001,node2:8002 ./scripts/smoke_test.sh
 Attach `SHA256SUMS`, the restore log, and the post-restore read results. Backups
 are not verified until a fresh volume set has served the acknowledged values.
 
-## 5. Prove rollback
+## 6. Prove rollback
 
 First try the previous binaries against the candidate-written data. If backward
 compatibility is intentionally unsupported, restore the pre-upgrade archives
@@ -182,9 +189,9 @@ the backup checksum used, the recovery-point objective, elapsed recovery time,
 and successful reads after rollback. Do not publish if neither rollback path
 works.
 
-## 6. Publish and verify immutable artifacts
+## 7. Publish and verify immutable artifacts
 
-Push the tag only after sections 1-5 have evidence:
+Push the tag only after sections 1-6 have evidence:
 
 ```bash
 git tag -s "$RELEASE_TAG" "$RELEASE_SHA" -m "kvDB ${RELEASE_TAG}"

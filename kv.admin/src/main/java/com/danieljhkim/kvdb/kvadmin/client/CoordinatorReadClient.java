@@ -8,10 +8,10 @@ import com.google.protobuf.ByteString;
 import io.grpc.ManagedChannel;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
@@ -32,7 +32,7 @@ public class CoordinatorReadClient {
 
     private final Map<String, ManagedChannel> channels = new ConcurrentHashMap<>();
     private final Map<String, CoordinatorGrpc.CoordinatorBlockingStub> stubs = new ConcurrentHashMap<>();
-    private final List<String> coordinatorAddresses;
+    private final CopyOnWriteArrayList<String> coordinatorAddresses;
     private final AtomicReference<String> leaderAddress = new AtomicReference<>();
     private final long timeoutSeconds;
     private final ChannelFactory channelFactory;
@@ -47,7 +47,7 @@ public class CoordinatorReadClient {
 
     CoordinatorReadClient(
             List<String> coordinatorAddresses, long timeout, TimeUnit timeUnit, ChannelFactory channelFactory) {
-        this.coordinatorAddresses = new ArrayList<>(coordinatorAddresses);
+        this.coordinatorAddresses = new CopyOnWriteArrayList<>(coordinatorAddresses);
         this.timeoutSeconds = timeUnit.toSeconds(timeout);
         this.channelFactory = channelFactory;
         logger.info("CoordinatorReadClient created for: {}", coordinatorAddresses);
@@ -107,9 +107,7 @@ public class CoordinatorReadClient {
                         if (hintResponse.getIsLeader()) {
                             leaderAddress.set(hint);
                             logger.info("Discovered and verified leader via hint: {}", hint);
-                            if (!coordinatorAddresses.contains(hint)) {
-                                coordinatorAddresses.add(hint);
-                            }
+                            rememberCoordinator(hint);
                             return getStub(hint);
                         }
                     } catch (StatusRuntimeException e) {
@@ -136,9 +134,7 @@ public class CoordinatorReadClient {
                     if (hint != null) {
                         logger.info("Extracted leader hint: {}", hint);
                         leaderAddress.set(hint);
-                        if (!coordinatorAddresses.contains(hint)) {
-                            coordinatorAddresses.add(hint);
-                        }
+                        rememberCoordinator(hint);
                     } else {
                         leaderAddress.set(null);
                     }
@@ -165,6 +161,10 @@ public class CoordinatorReadClient {
         return idx >= 0
                 ? usableAddress(description.substring(idx + prefix.length()).trim())
                 : null;
+    }
+
+    private void rememberCoordinator(String address) {
+        coordinatorAddresses.addIfAbsent(address);
     }
 
     private String usableAddress(String address) {

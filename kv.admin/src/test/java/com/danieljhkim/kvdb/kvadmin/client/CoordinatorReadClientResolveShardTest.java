@@ -3,6 +3,7 @@ package com.danieljhkim.kvdb.kvadmin.client;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.danieljhkim.kvdb.kvadmin.api.dto.ShardDto;
 import com.danieljhkim.kvdb.proto.coordinator.CoordinatorGrpc;
@@ -19,8 +20,13 @@ import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
@@ -163,7 +169,85 @@ class CoordinatorReadClientResolveShardTest {
         }
     }
 
-    private static final class FakeCoordinatorService extends CoordinatorGrpc.CoordinatorImplBase {
+    @Test
+    void concurrentLeaderDiscoveryDoesNotFailWhileRememberingAHint() throws Exception {
+        CountDownLatch firstDiscoveryStarted = new CountDownLatch(1);
+        CountDownLatch releaseFirstDiscovery = new CountDownLatch(1);
+        AtomicInteger discoveryRequests = new AtomicInteger();
+        AtomicReference<String> concurrentHint = new AtomicReference<>();
+        FakeCoordinatorService follower = new FakeCoordinatorService() {
+            @Override
+            public void getCoordinatorLeader(
+                    GetCoordinatorLeaderRequest request,
+                    StreamObserver<GetCoordinatorLeaderResponse> responseObserver) {
+                if (discoveryRequests.incrementAndGet() == 1) {
+                    firstDiscoveryStarted.countDown();
+                    try {
+                        if (!releaseFirstDiscovery.await(5, TimeUnit.SECONDS)) {
+                            responseObserver.onError(Status.DEADLINE_EXCEEDED.asRuntimeException());
+                            return;
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        responseObserver.onError(Status.CANCELLED.asRuntimeException());
+                        return;
+                    }
+                    responseObserver.onNext(GetCoordinatorLeaderResponse.newBuilder()
+                            .setIsLeader(false)
+                            .build());
+                } else {
+                    responseObserver.onNext(GetCoordinatorLeaderResponse.newBuilder()
+                            .setIsLeader(false)
+                            .setLeaderAddress(concurrentHint.get())
+                            .build());
+                }
+                responseObserver.onCompleted();
+            }
+        };
+        FakeCoordinatorService configuredLeader = new FakeCoordinatorService();
+        FakeCoordinatorService hintedLeader = new FakeCoordinatorService();
+        Server followerServer =
+                NettyServerBuilder.forPort(0).addService(follower).build().start();
+        Server configuredLeaderServer = NettyServerBuilder.forPort(0)
+                .addService(configuredLeader)
+                .build()
+                .start();
+        Server hintedLeaderServer =
+                NettyServerBuilder.forPort(0).addService(hintedLeader).build().start();
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            concurrentHint.set("localhost:" + hintedLeaderServer.getPort());
+            client.shutdown();
+            client = new CoordinatorReadClient(
+                    List.of("localhost:" + followerServer.getPort(), "localhost:" + configuredLeaderServer.getPort()),
+                    5,
+                    TimeUnit.SECONDS,
+                    (host, port) -> NettyChannelBuilder.forAddress(host, port)
+                            .usePlaintext()
+                            .build());
+
+            Future<ShardDto> firstRequest = executor.submit(() -> client.resolveShard(new byte[] {0x01}));
+            assertTrue(firstDiscoveryStarted.await(5, TimeUnit.SECONDS));
+            Future<ShardDto> secondRequest = executor.submit(() -> client.resolveShard(new byte[] {0x02}));
+            assertEquals("shard-7", secondRequest.get(5, TimeUnit.SECONDS).getShardId());
+
+            releaseFirstDiscovery.countDown();
+            assertEquals("shard-7", firstRequest.get(5, TimeUnit.SECONDS).getShardId());
+            assertEquals(2, discoveryRequests.get());
+        } finally {
+            releaseFirstDiscovery.countDown();
+            executor.shutdownNow();
+            executor.awaitTermination(5, TimeUnit.SECONDS);
+            followerServer.shutdownNow();
+            configuredLeaderServer.shutdownNow();
+            hintedLeaderServer.shutdownNow();
+            followerServer.awaitTermination(5, TimeUnit.SECONDS);
+            configuredLeaderServer.awaitTermination(5, TimeUnit.SECONDS);
+            hintedLeaderServer.awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
+    private static class FakeCoordinatorService extends CoordinatorGrpc.CoordinatorImplBase {
         private final AtomicReference<byte[]> lastKey = new AtomicReference<>();
         private final AtomicReference<Status> resolveStatus = new AtomicReference<>(Status.OK);
         private final AtomicLong delayMs = new AtomicLong();

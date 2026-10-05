@@ -10,7 +10,7 @@ COPY . .
 RUN mvn clean package -DskipTests -pl kv.node -am
 
 # Runtime stage. Temurin 21.0.12_8 JRE (pinned 2026-08-22).
-FROM eclipse-temurin:21.0.12_8-jre-resolute@sha256:097b5c0e8b5c9cc402e871a87a35f20e9413af9159410db2b1bdd8b78dcca7ed
+FROM eclipse-temurin:21.0.12.1_1-jre-resolute@sha256:e9a838377dc3719c0a0e7d1ac2e13d6f49c5cacd643f9a22024845736bb00ad9
 
 WORKDIR /app
 

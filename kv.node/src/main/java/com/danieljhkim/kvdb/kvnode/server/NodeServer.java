@@ -22,7 +22,6 @@ import com.danieljhkim.kvdb.kvnode.storage.ShardStoreRegistry;
 import io.grpc.Server;
 import io.grpc.ServerInterceptors;
 import io.grpc.ServerServiceDefinition;
-import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
@@ -92,7 +91,7 @@ public class NodeServer {
                 new InternalAuthServerInterceptor(grpcSecurity),
                 new GlobalExceptionInterceptor());
 
-        this.server = GrpcSecurity.configureServer(NettyServerBuilder.forPort(thisNode.getPort()), grpcSecurity)
+        this.server = GrpcSecurity.serverBuilder(thisNode.getPort(), grpcSecurity)
                 .maxInboundMessageSize(requestLimits.maxMessageBytes())
                 .maxConcurrentCallsPerConnection(requestLimits.maxConcurrentRequestsPerConnection())
                 .addService(interceptedService)
@@ -100,7 +99,7 @@ public class NodeServer {
         this.drainBudget = Duration.ofMillis(drainBudgetMillis());
         try {
             this.healthServer = new HealthHttpServer(
-                    healthPort(thisNode.getPort()),
+                    grpcSecurity.serverAddress(healthPort(thisNode.getPort())),
                     lifecycle,
                     () -> shardMapCache.isInitialized()
                             && watchShardMapClient.isConnected()
@@ -129,6 +128,7 @@ public class NodeServer {
         // Best-effort initial shard map fetch before accepting writes
         watchShardMapClient.start(shardMapCache.getMapVersion());
         server.start();
+        logger.info("Node gRPC server listening on {}", server.getListenSockets());
         healthServer.start();
         server.awaitTermination();
     }

@@ -10,6 +10,8 @@ x-coordinator-common: &coordinator-common
   environment: &coordinator-environment
     KVDB_ENV: ${KVDB_ENV:-docker}
     APP_CONFIG_PATH: app-config-docker.yml
+    # Explicit container-network bind; published host endpoints remain loopback-only.
+    KVDB_BIND_ADDRESS: "0.0.0.0"
     KVDB_GRPC_SECURITY_MODE: ${KVDB_GRPC_SECURITY_MODE:-mtls}
     KVDB_IDENTITY_ROLE: coordinator
     KVDB_INTERNAL_TLS_TRUST_BUNDLE: /run/secrets/kvdb/internal-ca-bundle.pem
@@ -149,6 +151,7 @@ services:
       KVDB_ENV: ${KVDB_ENV:-docker}
       APP_CONFIG_PATH: app-config-docker.yml
       STORAGE_NODE_ID: node-1
+      KVDB_BIND_ADDRESS: "0.0.0.0"
       KVDB_GRPC_SECURITY_MODE: ${KVDB_GRPC_SECURITY_MODE:-mtls}
       KVDB_IDENTITY_ROLE: storage-node
       KVDB_IDENTITY_PRINCIPAL: node-1
@@ -180,6 +183,7 @@ services:
       KVDB_ENV: ${KVDB_ENV:-docker}
       APP_CONFIG_PATH: app-config-docker.yml
       STORAGE_NODE_ID: node-2
+      KVDB_BIND_ADDRESS: "0.0.0.0"
       KVDB_GRPC_SECURITY_MODE: ${KVDB_GRPC_SECURITY_MODE:-mtls}
       KVDB_IDENTITY_ROLE: storage-node
       KVDB_IDENTITY_PRINCIPAL: node-2
@@ -216,6 +220,7 @@ services:
     environment:
       KVDB_ENV: ${KVDB_ENV:-docker}
       APP_CONFIG_PATH: app-config-docker.yml
+      KVDB_BIND_ADDRESS: "0.0.0.0"
       KVDB_GRPC_SECURITY_MODE: ${KVDB_GRPC_SECURITY_MODE:-mtls}
       KVDB_IDENTITY_ROLE: gateway
       KVDB_IDENTITY_PRINCIPAL: gateway-1

@@ -28,7 +28,6 @@ import com.danieljhkim.kvdb.kvcommon.observability.ServiceLifecycle;
 import io.grpc.Server;
 import io.grpc.ServerInterceptors;
 import io.grpc.ServerServiceDefinition;
-import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -132,13 +131,13 @@ public class CoordinatorServer {
                 exceptionInterceptor);
 
         // Build gRPC server with both services
-        this.server = GrpcSecurity.configureServer(NettyServerBuilder.forPort(thisNode.getPort()), grpcSecurity)
+        this.server = GrpcSecurity.serverBuilder(thisNode.getPort(), grpcSecurity)
                 .addService(interceptedCoordService)
                 .addService(interceptedRaftService)
                 .build();
         this.drainBudget = Duration.ofMillis(drainBudgetMillis());
         this.healthServer = new HealthHttpServer(
-                healthPort(thisNode.getPort()),
+                grpcSecurity.serverAddress(healthPort(thisNode.getPort())),
                 lifecycle,
                 () -> raftNode.getCurrentLeader() != null
                         && !raftNode.getCurrentLeader().isBlank());
@@ -214,7 +213,7 @@ public class CoordinatorServer {
 
         server.start();
         healthServer.start();
-        logger.info("gRPC server started on port {}", server.getPort());
+        logger.info("Coordinator gRPC server listening on {}", server.getListenSockets());
 
         server.awaitTermination();
     }

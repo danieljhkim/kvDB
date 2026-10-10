@@ -4,6 +4,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.danieljhkim.kvdb.kvcommon.grpc.GrpcIdentity;
+import com.danieljhkim.kvdb.kvcommon.grpc.GrpcSecurityConfig;
 import com.kvdb.proto.kvstore.KVServiceGrpc;
 import com.kvdb.proto.kvstore.PingRequest;
 import com.kvdb.proto.kvstore.PingResponse;
@@ -12,6 +14,7 @@ import io.grpc.MethodDescriptor;
 import io.grpc.ServerCall;
 import io.grpc.ServerCallHandler;
 import io.grpc.Status;
+import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -29,6 +32,39 @@ import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 class HealthHttpServerTest {
+
+    @Test
+    void defaultHealthListenerBindsLoopback() throws Exception {
+        try (HealthHttpServer server = new HealthHttpServer(0, new ServiceLifecycle(), () -> true)) {
+            server.start();
+            assertEquals("127.0.0.1", server.getAddress().getAddress().getHostAddress());
+            assertEquals(
+                    200,
+                    status(
+                            HttpClient.newHttpClient(),
+                            URI.create("http://127.0.0.1:" + server.getPort() + "/health/live")));
+        }
+    }
+
+    @Test
+    void healthListenerUsesSecurityBindAndAllowsExplicitWildcard() throws Exception {
+        GrpcSecurityConfig config = GrpcSecurityConfig.development(GrpcIdentity.Role.GATEWAY, "gateway-test");
+        try (HealthHttpServer server =
+                new HealthHttpServer(config.serverAddress(0), new ServiceLifecycle(), () -> true)) {
+            server.start();
+            assertEquals(config.bindAddress(), server.getAddress().getAddress());
+        }
+        try (HealthHttpServer server =
+                new HealthHttpServer(new InetSocketAddress("0.0.0.0", 0), new ServiceLifecycle(), () -> true)) {
+            server.start();
+            assertTrue(server.getAddress().getAddress().isAnyLocalAddress());
+            assertEquals(
+                    200,
+                    status(
+                            HttpClient.newHttpClient(),
+                            URI.create("http://127.0.0.1:" + server.getPort() + "/health/ready")));
+        }
+    }
 
     private static final Pattern PROMETHEUS_SAMPLE =
             Pattern.compile("[a-zA-Z_:][a-zA-Z0-9_:]*(?:\\{[a-zA-Z_][a-zA-Z0-9_]*=\"(?:[^\"\\\\]|\\\\.)*\""

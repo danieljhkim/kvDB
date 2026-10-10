@@ -1,5 +1,8 @@
 package com.danieljhkim.kvdb.kvcommon.grpc;
 
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.UnknownHostException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
@@ -14,7 +17,36 @@ public record GrpcSecurityConfig(
         Path certificateChain,
         Path privateKey,
         Path trustBundle,
-        Path revocationList) {
+        Path revocationList,
+        InetAddress bindAddress) {
+
+    public GrpcSecurityConfig {
+        Objects.requireNonNull(bindAddress, "bindAddress");
+    }
+
+    /** Retains constructor compatibility while applying safe listener defaults. */
+    public GrpcSecurityConfig(
+            Mode mode,
+            GrpcIdentity.Role localRole,
+            String localPrincipal,
+            Path certificateChain,
+            Path privateKey,
+            Path trustBundle,
+            Path revocationList) {
+        this(
+                mode,
+                localRole,
+                localPrincipal,
+                certificateChain,
+                privateKey,
+                trustBundle,
+                revocationList,
+                resolveBindAddress(mode, Map.of()));
+    }
+
+    public InetSocketAddress serverAddress(int port) {
+        return new InetSocketAddress(bindAddress, port);
+    }
 
     public enum Mode {
         MTLS,
@@ -59,7 +91,15 @@ public record GrpcSecurityConfig(
                         "development-plaintext requires KVDB_ENV=dev, development, local, or test");
             }
             String principal = environment.getOrDefault("KVDB_IDENTITY_PRINCIPAL", expectedRole.sanValue() + "-dev");
-            return development(expectedRole, principal);
+            return new GrpcSecurityConfig(
+                    Mode.DEVELOPMENT_PLAINTEXT,
+                    expectedRole,
+                    principal,
+                    null,
+                    null,
+                    null,
+                    null,
+                    resolveBindAddress(Mode.DEVELOPMENT_PLAINTEXT, environment));
         }
         if (!modeValue.equals("mtls")) {
             throw new IllegalStateException("KVDB_GRPC_SECURITY_MODE must be mtls or development-plaintext");
@@ -76,7 +116,28 @@ public record GrpcSecurityConfig(
         String revocationPath =
                 environment.getOrDefault(tlsPrefix + "REVOCATION_LIST", "").trim();
         Path revocations = revocationPath.isEmpty() ? null : readableFile(environment, tlsPrefix + "REVOCATION_LIST");
-        return new GrpcSecurityConfig(Mode.MTLS, expectedRole, principal, cert, key, trust, revocations);
+        return new GrpcSecurityConfig(
+                Mode.MTLS,
+                expectedRole,
+                principal,
+                cert,
+                key,
+                trust,
+                revocations,
+                resolveBindAddress(Mode.MTLS, environment));
+    }
+
+    private static InetAddress resolveBindAddress(Mode mode, Map<String, String> environment) {
+        String host = environment.getOrDefault("KVDB_BIND_ADDRESS", "").trim();
+        if (host.isEmpty()) {
+            host = mode == Mode.DEVELOPMENT_PLAINTEXT ? "127.0.0.1" : "0.0.0.0";
+        }
+        try {
+            return InetAddress.getByName(host);
+        } catch (UnknownHostException e) {
+            throw new IllegalStateException(
+                    "KVDB_BIND_ADDRESS must name a resolvable IP address or hostname: " + host, e);
+        }
     }
 
     private static String required(Map<String, String> environment, String name) {

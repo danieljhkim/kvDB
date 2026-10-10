@@ -10,6 +10,9 @@ import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapValidator;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardRecord;
 import com.danieljhkim.kvdb.kvcommon.exception.NotLeaderException;
+import com.danieljhkim.kvdb.kvcommon.exception.PermissionDeniedException;
+import com.danieljhkim.kvdb.kvcommon.grpc.GrpcIdentity;
+import com.danieljhkim.kvdb.kvcommon.grpc.GrpcPeerIdentity;
 import com.danieljhkim.kvdb.proto.coordinator.*;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
@@ -201,6 +204,17 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
     @Override
     public void registerNode(RegisterNodeRequest request, StreamObserver<RegisterNodeResponse> responseObserver) {
         requireLeader();
+
+        // The storage-node certificate principal is its node ID; admins may provision any node.
+        GrpcIdentity peer = GrpcPeerIdentity.CURRENT.get();
+        if (peer == null
+                || (peer.role() != GrpcIdentity.Role.ADMIN
+                        && (peer.role() != GrpcIdentity.Role.STORAGE_NODE
+                                || peer.principal().isBlank()
+                                || !peer.principal().equals(request.getNodeId())))) {
+            throw new PermissionDeniedException(
+                    "Node registration requires an admin or the verified storage-node identity matching nodeId");
+        }
 
         RaftCommand.RegisterNode command =
                 new RaftCommand.RegisterNode(request.getNodeId(), request.getAddress(), request.getZone());

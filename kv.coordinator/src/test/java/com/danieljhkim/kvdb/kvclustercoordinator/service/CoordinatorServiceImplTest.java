@@ -23,9 +23,14 @@ import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardRecord;
 import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
 import com.danieljhkim.kvdb.kvcommon.config.AppConfig;
+import com.danieljhkim.kvdb.kvcommon.exception.PermissionDeniedException;
 import com.danieljhkim.kvdb.kvcommon.grpc.CoordinatorClient;
 import com.danieljhkim.kvdb.kvcommon.grpc.CoordinatorClientManager;
 import com.danieljhkim.kvdb.kvcommon.grpc.GlobalExceptionInterceptor;
+import com.danieljhkim.kvdb.kvcommon.grpc.GrpcIdentity;
+import com.danieljhkim.kvdb.kvcommon.grpc.GrpcPeerIdentity;
+import com.danieljhkim.kvdb.kvcommon.grpc.GrpcSecurityConfig;
+import com.danieljhkim.kvdb.kvcommon.grpc.InternalAuthServerInterceptor;
 import com.danieljhkim.kvdb.kvcommon.grpc.WatchShardMapClient;
 import com.danieljhkim.kvdb.proto.coordinator.ClusterState;
 import com.danieljhkim.kvdb.proto.coordinator.CoordinatorGrpc;
@@ -38,13 +43,16 @@ import com.danieljhkim.kvdb.proto.coordinator.ReportShardLeaderRequest;
 import com.danieljhkim.kvdb.proto.coordinator.SetNodeStatusRequest;
 import com.danieljhkim.kvdb.proto.coordinator.SetShardLeaderRequest;
 import com.danieljhkim.kvdb.proto.coordinator.SetShardReplicasRequest;
+import io.grpc.Context;
 import io.grpc.ManagedChannel;
+import io.grpc.Metadata;
 import io.grpc.Server;
 import io.grpc.ServerInterceptors;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
+import io.grpc.stub.MetadataUtils;
 import io.grpc.stub.StreamObserver;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -197,6 +205,97 @@ class CoordinatorServiceImplTest {
     }
 
     @Test
+    void storageNodeCannotCreateOrOverwriteAnotherNodesEndpoint() throws Exception {
+        RaftStateMachineImpl stateMachine = new RaftStateMachineImpl();
+        try (SingleNodeCoordinator coordinator = new SingleNodeCoordinator(tempDir, stateMachine, stateMachine)) {
+            coordinator.stub().registerNode(registerNode("victim", "victim:8001"));
+            ShardMapSnapshot before = stateMachine.getSnapshot();
+            long logIndex = coordinator.log.lastIndex();
+            var attacker = coordinator.stub(GrpcIdentity.Role.STORAGE_NODE, "attacker");
+
+            for (String nodeId : List.of("victim", "new-victim", "Attacker")) {
+                StatusRuntimeException denied = assertThrows(
+                        StatusRuntimeException.class,
+                        () -> attacker.registerNode(registerNode(nodeId, "attacker:8001")));
+                assertEquals(Status.Code.PERMISSION_DENIED, denied.getStatus().getCode());
+                assertTrue(denied.getStatus().getDescription().contains("matching nodeId"));
+                assertEquals(logIndex, coordinator.log.lastIndex());
+                assertSame(before, stateMachine.getSnapshot());
+            }
+            assertEquals(
+                    "victim:8001", stateMachine.getSnapshot().getNode("victim").address());
+            assertNull(stateMachine.getSnapshot().getNode("new-victim"));
+        }
+    }
+
+    @Test
+    void storageNodeCanRegisterAndUpdateItsExactPrincipal() throws Exception {
+        RaftStateMachineImpl stateMachine = new RaftStateMachineImpl();
+        try (SingleNodeCoordinator coordinator = new SingleNodeCoordinator(tempDir, stateMachine, stateMachine)) {
+            var self = coordinator.stub(GrpcIdentity.Role.STORAGE_NODE, "node-1");
+            long logIndex = coordinator.log.lastIndex();
+            for (String address : List.of("node-1:8001", "node-1:8002")) {
+                long version = stateMachine.getMapVersion();
+                var response = self.registerNode(registerNode("node-1", address));
+                assertTrue(response.getSuccess());
+                assertEquals(++logIndex, coordinator.log.lastIndex());
+                assertEquals(version + 1, response.getMapVersion());
+                assertEquals(response.getMapVersion(), stateMachine.getMapVersion());
+                assertEquals(
+                        address, stateMachine.getSnapshot().getNode("node-1").address());
+            }
+        }
+    }
+
+    @Test
+    void adminCanRegisterAndUpdateNodesWithDifferentPrincipals() throws Exception {
+        RaftStateMachineImpl stateMachine = new RaftStateMachineImpl();
+        try (SingleNodeCoordinator coordinator = new SingleNodeCoordinator(tempDir, stateMachine, stateMachine)) {
+            var admin = coordinator.stub(GrpcIdentity.Role.ADMIN, "operator");
+            coordinator
+                    .stub(GrpcIdentity.Role.STORAGE_NODE, "node-1")
+                    .registerNode(registerNode("node-1", "node-1:8001"));
+            long logIndex = coordinator.log.lastIndex();
+            for (String nodeId : List.of("node-1", "node-2")) {
+                long version = stateMachine.getMapVersion();
+                var response = admin.registerNode(registerNode(nodeId, nodeId + ":9001"));
+                assertTrue(response.getSuccess());
+                assertEquals(++logIndex, coordinator.log.lastIndex());
+                assertEquals(version + 1, response.getMapVersion());
+                assertEquals(response.getMapVersion(), stateMachine.getMapVersion());
+                assertEquals(
+                        nodeId + ":9001",
+                        stateMachine.getSnapshot().getNode(nodeId).address());
+            }
+        }
+    }
+
+    @Test
+    void registrationServiceFailsClosedWithoutAnAuthorizedIdentity() throws Exception {
+        RaftStateMachineImpl stateMachine = new RaftStateMachineImpl();
+        try (SingleNodeCoordinator coordinator = new SingleNodeCoordinator(tempDir, stateMachine, stateMachine)) {
+            var service = new CoordinatorServiceImpl(coordinator.node, stateMachine, new WatcherManager());
+            ShardMapSnapshot before = stateMachine.getSnapshot();
+            long logIndex = coordinator.log.lastIndex();
+            assertThrows(
+                    PermissionDeniedException.class,
+                    () -> service.registerNode(registerNode("node-1", "localhost:8001"), new RecordingObserver<>()));
+            for (var peer : List.of(
+                    new GrpcIdentity(GrpcIdentity.Role.GATEWAY, "", "node-1"),
+                    new GrpcIdentity(GrpcIdentity.Role.STORAGE_NODE, "", ""))) {
+                Context.current()
+                        .withValue(GrpcPeerIdentity.CURRENT, peer)
+                        .run(() -> assertThrows(
+                                PermissionDeniedException.class,
+                                () -> service.registerNode(
+                                        registerNode("node-1", "localhost:8001"), new RecordingObserver<>())));
+            }
+            assertEquals(logIndex, coordinator.log.lastIndex());
+            assertSame(before, stateMachine.getSnapshot());
+        }
+    }
+
+    @Test
     void invalidShardMapMutationsAreRejectedBeforeReachingTheRaftLog() throws Exception {
         RaftStateMachineImpl stateMachine = new RaftStateMachineImpl();
         try (SingleNodeCoordinator coordinator = new SingleNodeCoordinator(tempDir, stateMachine, stateMachine)) {
@@ -222,11 +321,13 @@ class CoordinatorServiceImplTest {
                     () -> stub.setShardLeader(setShardLeader(shard.epoch(), "{\"leader_node_id\":\"node-9\"}")),
                     "Node not found");
             assertInvalidArgument(
-                    () -> stub.reportShardLeader(ReportShardLeaderRequest.newBuilder()
-                            .setShardId("shard-0")
-                            .setEpoch(shard.epoch())
-                            .setLeaderNodeId("node-9")
-                            .build()),
+                    () -> coordinator
+                            .stub(GrpcIdentity.Role.STORAGE_NODE, "node-1")
+                            .reportShardLeader(ReportShardLeaderRequest.newBuilder()
+                                    .setShardId("shard-0")
+                                    .setEpoch(shard.epoch())
+                                    .setLeaderNodeId("node-9")
+                                    .build()),
                     "Node not found: node-9");
             assertInvalidArgument(() -> stub.setShardReplicas(setShardReplicas()), "cannot be empty");
             assertInvalidArgument(
@@ -440,6 +541,8 @@ class CoordinatorServiceImplTest {
             server = NettyServerBuilder.forPort(0)
                     .addService(ServerInterceptors.intercept(
                             new CoordinatorServiceImpl(node, serviceView, watcherManager),
+                            new InternalAuthServerInterceptor(
+                                    GrpcSecurityConfig.development(GrpcIdentity.Role.COORDINATOR, "leader")),
                             new GlobalExceptionInterceptor()))
                     .build()
                     .start();
@@ -453,7 +556,17 @@ class CoordinatorServiceImplTest {
         }
 
         CoordinatorGrpc.CoordinatorBlockingStub stub() {
-            return CoordinatorGrpc.newBlockingStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS);
+            return stub(GrpcIdentity.Role.ADMIN, "operator");
+        }
+
+        CoordinatorGrpc.CoordinatorBlockingStub stub(GrpcIdentity.Role role, String principal) {
+            Metadata headers = new Metadata();
+            headers.put(
+                    Metadata.Key.of("x-kvdb-development-identity", Metadata.ASCII_STRING_MARSHALLER),
+                    role.sanValue() + "/" + principal);
+            return CoordinatorGrpc.newBlockingStub(channel)
+                    .withInterceptors(MetadataUtils.newAttachHeadersInterceptor(headers))
+                    .withDeadlineAfter(5, TimeUnit.SECONDS);
         }
 
         @Override

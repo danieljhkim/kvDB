@@ -109,7 +109,10 @@ gateway data API. A storage-node certificate is therefore insufficient for an
 admin mutation. The gateway's `RequestContext.tenant_id` and `principal` fields
 are informational and are not authorization inputs; services use the
 certificate-derived identity available in `GrpcPeerIdentity`. A storage-node
-principal must equal its node id. A replica accepts replication PREPARE,
+principal must equal its node id. Storage nodes may register or update only
+that node's endpoint; admins may register or update any node. Registration
+authorization is checked before submission to the coordinator's Raft log.
+A replica accepts replication PREPARE,
 COMMIT, and repair only from the verified principal of the shard leader in its
 current shard map, and `origin_node_id` must match the verified sender, so a
 superseded leader is fenced even when a handoff keeps the shard epoch. Bearer

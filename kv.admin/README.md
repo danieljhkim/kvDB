@@ -81,6 +81,69 @@ in the response or in logs (only the decoded byte length is logged).
 | Coordinator unavailable | 503 | `GRPC_ERROR` |
 | Coordinator deadline exceeded | 504 | `GRPC_ERROR` |
 
+## Mutation request bodies
+
+Typed JSON bodies use snake_case. Unknown or misspelled fields are rejected
+(`400` / `UNKNOWN_FIELD`) instead of being ignored. `POST /admin/config` and
+`POST /admin/config/shard-init` are the exception: their body is an open JSON
+object, and every key is configuration payload.
+
+`POST /admin/shards/{shardId}/replicas` expects a JSON array of node ids.
+
+Leader and status updates require `Content-Type: application/json`. A raw
+`text/plain` body is rejected with `415` / `UNSUPPORTED_MEDIA_TYPE`. The raw
+request text is never stored as a leader id or node status.
+
+### Set shard leader
+
+```bash
+curl -X POST http://localhost:8089/admin/shards/shard-0/leader \
+  -H "Content-Type: application/json" \
+  -H "X-Admin-Api-Key: ${ADMIN_API_KEY}" \
+  -d '{"leader_node_id": "node-9"}'
+```
+
+`leader_node_id` is required and must be non-blank. The stored leader is that
+field.
+
+### Set node status
+
+```bash
+curl -X POST http://localhost:8089/admin/nodes/node-1/status \
+  -H "Content-Type: application/json" \
+  -H "X-Admin-Api-Key: ${ADMIN_API_KEY}" \
+  -d '{"status": "ALIVE"}'
+```
+
+`status` is required and must be `ALIVE`, `SUSPECT`, or `DEAD`.
+
+### Trigger an operation
+
+```bash
+curl -X POST http://localhost:8089/admin/ops/trigger \
+  -H "Content-Type: application/json" \
+  -H "X-Admin-Api-Key: ${ADMIN_API_KEY}" \
+  -d '{"operation": "REBALANCE", "target_nodes": ["node-1"]}'
+```
+
+`operation` is required. `REBALANCE` and `COMPACT` are recognized
+(case-insensitive). Any other value returns `400` / `INVALID_ARGUMENT`.
+`POST /admin/ops/rebalance` and `POST /admin/ops/compact` use the same JSON
+shape but do not require `operation`.
+
+### Client-error codes
+
+Response `message` values below are stable and do not include Java exception
+text. `code` is the HTTP status as a decimal string.
+
+| Condition | HTTP | `error` | `message` |
+| --- | --- | --- | --- |
+| Malformed JSON | 400 | `MALFORMED_JSON` | `Request body is not valid JSON` |
+| JSON of the wrong shape, or a missing body | 400 | `INVALID_REQUEST` | `Request body does not match the expected schema` |
+| Unknown or misspelled field | 400 | `UNKNOWN_FIELD` | `Unknown field: <name>` |
+| Missing or invalid field | 400 | `VALIDATION_ERROR` | `<field>: <reason>` |
+| Content-Type other than `application/json` on a JSON endpoint | 415 | `UNSUPPORTED_MEDIA_TYPE` | `Content-Type must be application/json` |
+
 ## Check Node Health
 
 ```bash

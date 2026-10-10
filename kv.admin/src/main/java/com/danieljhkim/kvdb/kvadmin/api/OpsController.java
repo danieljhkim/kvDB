@@ -4,6 +4,7 @@ import com.danieljhkim.kvdb.kvadmin.api.dto.TriggerRequestDto;
 import com.danieljhkim.kvdb.kvadmin.service.OpsService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
+import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -36,7 +37,8 @@ public class OpsController {
     }
 
     @PostMapping("/trigger")
-    public ResponseEntity<TriggerRequestDto> triggerOperation(@RequestBody TriggerRequestDto request) {
+    public ResponseEntity<TriggerRequestDto> triggerOperation(
+            @Validated(TriggerRequestDto.OnTrigger.class) @RequestBody TriggerRequestDto request) {
         TriggerRequestDto result = opsService.triggerOperation(request);
         return ResponseEntity.ok(result);
     }

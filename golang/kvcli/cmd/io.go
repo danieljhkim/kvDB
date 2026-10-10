@@ -112,13 +112,45 @@ func positional(args []string, index int) *string {
 }
 
 // writeMetadata reports operation outcome on the given stream as stable
-// key=value pairs. Value bytes never travel on this path.
-func writeMetadata(out io.Writer, pairs ...string) {
+// key=value pairs. Value bytes never travel on this path. The first write
+// error is returned. This function does not retry the RPC that produced
+// the pairs; callers describe that already-known outcome themselves.
+func writeMetadata(out io.Writer, pairs ...string) error {
 	for index := 0; index+1 < len(pairs); index += 2 {
 		if index > 0 {
-			fmt.Fprint(out, " ")
+			if _, err := fmt.Fprint(out, " "); err != nil {
+				return err
+			}
 		}
-		fmt.Fprintf(out, "%s=%s", pairs[index], pairs[index+1])
+		if _, err := fmt.Fprintf(out, "%s=%s", pairs[index], pairs[index+1]); err != nil {
+			return err
+		}
 	}
-	fmt.Fprintln(out)
+	_, err := fmt.Fprintln(out)
+	return err
+}
+
+// outcome is the already-known RPC result reported by writeOutcome.
+type outcome struct {
+	op            string
+	mutated       bool
+	version       *uint64
+	requestID     string
+	valueWithheld bool
+}
+
+// writeOutcome writes metadata for a finished RPC. A write error becomes an
+// OutputError carrying that known result. The RPC is not repeated.
+func writeOutcome(out io.Writer, result outcome, pairs ...string) error {
+	if err := writeMetadata(out, pairs...); err != nil {
+		return &OutputError{
+			Err:           err,
+			Op:            result.op,
+			Mutated:       result.mutated,
+			Version:       result.version,
+			RequestID:     result.requestID,
+			ValueWithheld: result.valueWithheld,
+		}
+	}
+	return nil
 }

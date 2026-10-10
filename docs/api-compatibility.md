@@ -50,7 +50,9 @@ definite. Unmarked transport loss, generic I/O errors, and deadlines after a
 write may have reached the node remain `WRITE_OUTCOME_UNKNOWN` unless server
 replay is enabled. Older nodes without the trailer retain conservative outcome
 classification. The CLI reports application `UNAVAILABLE` as exit `2` and
-`WRITE_OUTCOME_UNKNOWN` as exit `5`.
+`WRITE_OUTCOME_UNKNOWN` as exit `5`. A completed RPC whose outcome line cannot
+be written is exit `6` (`OUTPUT`). That outcome is known, and the CLI does not
+repeat the RPC.
 
 The `limits` configuration bounds key bytes, value bytes, decoded message size,
 replication batch entries, context-field bytes, and concurrent RPCs per

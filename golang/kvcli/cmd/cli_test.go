@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -821,5 +823,304 @@ func TestMalformedBatchGetResponseExitsNonZeroWithoutJSON(t *testing.T) {
 				t.Fatalf("unexpected stderr %q", stderr)
 			}
 		})
+	}
+}
+
+// probeFailWriter fails every write with the code-review probe error.
+type probeFailWriter struct{}
+
+func (probeFailWriter) Write([]byte) (int, error) {
+	return 0, errors.New("probe output failure")
+}
+
+// failOnCall accepts every write except call number at, which fails.
+type failOnCall struct {
+	calls int
+	at    int
+}
+
+func (w *failOnCall) Write(p []byte) (int, error) {
+	w.calls++
+	if w.calls == w.at {
+		return 0, errors.New("probe output failure")
+	}
+	return len(p), nil
+}
+
+// runWriters is run with caller-selected stdout and stderr writers.
+func runWriters(t *testing.T, stdout, stderr io.Writer, args ...string) (outText, errText string, code int) {
+	t.Helper()
+	resetFlags(rootCmd)
+
+	outBuffer, outIsBuffer := stdout.(*bytes.Buffer)
+	errBuffer, errIsBuffer := stderr.(*bytes.Buffer)
+	if stdout == nil {
+		outBuffer = &bytes.Buffer{}
+		stdout = outBuffer
+		outIsBuffer = true
+	}
+	if stderr == nil {
+		errBuffer = &bytes.Buffer{}
+		stderr = errBuffer
+		errIsBuffer = true
+	}
+	rootCmd.SetOut(stdout)
+	rootCmd.SetErr(stderr)
+	rootCmd.SetArgs(args)
+	rootCmd.SetContext(context.Background())
+	t.Cleanup(func() {
+		rootCmd.SetOut(nil)
+		rootCmd.SetErr(nil)
+		rootCmd.SetArgs(nil)
+	})
+
+	err := rootCmd.Execute()
+	if outIsBuffer {
+		outText = outBuffer.String()
+	}
+	if errIsBuffer {
+		errText = errBuffer.String()
+	}
+	if err != nil {
+		errText += err.Error()
+		return outText, errText, exitCode(err)
+	}
+	return outText, errText, ExitOK
+}
+
+func TestWriteMetadataReturnsWriterErrors(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writeMetadata(&buf, "status", "OK", "version", "4", "request_id", "abc"); err != nil {
+		t.Fatal(err)
+	}
+	if buf.String() != "status=OK version=4 request_id=abc\n" {
+		t.Fatalf("metadata format changed: %q", buf.String())
+	}
+
+	for _, at := range []int{1, 2, 4} {
+		writer := &failOnCall{at: at}
+		err := writeMetadata(writer, "status", "OK", "version", "4")
+		if err == nil || err.Error() != "probe output failure" {
+			t.Fatalf("call %d: got %v", at, err)
+		}
+	}
+}
+
+func TestOutputErrorIsDistinctFromUsageAndUnknownWrite(t *testing.T) {
+	version := uint64(7)
+	err := &OutputError{
+		Err:       errors.New("probe output failure"),
+		Op:        "put",
+		Mutated:   true,
+		Version:   &version,
+		RequestID: "rid-7",
+	}
+	if code := exitCode(err); code != ExitOutput {
+		t.Fatalf("exit %d, want %d (usage=%d unknown=%d ok=%d)", code, ExitOutput, ExitUsage, ExitWriteOutcomeUnknown, ExitOK)
+	}
+	if statusName(err) != "OUTPUT" {
+		t.Fatalf("status %q", statusName(err))
+	}
+	text := err.Error()
+	for _, want := range []string{"version=7", "request_id=rid-7", "will not be repeated", "probe output failure", "changed stored state"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("error %q missing %q", text, want)
+		}
+	}
+	if strings.Contains(text, "status=OK") {
+		t.Fatalf("error looks like a successful metadata line: %q", text)
+	}
+}
+
+func TestMetadataOutputFailureExitsNonZeroWithoutRepeatingTheRPC(t *testing.T) {
+	t.Run("put", func(t *testing.T) {
+		server, connection := localGateway(t, testfixture.Hooks{})
+		resetFlags(rootCmd)
+		rootCmd.SetOut(probeFailWriter{})
+		rootCmd.SetErr(&bytes.Buffer{})
+		rootCmd.SetArgs(withArgs(connection, "put", "k", "v"))
+		rootCmd.SetContext(context.Background())
+		t.Cleanup(func() {
+			rootCmd.SetOut(nil)
+			rootCmd.SetErr(nil)
+			rootCmd.SetArgs(nil)
+		})
+
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		original := os.Stderr
+		os.Stderr = writer
+		code := Execute()
+		os.Stderr = original
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		captured, err := io.ReadAll(reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := reader.Close(); err != nil {
+			t.Fatal(err)
+		}
+		stderr := string(captured)
+
+		if code != ExitOutput {
+			t.Fatalf("expected exit %d, got %d stderr=%q", ExitOutput, code, stderr)
+		}
+		calls := server.Calls()
+		if len(calls) != 1 || calls[0].Method != "Put" {
+			t.Fatalf("put must run exactly once, got %+v", calls)
+		}
+		for _, want := range []string{
+			"Error:",
+			"OUTPUT:",
+			"version=1",
+			"request_id=" + calls[0].RequestID,
+			"will not be repeated",
+			"probe output failure",
+			"changed stored state",
+		} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("stderr missing %q: %q", want, stderr)
+			}
+		}
+		if strings.Contains(stderr, "status=OK") {
+			t.Fatalf("stderr looks like success metadata: %q", stderr)
+		}
+
+		stdout, readErr, readCode := run(t, withArgs(connection, "get", "k", "--raw")...)
+		if readCode != ExitOK || stdout != "v" {
+			t.Fatalf("applied put was not readable once, code=%d stdout=%q stderr=%q", readCode, stdout, readErr)
+		}
+		puts := 0
+		for _, call := range server.Calls() {
+			if call.Method == "Put" {
+				puts++
+			}
+		}
+		if puts != 1 {
+			t.Fatalf("follow-up read repeated the write: %+v", server.Calls())
+		}
+	})
+
+	t.Run("del", func(t *testing.T) {
+		server, connection := localGateway(t, testfixture.Hooks{})
+		server.Seed([]byte("k"), []byte("v"))
+
+		stdout, stderr, code := runWriters(t, probeFailWriter{}, &bytes.Buffer{}, withArgs(connection, "del", "k")...)
+		if code != ExitOutput {
+			t.Fatalf("expected exit %d, got %d stdout=%q stderr=%q", ExitOutput, code, stdout, stderr)
+		}
+		if strings.Contains(stdout, "status=OK") {
+			t.Fatalf("success metadata leaked: %q", stdout)
+		}
+		calls := server.Calls()
+		if len(calls) != 1 || calls[0].Method != "Delete" {
+			t.Fatalf("delete must run exactly once, got %+v", calls)
+		}
+		for _, want := range []string{"version=2", "request_id=" + calls[0].RequestID, "will not be repeated", "probe output failure"} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("stderr missing %q: %q", want, stderr)
+			}
+		}
+
+		_, _, readCode := run(t, withArgs(connection, "get", "k", "--raw")...)
+		if readCode != ExitNotFound {
+			t.Fatalf("delete did not apply, get exit %d", readCode)
+		}
+		deletes := 0
+		for _, call := range server.Calls() {
+			if call.Method == "Delete" {
+				deletes++
+			}
+		}
+		if deletes != 1 {
+			t.Fatalf("delete was repeated: %+v", server.Calls())
+		}
+	})
+
+	t.Run("get", func(t *testing.T) {
+		server, connection := localGateway(t, testfixture.Hooks{})
+		server.Seed([]byte("k"), []byte("secret-value"))
+
+		stdout, stderr, code := runWriters(t, &bytes.Buffer{}, probeFailWriter{}, withArgs(connection, "get", "k")...)
+		if code != ExitOutput {
+			t.Fatalf("expected exit %d, got %d stdout=%q stderr=%q", ExitOutput, code, stdout, stderr)
+		}
+		if stdout != "" || strings.Contains(stderr, "secret-value") {
+			t.Fatalf("value leaked, stdout=%q stderr=%q", stdout, stderr)
+		}
+		calls := server.Calls()
+		if len(calls) != 1 || calls[0].Method != "Get" || calls[0].HeadOnly {
+			t.Fatalf("get must run exactly once, got %+v", calls)
+		}
+		for _, want := range []string{
+			"version=1",
+			"request_id=" + calls[0].RequestID,
+			"the value was not written",
+			"without changing stored state",
+			"probe output failure",
+		} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("stderr missing %q: %q", want, stderr)
+			}
+		}
+		if strings.Contains(stderr, "will not be repeated") {
+			t.Fatalf("a read was described as a write: %q", stderr)
+		}
+	})
+
+	t.Run("ping", func(t *testing.T) {
+		server, connection := localGateway(t, testfixture.Hooks{})
+		stdout, stderr, code := runWriters(t, probeFailWriter{}, &bytes.Buffer{}, withArgs(connection, "ping")...)
+		if code != ExitOutput {
+			t.Fatalf("expected exit %d, got %d stdout=%q stderr=%q", ExitOutput, code, stdout, stderr)
+		}
+		if strings.Contains(stdout, "status=OK") {
+			t.Fatalf("success metadata leaked: %q", stdout)
+		}
+		calls := server.Calls()
+		if len(calls) != 1 || calls[0].Method != "Get" || !calls[0].HeadOnly {
+			t.Fatalf("ping must probe exactly once, got %+v", calls)
+		}
+		for _, want := range []string{"without changing stored state", "probe output failure", "OUTPUT:"} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("stderr missing %q: %q", want, stderr)
+			}
+		}
+	})
+}
+
+func TestPreRPCValidationStaysUsageWhenOutputWouldFail(t *testing.T) {
+	server, connection := localGateway(t, testfixture.Hooks{})
+	keyPath := filepath.Join(t.TempDir(), "key.bin")
+	if err := os.WriteFile(keyPath, []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := [][]string{
+		{"put"},
+		{"put", "k"},
+		{"del"},
+		{"get"},
+		{"put", "k", "v", "--key-file", keyPath},
+		{"get", "k", "--key-file", keyPath},
+		{"del", "k", "--key-file", keyPath},
+		{"ping", "probe", "--key-file", keyPath},
+		{"put", "k", "v", "--ttl", "-1s"},
+		{"put", "k", "v", "--ttl", "1ns"},
+	}
+	for _, args := range cases {
+		_, stderr, code := runWriters(t, probeFailWriter{}, probeFailWriter{}, withArgs(connection, args...)...)
+		if code != ExitUsage {
+			t.Fatalf("%v: expected usage exit %d, got %d %q", args, ExitUsage, code, stderr)
+		}
+		if strings.Contains(stderr, "OUTPUT:") || strings.Contains(stderr, "probe output failure") {
+			t.Fatalf("%v: validation was reported as an output failure: %q", args, stderr)
+		}
+	}
+	if len(server.Calls()) != 0 {
+		t.Fatalf("pre-RPC validation reached the gateway: %+v", server.Calls())
 	}
 }

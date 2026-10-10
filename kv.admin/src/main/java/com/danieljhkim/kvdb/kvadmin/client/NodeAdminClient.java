@@ -13,7 +13,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * gRPC client for node admin operations (health, stats, compaction).
+ * gRPC client for node health operations.
  */
 public class NodeAdminClient {
 
@@ -64,16 +64,6 @@ public class NodeAdminClient {
             logger.warn("Failed to ping node: {}", nodeAddress, e);
             return false;
         }
-    }
-
-    /**
-     * Trigger compaction on a node.
-     *
-     * @param nodeAddress Node address in format "host:port"
-     */
-    public void triggerCompaction(String nodeAddress) {
-        // TODO: Implement compaction RPC when available in kvstore.proto
-        logger.info("Triggering compaction on node: {}", nodeAddress);
     }
 
     /**

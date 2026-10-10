@@ -11,11 +11,10 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * REST controller for operational tasks (rebalance, compaction, etc.).
+ * REST controller for operational tasks.
  *
- * <p>
- * Endpoints: - POST /admin/ops/rebalance - Trigger cluster rebalancing - POST /admin/ops/compact - Trigger compaction
- * on nodes - POST /admin/ops/trigger - Generic operation trigger
+ * <p>{@code POST /admin/ops/compact} and {@code COMPACT} on the generic trigger endpoint return 501 until
+ * node compaction is implemented.
  */
 @RestController
 @RequestMapping("/admin/ops")
@@ -32,7 +31,7 @@ public class OpsController {
 
     @PostMapping("/compact")
     public ResponseEntity<TriggerRequestDto> triggerCompaction(@RequestBody TriggerRequestDto request) {
-        TriggerRequestDto result = opsService.triggerCompaction(request);
+        TriggerRequestDto result = opsService.triggerCompaction();
         return ResponseEntity.ok(result);
     }
 

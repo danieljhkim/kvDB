@@ -667,12 +667,16 @@ public class KvGatewayServiceImpl extends KvGatewayGrpc.KvGatewayImplBase {
         logger.info(
                 "KV write audit operation={} requestId={} shardId={} authenticatedRole={} authenticatedTenant={} authenticatedPrincipal={} traceparent={}",
                 operation,
-                requestId,
+                escapeAuditNewlines(requestId),
                 shardId,
                 identity.role().sanValue(),
                 identity.tenant(),
                 identity.principal(),
                 traceparent);
+    }
+
+    private static String escapeAuditNewlines(String value) {
+        return value.replace("\r", "\\r").replace("\n", "\\n");
     }
 
     private static Status writeOutcomeUnknownStatus(String shardId, ExecutionResult<?> result) {

@@ -55,6 +55,13 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
+import org.apache.logging.log4j.core.layout.PatternLayout;
 import org.junit.jupiter.api.Test;
 
 class KvGatewayContractTest {
@@ -251,6 +258,46 @@ class KvGatewayContractTest {
         assertThrows(
                 IllegalStateException.class,
                 () -> service.put(request("request").build(), new CapturingObserver<>()));
+    }
+
+    @Test
+    void writeAuditEscapesRequestIdNewlinesAndPreservesOrdinaryFields() {
+        CapturingExecutor executor = new CapturingExecutor();
+        executor.invokeOperation = true;
+        KvGatewayServiceImpl service = new KvGatewayServiceImpl(cache(), executor);
+        LoggerContext context = (LoggerContext) LogManager.getContext(false);
+        org.apache.logging.log4j.core.Logger logger = context.getLogger(KvGatewayServiceImpl.class.getName());
+        AuditCapturingAppender appender = new AuditCapturingAppender();
+        appender.start();
+        logger.addAppender(appender);
+
+        try {
+            for (String requestId : List.of("ordinary-request", "request\nforged", "request\rforged")) {
+                CapturingObserver<PutResponse> observer = new CapturingObserver<>();
+                runAsClient(() -> service.put(request(requestId).build(), observer));
+                assertEquals(Status.Code.OK, observer.value.getStatus().getCode());
+            }
+        } finally {
+            logger.removeAppender(appender);
+            appender.stop();
+        }
+
+        assertEquals(3, appender.lines.size());
+        assertEquals(
+                "KV write audit operation=put requestId=ordinary-request shardId=shard-0 authenticatedRole=client authenticatedTenant=tenant-a authenticatedPrincipal=alice traceparent=",
+                appender.lines.get(0).stripTrailing());
+        assertEquals(
+                "KV write audit operation=put requestId=request\\nforged shardId=shard-0 authenticatedRole=client authenticatedTenant=tenant-a authenticatedPrincipal=alice traceparent=",
+                appender.lines.get(1).stripTrailing());
+        assertEquals(
+                "KV write audit operation=put requestId=request\\rforged shardId=shard-0 authenticatedRole=client authenticatedTenant=tenant-a authenticatedPrincipal=alice traceparent=",
+                appender.lines.get(2).stripTrailing());
+        assertTrue(appender.lines.stream()
+                .allMatch(line -> Pattern.compile("\\r\\n|\\r|\\n")
+                                .matcher(line)
+                                .results()
+                                .count()
+                        == 1));
     }
 
     @Test
@@ -529,6 +576,22 @@ class KvGatewayContractTest {
 
         @Override
         public void onCompleted() {}
+    }
+
+    private static final class AuditCapturingAppender extends AbstractAppender {
+        private static final PatternLayout LAYOUT =
+                PatternLayout.newBuilder().withPattern("%msg%n").build();
+
+        private final List<String> lines = new ArrayList<>();
+
+        private AuditCapturingAppender() {
+            super("audit-capture", null, LAYOUT, false, Property.EMPTY_ARRAY);
+        }
+
+        @Override
+        public void append(LogEvent event) {
+            lines.add(LAYOUT.toSerializable(event).toString());
+        }
     }
 
     private static final class CapturingExecutor extends RequestExecutor {

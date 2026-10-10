@@ -2,9 +2,12 @@ package com.danieljhkim.kvdb.kvadmin.api;
 
 import com.danieljhkim.kvdb.kvadmin.api.dto.HealthDto;
 import com.danieljhkim.kvdb.kvadmin.api.dto.NodeDto;
+import com.danieljhkim.kvdb.kvadmin.api.dto.SetNodeStatusRequestDto;
 import com.danieljhkim.kvdb.kvadmin.service.NodeAdminService;
+import jakarta.validation.Valid;
 import java.util.List;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -19,7 +22,7 @@ import org.springframework.web.bind.annotation.RestController;
  * <p>
  * Endpoints: - GET /admin/nodes - List all nodes - GET /admin/nodes/{nodeId} - Get node details - GET
  * /admin/nodes/{nodeId}/health - Get node health - POST /admin/nodes - Register a new node - POST
- * /admin/nodes/{nodeId}/status - Update node status
+ * /admin/nodes/{nodeId}/status - Update node status from JSON {@code {"status":"ALIVE|SUSPECT|DEAD"}}
  */
 @RestController
 @RequestMapping("/admin/nodes")
@@ -52,9 +55,14 @@ public class NodeController {
         return ResponseEntity.ok(registered);
     }
 
-    @PostMapping("/{nodeId}/status")
-    public ResponseEntity<NodeDto> setNodeStatus(@PathVariable("nodeId") String nodeId, @RequestBody String status) {
-        NodeDto node = nodeAdminService.setNodeStatus(nodeId, status);
+    /**
+     * Set a node's status. Requires {@code application/json}. {@code status} must be {@code ALIVE}, {@code SUSPECT},
+     * or {@code DEAD}. The raw request body is never stored as the status.
+     */
+    @PostMapping(value = "/{nodeId}/status", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<NodeDto> setNodeStatus(
+            @PathVariable("nodeId") String nodeId, @Valid @RequestBody SetNodeStatusRequestDto request) {
+        NodeDto node = nodeAdminService.setNodeStatus(nodeId, request.getStatus());
         return ResponseEntity.ok(node);
     }
 }

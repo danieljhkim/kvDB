@@ -2,6 +2,7 @@ package com.danieljhkim.kvdb.kvadmin.service;
 
 import com.danieljhkim.kvdb.kvadmin.api.dto.TriggerRequestDto;
 import com.danieljhkim.kvdb.kvadmin.client.NodeAdminClient;
+import java.util.Locale;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -39,9 +40,14 @@ public class OpsService {
     }
 
     public TriggerRequestDto triggerOperation(TriggerRequestDto request) {
+        if (request == null
+                || request.getOperation() == null
+                || request.getOperation().isBlank()) {
+            throw new IllegalArgumentException("operation is required");
+        }
         log.info("Triggering generic operation: {}", request);
         String operation = request.getOperation();
-        return switch (operation.toUpperCase()) {
+        return switch (operation.toUpperCase(Locale.ROOT)) {
             case "REBALANCE" -> triggerRebalance(request);
             case "COMPACT" -> triggerCompaction(request);
             default -> {

@@ -29,6 +29,20 @@ Current option behavior is:
 - max-staleness bounds are rejected; read-your-writes requires strong
   consistency and low-latency mode requires eventual consistency.
 
+Write request IDs identify an immutable mutation in the storage shard's
+deduplication journal. Reusing an ID there with a different key, value, mutation
+kind, TTL, or conditional-write options returns gRPC `INVALID_ARGUMENT` from
+the node and application `INVALID_ARGUMENT` through the gateway. This is a
+non-retryable conflict, including when `require_idempotency` is enabled: the
+gateway does not replay it. The conflicting request leaves stored data
+unchanged. An identical put or delete replay returns the original version.
+Clients must use a fresh request ID for a different mutation. IDs are tracked
+per shard; this does not introduce cluster-wide request-ID uniqueness.
+
+The gateway preserves definitive node RPC status codes rather than converting
+request errors to retryable `UNAVAILABLE`. Genuine missing-node and quorum
+availability failures continue to return `UNAVAILABLE`.
+
 The `limits` configuration bounds key bytes, value bytes, decoded message size,
 replication batch entries, context-field bytes, and concurrent RPCs per
 connection. The transport rejects oversized frames with gRPC

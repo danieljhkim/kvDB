@@ -1,5 +1,6 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.state;
 
+import com.danieljhkim.kvdb.kvcommon.sharding.ShardKeyMapper;
 import java.util.Collections;
 import java.util.Map;
 import lombok.Getter;
@@ -67,7 +68,7 @@ public final class ShardMapSnapshot {
     // ============================
 
     /**
-     * Resolves a key to its owning shard using consistent hashing.
+     * Resolves a key to its owning shard using the data plane's key-to-shard function.
      *
      * @param key the key bytes
      * @return the shard record owning this key, or null if shards not initialized
@@ -76,11 +77,7 @@ public final class ShardMapSnapshot {
         if (numShards == 0 || shards.isEmpty()) {
             return null;
         }
-
-        int hash = computeHash(key);
-        int shardIndex = Math.abs(hash) % numShards;
-        String shardId = "shard-" + shardIndex;
-        return shards.get(shardId);
+        return shards.get(ShardKeyMapper.shardId(key, numShards));
     }
 
     /**
@@ -90,25 +87,7 @@ public final class ShardMapSnapshot {
         if (numShards == 0) {
             return null;
         }
-        int hash = computeHash(key);
-        int shardIndex = Math.abs(hash) % numShards;
-        return "shard-" + shardIndex;
-    }
-
-    /**
-     * Simple hash function for key-to-shard mapping. Uses FNV-1a for good distribution.
-     */
-    private int computeHash(byte[] key) {
-        if (key == null || key.length == 0) {
-            return 0;
-        }
-        // FNV-1a hash
-        int hash = 0x811c9dc5;
-        for (byte b : key) {
-            hash ^= (b & 0xff);
-            hash *= 0x01000193;
-        }
-        return hash;
+        return ShardKeyMapper.shardId(key, numShards);
     }
 
     // ============================

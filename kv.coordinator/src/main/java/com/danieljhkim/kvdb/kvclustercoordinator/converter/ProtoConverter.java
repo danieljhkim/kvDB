@@ -5,12 +5,9 @@ import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapDelta;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardRecord;
 import com.danieljhkim.kvdb.proto.coordinator.ClusterState;
-import com.danieljhkim.kvdb.proto.coordinator.KeyRange;
 import com.danieljhkim.kvdb.proto.coordinator.NodeStatus;
 import com.danieljhkim.kvdb.proto.coordinator.PartitioningConfig;
 import com.danieljhkim.kvdb.proto.coordinator.ShardConfigState;
-import com.google.protobuf.ByteString;
-import java.nio.ByteBuffer;
 import java.util.HashMap;
 
 /**
@@ -94,10 +91,6 @@ public final class ProtoConverter {
             builder.setLeader(shard.leader());
         }
 
-        if (shard.keyRange() != null) {
-            builder.setKeyRange(toProto(shard.keyRange()));
-        }
-
         return builder.build();
     }
 
@@ -112,20 +105,6 @@ public final class ProtoConverter {
         };
     }
 
-    public static KeyRange toProto(ShardRecord.KeyRange range) {
-        if (range == null) {
-            return null;
-        }
-        // Convert int hash values to bytes for the proto
-        ByteBuffer startBuffer = ByteBuffer.allocate(4).putInt(range.startHash());
-        ByteBuffer endBuffer = ByteBuffer.allocate(4).putInt(range.endHash());
-
-        return KeyRange.newBuilder()
-                .setStartKey(ByteString.copyFrom(startBuffer.array()))
-                .setEndKey(ByteString.copyFrom(endBuffer.array()))
-                .build();
-    }
-
     public static ShardRecord.ShardConfigState fromProto(ShardConfigState state) {
         if (state == null) {
             return ShardRecord.ShardConfigState.UNSPECIFIED;
@@ -135,15 +114,6 @@ public final class ProtoConverter {
             case MOVING -> ShardRecord.ShardConfigState.MOVING;
             default -> ShardRecord.ShardConfigState.UNSPECIFIED;
         };
-    }
-
-    private static ShardRecord.KeyRange fromProto(KeyRange range) {
-        if (range.getStartKey().size() != Integer.BYTES || range.getEndKey().size() != Integer.BYTES) {
-            throw new IllegalArgumentException("Snapshot shard key ranges must contain exactly four-byte hashes");
-        }
-        return new ShardRecord.KeyRange(
-                ByteBuffer.wrap(range.getStartKey().toByteArray()).getInt(),
-                ByteBuffer.wrap(range.getEndKey().toByteArray()).getInt());
     }
 
     // ============================
@@ -200,8 +170,7 @@ public final class ProtoConverter {
                                 shard.getEpoch(),
                                 shard.getReplicasList(),
                                 shard.getLeader().isBlank() ? null : shard.getLeader(),
-                                fromProto(shard.getConfigState()),
-                                shard.hasKeyRange() ? fromProto(shard.getKeyRange()) : null)));
+                                fromProto(shard.getConfigState()))));
 
         var state = new com.danieljhkim.kvdb.kvclustercoordinator.state.ClusterState();
         state.restore(

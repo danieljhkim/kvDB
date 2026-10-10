@@ -1,5 +1,6 @@
 package com.danieljhkim.kvdb.kvcommon.cache;
 
+import com.danieljhkim.kvdb.kvcommon.sharding.ShardKeyMapper;
 import com.danieljhkim.kvdb.proto.coordinator.ClusterState;
 import com.danieljhkim.kvdb.proto.coordinator.NodeRecord;
 import com.danieljhkim.kvdb.proto.coordinator.ShardMapDelta;
@@ -82,9 +83,7 @@ public class ShardMapCache implements Consumer<ShardMapDelta> {
             numShards = state.getShardsCount();
         }
 
-        int hash = hashKey(key);
-        int shardIndex = Math.floorMod(hash, numShards);
-        return "shard-" + shardIndex;
+        return ShardKeyMapper.shardId(key, numShards);
     }
 
     public ShardRecord getShard(String shardId) {
@@ -168,16 +167,5 @@ public class ShardMapCache implements Consumer<ShardMapDelta> {
             return Optional.empty();
         }
         return Optional.of(node.getAddress());
-    }
-
-    private int hashKey(byte[] key) {
-        if (key == null || key.length == 0) {
-            return 0;
-        }
-        int result = 1;
-        for (byte b : key) {
-            result = 31 * result + b;
-        }
-        return result;
     }
 }

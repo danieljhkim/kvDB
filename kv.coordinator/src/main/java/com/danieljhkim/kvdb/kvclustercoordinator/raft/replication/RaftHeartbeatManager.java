@@ -1,9 +1,12 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.raft.replication;
 
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftConfiguration;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftPersistentStateStore;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.state.RaftNodeState;
 import com.danieljhkim.kvdb.proto.raft.AppendEntriesRequest;
 import com.danieljhkim.kvdb.proto.raft.AppendEntriesResponse;
+import java.io.IOException;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -29,6 +32,7 @@ public class RaftHeartbeatManager {
     private final String nodeId;
     private final RaftConfiguration config;
     private final RaftNodeState state;
+    private final RaftPersistentStateStore persistentStore;
     private final ScheduledExecutorService scheduler;
     private final BiFunction<String, AppendEntriesRequest, CompletableFuture<AppendEntriesResponse>> rpcClient;
     private final Consumer<String> replicationTrigger;
@@ -39,21 +43,24 @@ public class RaftHeartbeatManager {
             String nodeId,
             RaftConfiguration config,
             RaftNodeState state,
+            RaftPersistentStateStore persistentStore,
             ScheduledExecutorService scheduler,
             BiFunction<String, AppendEntriesRequest, CompletableFuture<AppendEntriesResponse>> rpcClient) {
-        this(nodeId, config, state, scheduler, rpcClient, ignored -> {});
+        this(nodeId, config, state, persistentStore, scheduler, rpcClient, ignored -> {});
     }
 
     public RaftHeartbeatManager(
             String nodeId,
             RaftConfiguration config,
             RaftNodeState state,
+            RaftPersistentStateStore persistentStore,
             ScheduledExecutorService scheduler,
             BiFunction<String, AppendEntriesRequest, CompletableFuture<AppendEntriesResponse>> rpcClient,
             Consumer<String> replicationTrigger) {
         this.nodeId = nodeId;
         this.config = config;
         this.state = state;
+        this.persistentStore = Objects.requireNonNull(persistentStore, "persistentStore cannot be null");
         this.scheduler = scheduler;
         this.rpcClient = rpcClient;
         this.replicationTrigger = replicationTrigger;
@@ -176,8 +183,12 @@ public class RaftHeartbeatManager {
                     nodeId,
                     response.getTerm(),
                     peerId);
-            state.updateTerm(response.getTerm());
-            state.transitionToFollower(null);
+            try {
+                RaftTermAdoption.adoptHigherTerm(state, persistentStore, response.getTerm());
+            } catch (IOException e) {
+                log.error("[{}] Failed to persist higher term {}, not adopting it", nodeId, response.getTerm(), e);
+                return;
+            }
             stop();
             return;
         }

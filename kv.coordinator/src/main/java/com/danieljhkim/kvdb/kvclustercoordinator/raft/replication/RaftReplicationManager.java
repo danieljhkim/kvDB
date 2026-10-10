@@ -3,6 +3,7 @@ package com.danieljhkim.kvdb.kvclustercoordinator.raft.replication;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftConfiguration;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLog;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLogEntry;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftPersistentStateStore;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftSnapshotStore;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.state.RaftNodeState;
 import com.danieljhkim.kvdb.proto.raft.AppendEntriesRequest;
@@ -14,6 +15,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -41,6 +43,7 @@ public class RaftReplicationManager {
     private final BiFunction<String, InstallSnapshotRequest, CompletableFuture<InstallSnapshotResponse>>
             snapshotRpcClient;
     private final RaftSnapshotStore snapshotStore;
+    private final RaftPersistentStateStore persistentStore;
 
     // Track which peers are currently being replicated to (prevent concurrent replication to same peer)
     private final Map<String, CompletableFuture<Void>> activeReplications = new ConcurrentHashMap<>();
@@ -49,11 +52,13 @@ public class RaftReplicationManager {
             String nodeId,
             RaftConfiguration config,
             RaftNodeState state,
+            RaftPersistentStateStore persistentStore,
             BiFunction<String, AppendEntriesRequest, CompletableFuture<AppendEntriesResponse>> rpcClient) {
         this(
                 nodeId,
                 config,
                 state,
+                persistentStore,
                 rpcClient,
                 (peer, request) -> CompletableFuture.failedFuture(
                         new IllegalStateException("InstallSnapshot RPC client is not configured")),
@@ -64,12 +69,14 @@ public class RaftReplicationManager {
             String nodeId,
             RaftConfiguration config,
             RaftNodeState state,
+            RaftPersistentStateStore persistentStore,
             BiFunction<String, AppendEntriesRequest, CompletableFuture<AppendEntriesResponse>> rpcClient,
             BiFunction<String, InstallSnapshotRequest, CompletableFuture<InstallSnapshotResponse>> snapshotRpcClient,
             RaftSnapshotStore snapshotStore) {
         this.nodeId = nodeId;
         this.config = config;
         this.state = state;
+        this.persistentStore = Objects.requireNonNull(persistentStore, "persistentStore cannot be null");
         this.rpcClient = rpcClient;
         this.snapshotRpcClient = snapshotRpcClient;
         this.snapshotStore = snapshotStore;
@@ -233,10 +240,8 @@ public class RaftReplicationManager {
         // Check for higher term
         if (response.getTerm() > state.getCurrentTerm()) {
             log.warn("[{}] Discovered higher term {} from {}, stepping down", nodeId, response.getTerm(), peerId);
-            state.updateTerm(response.getTerm());
-            state.transitionToFollower(null);
-            return CompletableFuture.failedFuture(
-                    new IllegalStateException("Stepped down after discovering higher term " + response.getTerm()));
+            return stepDownForHigherTerm(
+                    response.getTerm(), "Stepped down after discovering higher term " + response.getTerm());
         }
 
         if (response.getSuccess()) {
@@ -259,6 +264,22 @@ public class RaftReplicationManager {
             handleReplicationFailure(peerId, nextIndex, response);
             return doReplication(peerId); // Retry with updated nextIndex
         }
+    }
+
+    /**
+     * Durably adopts a higher term learned from a response, then steps down. The returned future always fails: with
+     * the step-down message, or with the persistence error when the term could not be made durable (in which case the
+     * node's in-memory term and role are unchanged).
+     */
+    private <T> CompletableFuture<T> stepDownForHigherTerm(long term, String message) {
+        try {
+            RaftTermAdoption.adoptHigherTerm(state, persistentStore, term);
+        } catch (IOException e) {
+            log.error("[{}] Failed to persist higher term {}, not adopting it", nodeId, term, e);
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("Unable to persist higher term " + term, e));
+        }
+        return CompletableFuture.failedFuture(new IllegalStateException(message));
     }
 
     /**
@@ -323,10 +344,7 @@ public class RaftReplicationManager {
                     .build();
             return snapshotRpcClient.apply(peerId, request).thenCompose(response -> {
                 if (response.getTerm() > state.getCurrentTerm()) {
-                    state.updateTerm(response.getTerm());
-                    state.transitionToFollower(null);
-                    return CompletableFuture.failedFuture(
-                            new IllegalStateException("Stepped down during snapshot transfer"));
+                    return stepDownForHigherTerm(response.getTerm(), "Stepped down during snapshot transfer");
                 }
                 long resumeOffset = response.getNextOffset();
                 if (resumeOffset < 0 || resumeOffset > data.length) {

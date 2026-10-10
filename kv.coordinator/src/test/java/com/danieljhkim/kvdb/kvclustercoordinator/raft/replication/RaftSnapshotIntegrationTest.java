@@ -92,6 +92,7 @@ class RaftSnapshotIntegrationTest {
                 "leader",
                 configuration,
                 leaderState,
+                new RaftPersistentStateStore(leaderDir.resolve("state").toString()),
                 (peer, request) -> {
                     if (appendCalls.getAndIncrement() == 0) {
                         return CompletableFuture.completedFuture(AppendEntriesResponse.newBuilder()

@@ -173,9 +173,21 @@ public class RaftNode {
 
         // Initialize replication components
         this.replicationManager = new RaftReplicationManager(
-                nodeId, config, state, appendEntriesRpcClient, installSnapshotRpcClient, snapshotStore);
+                nodeId,
+                config,
+                state,
+                persistentStore,
+                appendEntriesRpcClient,
+                installSnapshotRpcClient,
+                snapshotStore);
         this.heartbeatManager = new RaftHeartbeatManager(
-                nodeId, config, state, scheduler, appendEntriesRpcClient, replicationManager::replicateToPeer);
+                nodeId,
+                config,
+                state,
+                persistentStore,
+                scheduler,
+                appendEntriesRpcClient,
+                replicationManager::replicateToPeer);
 
         this.appendEntriesHandler = new RaftAppendEntriesHandler(nodeId, state, persistentStore, electionTimer);
         this.installSnapshotHandler = new RaftInstallSnapshotHandler(

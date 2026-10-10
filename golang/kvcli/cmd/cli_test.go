@@ -770,3 +770,56 @@ func TestWriteTransportFailuresReportTheRequestIdAndKeepTheirExitCode(t *testing
 		}
 	}
 }
+
+func TestMalformedGetResponseExitsNonZeroWithoutSuccessOutput(t *testing.T) {
+	ok := &gateway.Status{Code: gateway.Status_OK}
+	cases := map[string]*gateway.GetResponse{
+		"ok without key-value":    {Status: ok},
+		"key-value for wrong key": {Status: ok, Kv: &gateway.KeyValue{Key: []byte("other"), Value: []byte("wrong-value"), Version: 9}},
+	}
+	for name, response := range cases {
+		for _, extra := range [][]string{{"get", "k"}, {"get", "k", "--raw"}} {
+			t.Run(name+"/"+strings.Join(extra, " "), func(t *testing.T) {
+				_, connection := localGateway(t, testfixture.Hooks{
+					Get: func(context.Context, *gateway.GetRequest) (*gateway.GetResponse, error) { return response, nil },
+				})
+				stdout, stderr, code := run(t, withArgs(connection, extra...)...)
+				if code != ExitApplication || stdout != "" {
+					t.Fatalf("malformed Get must exit %d with empty stdout, got %d stdout=%q stderr=%q", ExitApplication, code, stdout, stderr)
+				}
+				if !strings.Contains(stderr, "malformed Get response") || strings.Contains(stderr, "version=") || strings.Contains(stderr, "wrong-value") {
+					t.Fatalf("stderr must explain the malformed response without a value, got %q", stderr)
+				}
+			})
+		}
+	}
+}
+
+func TestMalformedBatchGetResponseExitsNonZeroWithoutJSON(t *testing.T) {
+	ok := &gateway.Status{Code: gateway.Status_OK}
+	cases := map[string][]*gateway.BatchGetResult{
+		"wrong key attributed to request": {{Key: []byte("wrong-key"), Status: ok, Kv: &gateway.KeyValue{Key: []byte("wrong-key"), Value: []byte("wrong-value"), Version: 1}, Outcome: gateway.BatchGetOutcome_COMPLETED}},
+		"kv key differs":                  {{Key: []byte("k"), Status: ok, Kv: &gateway.KeyValue{Key: []byte("wrong-key"), Value: []byte("wrong-value"), Version: 1}, Outcome: gateway.BatchGetOutcome_COMPLETED}},
+		"completed ok without kv":         {{Key: []byte("k"), Status: ok, Outcome: gateway.BatchGetOutcome_COMPLETED}},
+	}
+	for name, results := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, connection := localGateway(t, testfixture.Hooks{
+				BatchGet: func(context.Context, *gateway.BatchGetRequest) (*gateway.BatchGetResponse, error) {
+					return &gateway.BatchGetResponse{Status: ok, Results: results}, nil
+				},
+			})
+			path := filepath.Join(t.TempDir(), "keys.json")
+			if err := os.WriteFile(path, []byte("[\"aw==\"]"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stdout, stderr, code := run(t, withArgs(connection, "batch-get", "--input", path)...)
+			if code != ExitApplication || stdout != "" {
+				t.Fatalf("malformed BatchGet must exit %d with no JSON, got %d stdout=%q stderr=%q", ExitApplication, code, stdout, stderr)
+			}
+			if !strings.Contains(stderr, "malformed BatchGet response") || strings.Contains(stderr, "d3JvbmctdmFsdWU=") {
+				t.Fatalf("unexpected stderr %q", stderr)
+			}
+		})
+	}
+}

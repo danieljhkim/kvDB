@@ -16,7 +16,9 @@ import java.util.List;
 import java.util.stream.Collectors;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
 
 /**
  * Service for shard administration operations.
@@ -68,9 +70,8 @@ public class ShardAdminService {
     }
 
     public TriggerRequestDto triggerRebalance(TriggerRequestDto request) {
-        // TODO: Implement rebalancing logic
-        log.info("Triggering rebalance: {}", request);
-        return request;
+        log.warn("Rebalance requested but the coordinator rebalance operation is not implemented");
+        throw new ResponseStatusException(HttpStatus.NOT_IMPLEMENTED, "Coordinator rebalance is not implemented");
     }
 
     /**

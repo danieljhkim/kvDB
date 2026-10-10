@@ -19,7 +19,6 @@ public class OpsService {
     private final ShardAdminService shardAdminService;
 
     public TriggerRequestDto triggerRebalance(TriggerRequestDto request) {
-        log.info("Triggering rebalance operation: {}", request);
         return shardAdminService.triggerRebalance(request);
     }
 
@@ -34,8 +33,8 @@ public class OpsService {
                 || request.getOperation().isBlank()) {
             throw new IllegalArgumentException("operation is required");
         }
-        log.info("Triggering generic operation: {}", request);
         String operation = request.getOperation();
+        log.info("Triggering generic operation: {}", operation);
         return switch (operation.toUpperCase(Locale.ROOT)) {
             case "REBALANCE" -> triggerRebalance(request);
             case "COMPACT" -> triggerCompaction();

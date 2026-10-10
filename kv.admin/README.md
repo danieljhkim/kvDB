@@ -88,6 +88,10 @@ Typed JSON bodies use snake_case. Unknown or misspelled fields are rejected
 `POST /admin/config/shard-init` are the exception: their body is an open JSON
 object, and every key is configuration payload.
 
+`POST /admin/config` currently returns `501 Not Implemented` until applying
+configuration through the coordinator is implemented; the submitted document
+is not applied.
+
 `POST /admin/shards/{shardId}/replicas` expects a JSON array of node ids.
 
 Leader and status updates require `Content-Type: application/json`. A raw
@@ -126,12 +130,13 @@ curl -X POST http://localhost:8089/admin/ops/trigger \
   -d '{"operation": "REBALANCE", "target_nodes": ["node-1"]}'
 ```
 
-`operation` is required. `REBALANCE` is supported (case-insensitive);
-`COMPACT` returns `501 Not Implemented` until a node compaction RPC is
-available. Any other value returns `400` / `INVALID_ARGUMENT`.
+`operation` is required. `REBALANCE` and `COMPACT` return
+`501 Not Implemented` until their coordinator operations are implemented.
+Any other value returns `400` / `INVALID_ARGUMENT`.
 `POST /admin/ops/rebalance` and `POST /admin/ops/compact` use the same JSON
-shape but do not require `operation`. The compact endpoint also returns
-`501 Not Implemented` until node compaction is implemented.
+shape but do not require `operation`; both currently return `501 Not Implemented`.
+The shard-level `POST /admin/shards/rebalance` route also returns `501 Not
+Implemented` until coordinator rebalance is implemented.
 
 ### Client-error codes
 

@@ -5,18 +5,27 @@ import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftCommand;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftNode;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine.RaftStateMachine;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.NodeRecord;
+import com.danieljhkim.kvdb.kvclustercoordinator.state.RejectedMutationException;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
+import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapValidator;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardRecord;
 import com.danieljhkim.kvdb.kvcommon.exception.NotLeaderException;
 import com.danieljhkim.kvdb.proto.coordinator.*;
+import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import java.util.List;
+import java.util.concurrent.CompletionException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * gRPC service implementation for the Coordinator. Handles both read APIs and admin write APIs. Exceptions are handled
  * by GlobalExceptionInterceptor.
+ *
+ * <p>
+ * Shard-map mutations are validated against the latest snapshot before they are submitted, so an invalid request fails
+ * with INVALID_ARGUMENT without reaching the Raft log. The state machine repeats the validation when the command is
+ * applied; a command rejected there also fails with INVALID_ARGUMENT and leaves the shard map unchanged.
  */
 public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase {
 
@@ -161,6 +170,7 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
         // This triggers a Raft command to update the leader hint
         RaftCommand.SetShardLeader command =
                 new RaftCommand.SetShardLeader(request.getShardId(), request.getEpoch(), request.getLeaderNodeId());
+        validateShardLeader(command);
 
         raftNode.submitCommand(command)
                 .thenAccept(v -> {
@@ -172,6 +182,9 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
                             "ReportShardLeader: shard={}, leader={}", request.getShardId(), request.getLeaderNodeId());
                 })
                 .exceptionally(e -> {
+                    if (rejectIfInvalid(e, responseObserver)) {
+                        return null;
+                    }
                     logger.warn("ReportShardLeader failed", e);
                     responseObserver.onNext(ReportShardLeaderResponse.newBuilder()
                             .setAccepted(false)
@@ -191,6 +204,7 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
 
         RaftCommand.RegisterNode command =
                 new RaftCommand.RegisterNode(request.getNodeId(), request.getAddress(), request.getZone());
+        ShardMapValidator.validateNodeAddress(command.address());
 
         raftNode.submitCommand(command)
                 .thenAccept(v -> {
@@ -204,6 +218,9 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
                     logger.info("RegisterNode: nodeId={}, address={}", request.getNodeId(), request.getAddress());
                 })
                 .exceptionally(e -> {
+                    if (rejectIfInvalid(e, responseObserver)) {
+                        return null;
+                    }
                     logger.error("RegisterNode failed", e);
                     responseObserver.onNext(RegisterNodeResponse.newBuilder()
                             .setSuccess(false)
@@ -237,6 +254,9 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
                             "InitShards: numShards={}, rf={}", request.getNumShards(), request.getReplicationFactor());
                 })
                 .exceptionally(e -> {
+                    if (rejectIfInvalid(e, responseObserver)) {
+                        return null;
+                    }
                     logger.error("InitShards failed", e);
                     responseObserver.onNext(InitShardsResponse.newBuilder()
                             .setSuccess(false)
@@ -266,6 +286,9 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
                     logger.info("SetNodeStatus: nodeId={}, status={}", request.getNodeId(), status);
                 })
                 .exceptionally(e -> {
+                    if (rejectIfInvalid(e, responseObserver)) {
+                        return null;
+                    }
                     logger.error("SetNodeStatus failed", e);
                     responseObserver.onNext(SetNodeStatusResponse.newBuilder()
                             .setSuccess(false)
@@ -283,6 +306,9 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
 
         RaftCommand.SetShardReplicas command =
                 new RaftCommand.SetShardReplicas(request.getShardId(), request.getReplicasList());
+        ShardMapSnapshot current = raftStateMachine.getSnapshot();
+        ShardMapValidator.validateShardReplicas(
+                command.shardId(), command.replicas(), current.getNodes(), current.getShards());
 
         raftNode.submitCommand(command)
                 .thenAccept(v -> {
@@ -302,6 +328,9 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
                             request.getReplicasList());
                 })
                 .exceptionally(e -> {
+                    if (rejectIfInvalid(e, responseObserver)) {
+                        return null;
+                    }
                     logger.error("SetShardReplicas failed", e);
                     responseObserver.onNext(SetShardReplicasResponse.newBuilder()
                             .setSuccess(false)
@@ -318,6 +347,7 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
 
         RaftCommand.SetShardLeader command =
                 new RaftCommand.SetShardLeader(request.getShardId(), request.getEpoch(), request.getLeaderNodeId());
+        validateShardLeader(command);
 
         raftNode.submitCommand(command)
                 .thenAccept(v -> {
@@ -332,6 +362,9 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
                             "SetShardLeader: shardId={}, leader={}", request.getShardId(), request.getLeaderNodeId());
                 })
                 .exceptionally(e -> {
+                    if (rejectIfInvalid(e, responseObserver)) {
+                        return null;
+                    }
                     logger.error("SetShardLeader failed", e);
                     responseObserver.onNext(SetShardLeaderResponse.newBuilder()
                             .setSuccess(false)
@@ -345,6 +378,30 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
     // ============================
     // Helper Methods
     // ============================
+
+    private void validateShardLeader(RaftCommand.SetShardLeader command) {
+        ShardMapSnapshot current = raftStateMachine.getSnapshot();
+        ShardMapValidator.validateShardLeader(
+                command.shardId(), command.epoch(), command.leaderNodeId(), current.getNodes(), current.getShards());
+    }
+
+    /**
+     * Fails the call with INVALID_ARGUMENT if the state machine rejected the committed command. Returns false for any
+     * other failure.
+     */
+    private static boolean rejectIfInvalid(Throwable error, StreamObserver<?> responseObserver) {
+        Throwable cause = error;
+        while (cause instanceof CompletionException && cause.getCause() != null) {
+            cause = cause.getCause();
+        }
+        if (!(cause instanceof RejectedMutationException rejection)) {
+            return false;
+        }
+        logger.warn("Rejected shard-map mutation: {}", rejection.getMessage());
+        responseObserver.onError(
+                Status.INVALID_ARGUMENT.withDescription(rejection.getMessage()).asRuntimeException());
+        return true;
+    }
 
     /**
      * Throws NotLeaderException with leader hint if this node is not the leader.

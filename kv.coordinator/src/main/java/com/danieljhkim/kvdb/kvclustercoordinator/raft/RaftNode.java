@@ -271,7 +271,9 @@ public class RaftNode {
      * Submits a command to be replicated (only works if this node is the leader).
      *
      * @param command the command to replicate
-     * @return CompletableFuture that completes when command is committed and applied
+     * @return CompletableFuture that completes when command is committed and applied, or fails with
+     *     {@link com.danieljhkim.kvdb.kvclustercoordinator.state.RejectedMutationException} when the committed command
+     *     was rejected by the state machine
      */
     public CompletableFuture<Void> submitCommand(RaftCommand command) {
         if (!state.isLeader()) {
@@ -296,7 +298,10 @@ public class RaftNode {
             return replicationManager.replicateToAll().thenCompose(ignored -> {
                 // After replication, do not acknowledge the command until application succeeds.
                 if (state.getCommitIndex() >= index) {
-                    return stateMachineApplier.applyCommittedEntries().thenRun(this::createSnapshotIfNeeded);
+                    return stateMachineApplier
+                            .applyCommittedEntries()
+                            .thenRun(this::createSnapshotIfNeeded)
+                            .thenRun(() -> stateMachineApplier.throwIfRejected(index));
                 }
                 return CompletableFuture.failedFuture(
                         new IllegalStateException("Replication completed without committing entry " + index));

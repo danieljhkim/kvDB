@@ -202,6 +202,19 @@ The Admin API provides a control-plane management surface intended for local ope
 
 Note: the Admin API forwards mutations to the Coordinator (Raft-backed state machine) to keep cluster metadata consistent.
 
+The Coordinator validates shard-map mutations against cluster membership and rejects invalid ones with
+`INVALID_ARGUMENT` (HTTP 400 through the Admin API) without changing the shard map:
+- a node address must be `host:port` (hostname or IPv4 host, port 1-65535);
+- a shard's replica set must be non-empty, without duplicates, and contain only registered node IDs;
+- a shard leader must be a registered node in the shard's current replica set, at the shard's current epoch.
+
+The leader checks a request before it enters the Raft log, and every coordinator repeats the check when it applies a
+committed command, so a command that became invalid in between is applied as a no-op rather than corrupting state.
+
+A newly registered node starts `ALIVE` instead of waiting for its first health probe: registration happens once the
+node is serving, and the gateway only routes to `ALIVE` nodes. The coordinator's health checker marks an unreachable
+node `SUSPECT` and then `DEAD` on consecutive failed probes.
+
 
 ---
 

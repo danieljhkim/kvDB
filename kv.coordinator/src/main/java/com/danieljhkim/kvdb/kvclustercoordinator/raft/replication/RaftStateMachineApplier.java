@@ -5,7 +5,10 @@ import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLog;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLogEntry;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.state.RaftNodeState;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine.RaftStateMachine;
+import com.danieljhkim.kvdb.kvclustercoordinator.state.RejectedMutationException;
 import java.io.IOException;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
@@ -24,6 +27,10 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 public class RaftStateMachineApplier {
 
+    // Rejections are claimed by the submitting leader right after application; the bound only drops entries nobody
+    // waits for (entries applied as a follower or replayed on restart).
+    private static final int MAX_UNCLAIMED_REJECTIONS = 1024;
+
     private final String nodeId;
     private final RaftNodeState state;
     private final RaftStateMachine stateMachine;
@@ -35,6 +42,13 @@ public class RaftStateMachineApplier {
     private volatile Throwable failure;
 
     private final Object applyLock = new Object();
+
+    private final Map<Long, RejectedMutationException> rejections = new LinkedHashMap<>() {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<Long, RejectedMutationException> eldest) {
+            return size() > MAX_UNCLAIMED_REJECTIONS;
+        }
+    };
 
     public RaftStateMachineApplier(String nodeId, RaftNodeState state, RaftStateMachine stateMachine) {
         this(nodeId, state, stateMachine, Executors.newSingleThreadExecutor(r -> {
@@ -159,7 +173,23 @@ public class RaftStateMachineApplier {
                 if (application == null) {
                     throw new IllegalStateException("State machine returned a null application future");
                 }
-                application.join();
+                try {
+                    application.join();
+                } catch (CompletionException e) {
+                    if (!(e.getCause() instanceof RejectedMutationException rejection)) {
+                        throw e;
+                    }
+                    // Every replica rejects this entry identically without changing state, so it is consumed as a
+                    // no-op rather than halting the node.
+                    log.warn(
+                            "[{}] Committed entry at index {} was rejected by the state machine: {}",
+                            nodeId,
+                            entry.index(),
+                            rejection.getMessage());
+                    synchronized (rejections) {
+                        rejections.put(entry.index(), rejection);
+                    }
+                }
             }
 
             // Advance only after the corresponding operation completed successfully.
@@ -181,6 +211,20 @@ public class RaftStateMachineApplier {
                     e);
             // In a production system, you might want to halt the node here
             throw new RuntimeException("Failed to apply committed entry", e);
+        }
+    }
+
+    /**
+     * Throws the state machine's rejection of the entry at {@code index}, if any, and forgets it. Call after the entry
+     * has been applied.
+     */
+    public void throwIfRejected(long index) {
+        RejectedMutationException rejection;
+        synchronized (rejections) {
+            rejection = rejections.remove(index);
+        }
+        if (rejection != null) {
+            throw rejection;
         }
     }
 

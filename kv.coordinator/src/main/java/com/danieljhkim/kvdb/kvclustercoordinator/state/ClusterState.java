@@ -89,7 +89,7 @@ public class ClusterState {
                 // Already initialized with same config - return existing (idempotent behavior for log replay)
                 return new ArrayList<>(shards.keySet());
             } else {
-                throw new IllegalStateException(String.format(
+                throw new RejectedMutationException(String.format(
                         "Shards already initialized with different configuration: existing(numShards=%d, rf=%d) vs requested(numShards=%d, rf=%d)",
                         this.numShards, this.replicationFactor, numShards, replicationFactor));
             }
@@ -132,9 +132,17 @@ public class ClusterState {
     }
 
     /**
-     * Register or update a node.
+     * Register or update a node. Rejects an address that is not {@code host:port}.
+     *
+     * <p>
+     * A registered node starts (or returns to) {@link NodeRecord.NodeStatus#ALIVE} without waiting for a health probe.
+     * Registration is issued by the node's operator or bootstrap once the node is serving, and the gateway only routes
+     * to ALIVE nodes, so holding new nodes back would leave a freshly bootstrapped cluster unable to serve until the
+     * first probe interval elapsed. The health checker demotes an unreachable node to SUSPECT and then DEAD on
+     * consecutive failed probes, and a malformed address can no longer be registered.
      */
     public void registerNode(String nodeId, String address, String zone) {
+        ShardMapValidator.validateNodeAddress(address);
         NodeRecord existing = nodes.get(nodeId);
         if (existing != null) {
             // Update existing node
@@ -160,10 +168,7 @@ public class ClusterState {
      * Update node status. Bumps mapVersion if the change affects routing.
      */
     public void setNodeStatus(String nodeId, NodeRecord.NodeStatus status) {
-        NodeRecord node = nodes.get(nodeId);
-        if (node == null) {
-            throw new IllegalArgumentException("Node not found: " + nodeId);
-        }
+        NodeRecord node = ShardMapValidator.requireNode(nodeId, nodes);
 
         NodeRecord.NodeStatus oldStatus = node.status();
         nodes.put(nodeId, node.withStatus(status));
@@ -175,26 +180,24 @@ public class ClusterState {
     }
 
     /**
-     * Update shard replicas. Increments shard epoch and mapVersion.
+     * Update shard replicas. Increments shard epoch and mapVersion. Rejects an empty set and unknown or duplicate node
+     * IDs.
      */
     public void setShardReplicas(String shardId, List<String> newReplicas) {
+        ShardMapValidator.validateShardReplicas(shardId, newReplicas, nodes, shards);
         ShardRecord shard = shards.get(shardId);
-        if (shard == null) {
-            throw new IllegalArgumentException("Shard not found: " + shardId);
-        }
 
         shards.put(shardId, shard.withReplicas(newReplicas));
         mapVersion++;
     }
 
     /**
-     * Update shard leader hint. Only valid if epoch matches.
+     * Update shard leader hint. Only valid if epoch matches and the leader is a registered member of the shard's
+     * current replica set.
      */
     public void setShardLeader(String shardId, long epoch, String leaderNodeId) {
+        ShardMapValidator.validateShardLeader(shardId, epoch, leaderNodeId, nodes, shards);
         ShardRecord shard = shards.get(shardId);
-        if (shard == null) {
-            throw new IllegalArgumentException("Shard not found: " + shardId);
-        }
 
         shards.put(shardId, shard.withLeader(epoch, leaderNodeId));
         mapVersion++;

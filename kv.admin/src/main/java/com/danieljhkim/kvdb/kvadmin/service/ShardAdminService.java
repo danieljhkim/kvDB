@@ -51,13 +51,19 @@ public class ShardAdminService {
     }
 
     public ShardDto setShardReplicas(String shardId, List<String> replicaNodeIds) {
-        coordinatorAdminClient.setShardReplicas(shardId, replicaNodeIds);
+        if (!coordinatorAdminClient.setShardReplicas(shardId, replicaNodeIds).getSuccess()) {
+            throw new IllegalStateException("Coordinator failed to set shard replicas");
+        }
         return getShard(shardId);
     }
 
     public ShardDto setShardLeader(String shardId, String leaderNodeId) {
         ShardDto currentShard = getShard(shardId);
-        coordinatorAdminClient.setShardLeader(shardId, currentShard.getEpoch(), leaderNodeId);
+        if (!coordinatorAdminClient
+                .setShardLeader(shardId, currentShard.getEpoch(), leaderNodeId)
+                .getSuccess()) {
+            throw new IllegalStateException("Coordinator failed to set shard leader");
+        }
         return getShard(shardId);
     }
 

@@ -78,12 +78,18 @@ public class NodeAdminService {
     }
 
     public NodeDto registerNode(NodeDto node) {
-        coordinatorAdminClient.registerNode(node.getNodeId(), node.getAddress(), node.getZone());
+        if (!coordinatorAdminClient
+                .registerNode(node.getNodeId(), node.getAddress(), node.getZone())
+                .getSuccess()) {
+            throw new IllegalStateException("Coordinator failed to register node");
+        }
         return getNode(node.getNodeId());
     }
 
     public NodeDto setNodeStatus(String nodeId, String status) {
-        coordinatorAdminClient.setNodeStatus(nodeId, status);
+        if (!coordinatorAdminClient.setNodeStatus(nodeId, status).getSuccess()) {
+            throw new IllegalStateException("Coordinator failed to set node status");
+        }
         return getNode(nodeId);
     }
 }

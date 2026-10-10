@@ -69,7 +69,8 @@ public class GatewayServer {
         // Initialize retry infrastructure
         NodeFailureTracker failureTracker = new NodeFailureTracker();
         RetryPolicy retryPolicy = RetryPolicy.defaults();
-        RequestExecutor requestExecutor = new RequestExecutor(nodePool, failureTracker, retryPolicy, 5000);
+        RequestExecutor requestExecutor =
+                new RequestExecutor(nodePool, failureTracker, retryPolicy, 5000, this::refreshShardMapAfterMove);
 
         // Create streaming client for real-time shard map updates
         this.watchShardMapClient = new WatchShardMapClient(shardMapCache, coordinatorClientManager);
@@ -102,6 +103,25 @@ public class GatewayServer {
         Metrics.gauge("kvdb_connection_pool_channels", "gateway", () -> nodePool.size());
 
         logger.info("GatewayServer initialized on port {}", port);
+    }
+
+    /**
+     * Fetches the coordinator shard map after a storage node reports {@code SHARD_MOVED}. The {@code x-new-node-hint}
+     * trailer is not a dial target; the next attempt reads whatever this refresh installs in {@link #shardMapCache}.
+     * {@link CoordinatorClientManager#fetchShardMap} already returns null when the coordinator call fails.
+     */
+    private void refreshShardMapAfterMove() {
+        try {
+            var state = coordinatorClientManager.fetchShardMap(shardMapCache.getMapVersion());
+            if (state != null) {
+                shardMapCache.refreshFromFullState(state);
+                logger.info("Refreshed shard map after SHARD_MOVED, version: {}", shardMapCache.getMapVersion());
+            } else {
+                logger.info("Shard-map refresh after SHARD_MOVED found no newer state");
+            }
+        } catch (RuntimeException e) {
+            logger.warn("Shard-map refresh after SHARD_MOVED failed", e);
+        }
     }
 
     /**

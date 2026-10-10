@@ -30,16 +30,32 @@ public class RequestExecutor {
     private final NodeFailureTracker failureTracker;
     private final RetryPolicy retryPolicy;
     private final int defaultTimeoutMs;
+    private final Runnable shardMapRefresh;
 
     public RequestExecutor(
             NodeConnectionPool nodePool,
             NodeFailureTracker failureTracker,
             RetryPolicy retryPolicy,
             int defaultTimeoutMs) {
+        this(nodePool, failureTracker, retryPolicy, defaultTimeoutMs, () -> {});
+    }
+
+    /**
+     * @param shardMapRefresh invoked after {@code SHARD_MOVED} ({@code FAILED_PRECONDITION} carrying
+     *     {@code x-new-node-hint}) and before the next attempt. The hint is untrusted trailer text and is never
+     *     passed to {@link NodeConnectionPool#getStub}. A null hook is a no-op.
+     */
+    public RequestExecutor(
+            NodeConnectionPool nodePool,
+            NodeFailureTracker failureTracker,
+            RetryPolicy retryPolicy,
+            int defaultTimeoutMs,
+            Runnable shardMapRefresh) {
         this.nodePool = nodePool;
         this.failureTracker = failureTracker;
         this.retryPolicy = retryPolicy;
         this.defaultTimeoutMs = defaultTimeoutMs;
+        this.shardMapRefresh = shardMapRefresh == null ? () -> {} : shardMapRefresh;
     }
 
     /**
@@ -160,7 +176,7 @@ public class RequestExecutor {
                     return stoppedAfterCall;
                 }
 
-                // Try leader hint if available
+                // Try leader hint if available. x-new-node-hint is a separate, untrusted trailer and is never dialed.
                 if (code == Status.Code.FAILED_PRECONDITION) {
                     ExecutionResult<T> hintResult =
                             tryLeaderHint(operation, e, isWrite, replaySafe, context, callerDeadline);
@@ -173,6 +189,19 @@ public class RequestExecutor {
                         lastException = Status.fromCode(code)
                                 .withDescription(hintResult.getErrorMessage())
                                 .asRuntimeException();
+                    }
+                    if (carriesNewNodeHint(e)) {
+                        ExecutionResult<T> stoppedBeforeRefresh =
+                                stoppedResult(context, callerDeadline, lastNodeAddress);
+                        if (stoppedBeforeRefresh != null) {
+                            return stoppedBeforeRefresh;
+                        }
+                        refreshShardMap();
+                        ExecutionResult<T> stoppedAfterRefresh =
+                                stoppedResult(context, callerDeadline, lastNodeAddress);
+                        if (stoppedAfterRefresh != null) {
+                            return stoppedAfterRefresh;
+                        }
                     }
                 }
 
@@ -201,6 +230,25 @@ public class RequestExecutor {
                 lastException != null ? lastException.getStatus().getCode() : Status.Code.UNAVAILABLE,
                 lastException != null ? lastException.getStatus().getDescription() : "All retry attempts exhausted",
                 lastNodeAddress);
+    }
+
+    private static boolean carriesNewNodeHint(StatusRuntimeException failure) {
+        return GrpcRoutingHints.from(failure).newNodeHint().isPresent();
+    }
+
+    /**
+     * Forces a shard-map refresh so the next {@code nodeSupplier} read can leave the node that reported
+     * {@code SHARD_MOVED}. A refresh that fails or still names the same node remains a normal routing failure.
+     */
+    private void refreshShardMap() {
+        try {
+            logger.info("Refreshing shard map after SHARD_MOVED before the next attempt");
+            shardMapRefresh.run();
+            Metrics.increment("kvdb_retries_total", "gateway", "shard_moved", "refresh");
+        } catch (RuntimeException ex) {
+            logger.warn("Shard-map refresh after SHARD_MOVED failed; continuing with the current map", ex);
+            Metrics.increment("kvdb_retries_total", "gateway", "shard_moved", "refresh_failed");
+        }
     }
 
     private <T> ExecutionResult<T> tryLeaderHint(

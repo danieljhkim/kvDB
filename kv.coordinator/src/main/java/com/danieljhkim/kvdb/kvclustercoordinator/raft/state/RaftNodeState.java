@@ -18,7 +18,9 @@ import lombok.extern.slf4j.Slf4j;
  * role, and leader-specific indices).
  *
  * <p>
- * Thread-safety: This class is thread-safe. State transitions and term updates are atomic.
+ * Thread-safety: This class is thread-safe. State transitions and term updates are serialized on this
+ * instance's monitor. Replication callbacks use the same monitor to fence acknowledgements atomically
+ * against elections and step-down.
  */
 @Slf4j
 public class RaftNodeState {
@@ -137,7 +139,7 @@ public class RaftNodeState {
      *
      * @return the new term value
      */
-    public long incrementTerm() {
+    public synchronized long incrementTerm() {
         long newTerm = currentTerm.incrementAndGet();
         votedFor.set(null);
         log.info("[{}] Incremented term to {}", nodeId, newTerm);
@@ -150,7 +152,7 @@ public class RaftNodeState {
      * @param newTerm the new term to potentially adopt
      * @return true if the term was updated
      */
-    public boolean updateTerm(long newTerm) {
+    public synchronized boolean updateTerm(long newTerm) {
         long oldTerm = currentTerm.get();
         if (newTerm > oldTerm) {
             currentTerm.set(newTerm);
@@ -251,7 +253,7 @@ public class RaftNodeState {
      * @param term the term to adopt
      * @param leaderId the current leader (may be null)
      */
-    public void becomeFollower(long term, String leaderId) {
+    public synchronized void becomeFollower(long term, String leaderId) {
         updateTerm(term);
         RaftRole oldRole = currentRole.getAndSet(RaftRole.FOLLOWER);
         currentLeader.set(leaderId);
@@ -267,14 +269,14 @@ public class RaftNodeState {
      *
      * @param leaderId the current leader (may be null)
      */
-    public void transitionToFollower(String leaderId) {
+    public synchronized void transitionToFollower(String leaderId) {
         becomeFollower(currentTerm.get(), leaderId);
     }
 
     /**
      * Transitions to CANDIDATE state. Should only be called from FOLLOWER state.
      */
-    public void becomeCandidate() {
+    public synchronized void becomeCandidate() {
         long newTerm = incrementTerm();
         RaftRole oldRole = currentRole.getAndSet(RaftRole.CANDIDATE);
         currentLeader.set(null);
@@ -289,7 +291,7 @@ public class RaftNodeState {
      *
      * @param peerIds the IDs of all peer nodes in the cluster
      */
-    public void becomeLeader(Iterable<String> peerIds) {
+    public synchronized void becomeLeader(Iterable<String> peerIds) {
         RaftRole oldRole = currentRole.getAndSet(RaftRole.LEADER);
         currentLeader.set(nodeId);
         leaderState.initialize(peerIds, raftLog.lastIndex());

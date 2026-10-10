@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.danieljhkim.kvdb.kvclustercoordinator.converter.RaftCommandConverter;
@@ -11,9 +12,14 @@ import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.FileBasedRaftL
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLog;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLogEntry;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftPersistentStateStore;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftSnapshotStore;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.replication.RaftReplicationManager;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.state.RaftNodeState;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine.StubRaftStateMachine;
 import com.danieljhkim.kvdb.proto.raft.AppendEntriesRequest;
 import com.danieljhkim.kvdb.proto.raft.AppendEntriesResponse;
+import com.danieljhkim.kvdb.proto.raft.InstallSnapshotRequest;
+import com.danieljhkim.kvdb.proto.raft.InstallSnapshotResponse;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -280,6 +286,190 @@ class RaftNodeCommitIntegrationTest {
             follower.stop();
         }
     }
+
+    @Test
+    void delayedAppendSuccessCannotAcknowledgeReplacementAcrossElections() throws Exception {
+        verifySupersededAppend(true, false);
+    }
+
+    @Test
+    void delayedAppendFailureCannotBacktrackOrRetryInNewTerm() throws Exception {
+        verifySupersededAppend(false, false);
+    }
+
+    @Test
+    void clearingReplicationInvalidatesCallbacksEvenInSameTerm() throws Exception {
+        verifySupersededAppend(true, true);
+    }
+
+    private void verifySupersededAppend(boolean success, boolean clearOnly) throws Exception {
+        InMemoryRaftLog log = new InMemoryRaftLog();
+        RaftNodeState state = new RaftNodeState("n1", log);
+        state.becomeCandidate();
+        state.becomeLeader(List.of("n2", "n3"));
+        RaftCommand oldCommand = new RaftCommand.RegisterNode("old", "old:9000", "zone-a");
+        RaftCommand replacement = new RaftCommand.RegisterNode("replacement", "replacement:9000", "zone-b");
+        log.append(new RaftLogEntry(1, 1, 1, oldCommand));
+        List<PendingAppend> requests = new ArrayList<>();
+        RaftReplicationManager manager = new RaftReplicationManager(
+                "n1",
+                configuration("n1", members(), tempDir.resolve("n1")),
+                state,
+                new RaftPersistentStateStore(tempDir.resolve("n1").toString()),
+                (peer, request) -> {
+                    CompletableFuture<AppendEntriesResponse> response = new CompletableFuture<>();
+                    requests.add(new PendingAppend(peer, request, response));
+                    return response;
+                });
+        CompletableFuture<Void> oldQuorum = manager.replicateToAll();
+        PendingAppend delayed = requests.stream()
+                .filter(request -> request.destination.equals("n2"))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(1, delayed.request.getTerm());
+        assertEquals(
+                RaftCommandConverter.toProto(oldCommand),
+                delayed.request.getEntries(0).getCommand());
+
+        if (!clearOnly) {
+            state.becomeFollower(2, "n3");
+        }
+        manager.clear();
+        if (!clearOnly) {
+            log.truncateAfter(0);
+            log.append(new RaftLogEntry(1, 3, 2, replacement));
+            state.becomeCandidate();
+            state.becomeLeader(List.of("n2", "n3"));
+            state.setNextIndex("n2", 1);
+            state.setNextIndex("n3", 1);
+        }
+        CompletableFuture<Void> currentQuorum = manager.replicateToAll();
+        CompletableFuture<Void> currentPeer = manager.replicateToPeer("n2");
+        PendingAppend current = requests.stream()
+                .filter(request -> request.destination.equals("n2") && request != delayed)
+                .findFirst()
+                .orElseThrow();
+        assertEquals(clearOnly ? 1 : 3, current.request.getTerm());
+        assertEquals(
+                RaftCommandConverter.toProto(clearOnly ? oldCommand : replacement),
+                current.request.getEntries(0).getCommand());
+        delayed.future.complete(AppendEntriesResponse.newBuilder()
+                .setTerm(1)
+                .setSuccess(success)
+                .setMatchIndex(1)
+                .setConflictIndex(7)
+                .build());
+
+        assertEquals(0L, state.getMatchIndex("n2"));
+        assertEquals(1L, state.getNextIndex("n2"));
+        assertEquals(0, state.getCommitIndex());
+        assertTrue(oldQuorum.isCompletedExceptionally(), "Superseded requests cannot satisfy their quorum");
+        assertFalse(currentQuorum.isDone());
+        assertSame(currentPeer, manager.replicateToPeer("n2"), "Old cleanup must preserve the new in-flight RPC");
+        assertEquals(4, requests.size(), "A stale failure must not issue a retry");
+
+        // Deliver the actual current-term entry to a real follower before releasing its acknowledgement.
+        InMemoryRaftLog followerLog = new InMemoryRaftLog();
+        RaftNode follower = divergentFollower(followerLog, new StubRaftStateMachine());
+        follower.start();
+        try {
+            current.future.complete(follower.handleAppendEntries(current.request));
+            currentQuorum.get(5, TimeUnit.SECONDS);
+            assertEquals(1, state.getCommitIndex());
+            assertEquals(1L, state.getMatchIndex("n2"));
+            assertEquals(
+                    clearOnly ? oldCommand : replacement,
+                    followerLog.getEntry(1).orElseThrow().command());
+        } finally {
+            follower.stop();
+        }
+    }
+
+    @Test
+    void delayedCompletedSnapshotCannotAcknowledgeNewLeadership() throws Exception {
+        verifySupersededSnapshot(true, 2);
+    }
+
+    @Test
+    void delayedPartialSnapshotCannotContinueInNewLeadership() throws Exception {
+        verifySupersededSnapshot(true, 1);
+    }
+
+    @Test
+    void delayedRejectedSnapshotCannotRetryInNewLeadership() throws Exception {
+        verifySupersededSnapshot(false, 0);
+    }
+
+    private void verifySupersededSnapshot(boolean success, long nextOffset) throws Exception {
+        Path directory = tempDir.resolve("n1");
+        try (FileBasedRaftLog log = new FileBasedRaftLog(directory.resolve("log"))) {
+            log.append(new RaftLogEntry(1, 1, 1, new RaftCommand.NoOp()));
+            RaftSnapshotStore snapshots = new RaftSnapshotStore(directory);
+            snapshots.save(1, 1, new byte[] {1, 2});
+            log.compactThrough(1, 1);
+            RaftNodeState state = new RaftNodeState("n1", log);
+            state.becomeCandidate();
+            state.becomeLeader(List.of("n2", "n3"));
+            state.setNextIndex("n2", 1);
+            List<PendingSnapshot> requests = new ArrayList<>();
+            AtomicInteger appends = new AtomicInteger();
+            RaftReplicationManager manager = new RaftReplicationManager(
+                    "n1",
+                    configuration("n1", members(), directory),
+                    state,
+                    new RaftPersistentStateStore(directory.toString()),
+                    (peer, request) -> {
+                        appends.incrementAndGet();
+                        return CompletableFuture.completedFuture(AppendEntriesResponse.newBuilder()
+                                .setTerm(request.getTerm())
+                                .setSuccess(true)
+                                .setMatchIndex(1)
+                                .build());
+                    },
+                    (peer, request) -> {
+                        CompletableFuture<InstallSnapshotResponse> response = new CompletableFuture<>();
+                        requests.add(new PendingSnapshot(request, response));
+                        return response;
+                    },
+                    snapshots);
+            CompletableFuture<Void> oldPeer = manager.replicateToPeer("n2");
+            state.becomeFollower(2, "n3");
+            manager.clear();
+            state.becomeCandidate();
+            state.becomeLeader(List.of("n2", "n3"));
+            state.setNextIndex("n2", 1);
+            CompletableFuture<Void> currentPeer = manager.replicateToPeer("n2");
+            assertEquals(1, requests.get(0).request.getTerm());
+            assertEquals(3, requests.get(1).request.getTerm());
+            requests.get(0)
+                    .future
+                    .complete(InstallSnapshotResponse.newBuilder()
+                            .setTerm(1)
+                            .setSuccess(success)
+                            .setNextOffset(nextOffset)
+                            .build());
+
+            assertTrue(oldPeer.isCompletedExceptionally());
+            assertEquals(0L, state.getMatchIndex("n2"));
+            assertEquals(1L, state.getNextIndex("n2"));
+            assertEquals(0, state.getCommitIndex());
+            assertEquals(2, requests.size(), "Stale chunks must not start a continuation or retry");
+            assertEquals(0, appends.get(), "Stale snapshot completion must not start AppendEntries");
+            assertSame(currentPeer, manager.replicateToPeer("n2"));
+            requests.get(1)
+                    .future
+                    .complete(InstallSnapshotResponse.newBuilder()
+                            .setTerm(3)
+                            .setSuccess(true)
+                            .setNextOffset(2)
+                            .build());
+            currentPeer.get(5, TimeUnit.SECONDS);
+            assertEquals(1L, state.getMatchIndex("n2"));
+            assertEquals(1, appends.get());
+        }
+    }
+
+    private record PendingSnapshot(InstallSnapshotRequest request, CompletableFuture<InstallSnapshotResponse> future) {}
 
     private RaftNode divergentFollower(InMemoryRaftLog followerLog, StubRaftStateMachine stateMachine)
             throws IOException {

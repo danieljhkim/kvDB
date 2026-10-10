@@ -137,14 +137,16 @@ public class RaftAppendEntriesHandler {
                 appendEntries(raftLog, request.getEntriesList(), prevLogIndex);
             }
 
+            // Only the prefix verified by this request (prevLogIndex + entries) may be committed;
+            // any local suffix beyond it may still diverge from the leader's log.
+            long matchIndex = prevLogIndex + request.getEntriesCount();
+
             // 5. Update commit index if necessary
             if (request.getLeaderCommit() > state.getCommitIndex()) {
-                long newCommitIndex = Math.min(request.getLeaderCommit(), raftLog.lastIndex());
+                long newCommitIndex = Math.min(request.getLeaderCommit(), matchIndex);
                 state.advanceCommitIndex(newCommitIndex);
                 log.debug("[{}] Advanced commitIndex to {}", nodeId, newCommitIndex);
             }
-
-            long matchIndex = prevLogIndex + request.getEntriesCount();
 
             return AppendEntriesResponse.newBuilder()
                     .setTerm(state.getCurrentTerm())

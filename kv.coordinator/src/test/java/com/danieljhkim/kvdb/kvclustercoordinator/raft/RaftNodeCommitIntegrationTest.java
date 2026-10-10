@@ -2,8 +2,11 @@ package com.danieljhkim.kvdb.kvclustercoordinator.raft;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.danieljhkim.kvdb.kvclustercoordinator.converter.RaftCommandConverter;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.FileBasedRaftLog;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLog;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLogEntry;
@@ -202,6 +205,92 @@ class RaftNodeCommitIntegrationTest {
         } finally {
             restarted.stop();
         }
+    }
+
+    @Test
+    void emptyAppendEntriesDoesNotCommitUnverifiedDivergentSuffix() throws Exception {
+        RaftCommand shared = new RaftCommand.RegisterNode("shared", "shared:9000", "zone-a");
+        RaftCommand divergent = new RaftCommand.RegisterNode("divergent", "divergent:9000", "zone-b");
+        StubRaftStateMachine stateMachine = new StubRaftStateMachine();
+        InMemoryRaftLog followerLog = new InMemoryRaftLog();
+        followerLog.append(new RaftLogEntry(1, 1, 1, shared));
+        followerLog.append(new RaftLogEntry(2, 2, 2, divergent));
+        RaftNode follower = divergentFollower(followerLog, stateMachine);
+        follower.start();
+
+        try {
+            // The heartbeat verifies only index 1, so the divergent index 2 must stay uncommitted.
+            AppendEntriesResponse response = follower.handleAppendEntries(AppendEntriesRequest.newBuilder()
+                    .setTerm(3)
+                    .setLeaderId("n1")
+                    .setPrevLogIndex(1)
+                    .setPrevLogTerm(1)
+                    .setLeaderCommit(2)
+                    .build());
+
+            assertTrue(response.getSuccess());
+            assertEquals(1, response.getMatchIndex());
+            assertEquals(1, follower.getState().getCommitIndex());
+            assertEquals(1, follower.getState().getLastApplied());
+            assertEquals(1, stateMachine.getMapVersion());
+            assertNotNull(stateMachine.getSnapshot().getNode("shared"));
+            assertNull(stateMachine.getSnapshot().getNode("divergent"));
+        } finally {
+            follower.stop();
+        }
+    }
+
+    @Test
+    void partialAppendEntriesReplacesDivergentSuffixAndCommitsOnlyVerifiedEntries() throws Exception {
+        RaftCommand shared = new RaftCommand.RegisterNode("shared", "shared:9000", "zone-a");
+        RaftCommand divergent = new RaftCommand.RegisterNode("divergent", "divergent:9000", "zone-b");
+        RaftCommand leaderOnly = new RaftCommand.RegisterNode("leader-only", "leader-only:9000", "zone-b");
+        StubRaftStateMachine stateMachine = new StubRaftStateMachine();
+        InMemoryRaftLog followerLog = new InMemoryRaftLog();
+        followerLog.append(new RaftLogEntry(1, 1, 1, shared));
+        followerLog.append(new RaftLogEntry(2, 2, 2, divergent));
+        RaftNode follower = divergentFollower(followerLog, stateMachine);
+        follower.start();
+
+        try {
+            // The request verifies indexes 1 and 2, so the leader's index 2 replaces the divergent entry
+            // and leaderCommit=3 is capped at the verified index rather than the follower's old last index.
+            AppendEntriesResponse response = follower.handleAppendEntries(AppendEntriesRequest.newBuilder()
+                    .setTerm(3)
+                    .setLeaderId("n1")
+                    .setPrevLogIndex(1)
+                    .setPrevLogTerm(1)
+                    .addEntries(com.danieljhkim.kvdb.proto.raft.RaftLogEntry.newBuilder()
+                            .setIndex(2)
+                            .setTerm(3)
+                            .setCommand(RaftCommandConverter.toProto(leaderOnly))
+                            .build())
+                    .setLeaderCommit(3)
+                    .build());
+
+            assertTrue(response.getSuccess());
+            assertEquals(2, response.getMatchIndex());
+            assertEquals(2, follower.getState().getCommitIndex());
+            assertEquals(2, follower.getState().getLastApplied());
+            assertEquals(2, stateMachine.getMapVersion());
+            assertNotNull(stateMachine.getSnapshot().getNode("shared"));
+            assertNotNull(stateMachine.getSnapshot().getNode("leader-only"));
+            assertNull(stateMachine.getSnapshot().getNode("divergent"));
+        } finally {
+            follower.stop();
+        }
+    }
+
+    private RaftNode divergentFollower(InMemoryRaftLog followerLog, StubRaftStateMachine stateMachine)
+            throws IOException {
+        return new RaftNode(
+                "n2",
+                configuration("n2", members(), tempDir.resolve("n2")),
+                followerLog,
+                new RaftPersistentStateStore(tempDir.resolve("n2").toString()),
+                stateMachine,
+                (peer, request) -> CompletableFuture.failedFuture(new AssertionError("unexpected vote RPC")),
+                (peer, request) -> CompletableFuture.failedFuture(new AssertionError("unexpected append RPC")));
     }
 
     private PersistentCluster createPersistentCluster(Map<String, String> members) throws IOException {

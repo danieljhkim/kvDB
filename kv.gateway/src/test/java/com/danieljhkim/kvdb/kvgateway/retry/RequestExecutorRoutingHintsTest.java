@@ -15,6 +15,7 @@ import io.grpc.*;
 import java.time.Duration;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -88,8 +89,7 @@ class RequestExecutorRoutingHintsTest {
     void blankOrMalformedLeaderHintIsIgnoredWithoutDialing() {
         for (String hint : List.of("", "   ", "leader", "leader:abc", ":123", "leader:0", "leader:70000")) {
             FakeNodeConnectionPool pool = new FakeNodeConnectionPool();
-            RequestExecutor executor =
-                    new RequestExecutor(pool, new NodeFailureTracker(5000), retryTwice(), 5_000);
+            RequestExecutor executor = new RequestExecutor(pool, new NodeFailureTracker(5000), retryTwice(), 5_000);
             AtomicInteger calls = new AtomicInteger();
 
             ExecutionResult<String> result = executor.executeWithRetry(
@@ -175,6 +175,198 @@ class RequestExecutorRoutingHintsTest {
 
         // SHARD_MOVED should result in failure since we have maxAttempts=1
         assertFalse(result.isSuccess());
+        assertEquals(Status.Code.FAILED_PRECONDITION, result.getErrorCode());
+        assertEquals(List.of("nodeA:123"), nodePool.dialed);
+        assertFalse(nodePool.dialed.contains("nodeB:999"));
+    }
+
+    @Test
+    void shardMoved_withNewNodeHint_refreshesBeforeNextAttemptTargetsPostRefreshLeader() {
+        FakeNodeConnectionPool pool = new FakeNodeConnectionPool();
+        List<String> events = new CopyOnWriteArrayList<>();
+        AtomicInteger phase = new AtomicInteger();
+        NodeRecord nodeA = node("node-a", "nodeA:123");
+        NodeRecord nodeB = node("node-b", "nodeB:456");
+        String untrustedHint = "untrusted.example:999";
+
+        RequestExecutor executor = new RequestExecutor(pool, new NodeFailureTracker(5000), retryTwice(), 5_000, () -> {
+            events.add("refresh");
+            phase.set(1);
+        });
+
+        AtomicInteger calls = new AtomicInteger();
+        ExecutionResult<String> result = executor.executeWithRetry(
+                "shard-1",
+                true,
+                true,
+                stub -> {
+                    events.add("attempt");
+                    if (calls.getAndIncrement() == 0) {
+                        throw shardMoved(untrustedHint);
+                    }
+                    return "ok";
+                },
+                () -> {
+                    events.add("supply");
+                    return List.of(phase.get() == 0 ? nodeA : nodeB);
+                });
+
+        assertTrue(result.isSuccess());
+        assertEquals("ok", result.getResponse());
+        assertEquals("nodeB:456", result.getLastNodeAddress());
+        assertEquals(List.of("supply", "attempt", "refresh", "supply", "attempt"), events);
+        assertEquals(List.of("nodeA:123", "nodeB:456"), pool.dialed);
+        assertFalse(pool.dialed.contains(untrustedHint));
+    }
+
+    @Test
+    void shardMoved_unregisteredHintIsNotDialedWhenRefreshStaysStale() {
+        FakeNodeConnectionPool pool = new FakeNodeConnectionPool();
+        AtomicInteger refreshes = new AtomicInteger();
+        String untrustedHint = "not-a-node";
+        RequestExecutor executor = new RequestExecutor(
+                pool, new NodeFailureTracker(5000), retryTwice(), 5_000, refreshes::incrementAndGet);
+
+        ExecutionResult<String> result = executor.executeWithRetry(
+                "shard-1",
+                true,
+                false,
+                stub -> {
+                    throw shardMoved(untrustedHint);
+                },
+                () -> List.of(node("node-a", "nodeA:123")));
+
+        assertFalse(result.isSuccess());
+        assertFalse(result.isAmbiguous());
+        assertEquals(Status.Code.FAILED_PRECONDITION, result.getErrorCode());
+        assertEquals("nodeA:123", result.getLastNodeAddress());
+        assertEquals(2, refreshes.get());
+        assertEquals(List.of("nodeA:123", "nodeA:123"), pool.dialed);
+        assertFalse(pool.dialed.contains(untrustedHint));
+    }
+
+    @Test
+    void shardMoved_withoutNewNodeHintDoesNotRefresh() {
+        AtomicInteger refreshes = new AtomicInteger();
+        AtomicInteger calls = new AtomicInteger();
+        RequestExecutor executor = new RequestExecutor(
+                new FakeNodeConnectionPool(),
+                new NodeFailureTracker(5000),
+                retryTwice(),
+                5_000,
+                refreshes::incrementAndGet);
+
+        ExecutionResult<String> result = executor.executeWithRetry(
+                "shard-1",
+                true,
+                false,
+                stub -> {
+                    calls.incrementAndGet();
+                    throw Status.FAILED_PRECONDITION
+                            .withDescription("NOT_LEADER")
+                            .asRuntimeException();
+                },
+                () -> List.of(node("node-a", "nodeA:123")));
+
+        assertFalse(result.isSuccess());
+        assertEquals(Status.Code.FAILED_PRECONDITION, result.getErrorCode());
+        assertEquals(0, refreshes.get());
+        assertEquals(2, calls.get());
+    }
+
+    @Test
+    void shardMoved_refreshFailureStaysARoutingFailureAndNextAttemptCanSucceed() {
+        FakeNodeConnectionPool pool = new FakeNodeConnectionPool();
+        AtomicInteger phase = new AtomicInteger();
+        RequestExecutor executor = new RequestExecutor(pool, new NodeFailureTracker(5000), retryTwice(), 5_000, () -> {
+            phase.set(1);
+            throw new IllegalStateException("coordinator unavailable");
+        });
+
+        AtomicInteger calls = new AtomicInteger();
+        ExecutionResult<String> result = executor.executeWithRetry(
+                "shard-1",
+                true,
+                false,
+                stub -> {
+                    if (calls.getAndIncrement() == 0) {
+                        throw shardMoved("evil:1");
+                    }
+                    return "applied";
+                },
+                () -> List.of(node("node-a", phase.get() == 0 ? "nodeA:123" : "nodeB:456")));
+
+        assertTrue(result.isSuccess());
+        assertEquals("applied", result.getResponse());
+        assertEquals("nodeB:456", result.getLastNodeAddress());
+        assertEquals(List.of("nodeA:123", "nodeB:456"), pool.dialed);
+        assertFalse(pool.dialed.contains("evil:1"));
+    }
+
+    @Test
+    void shardMoved_blankHintRefreshesAndIsNotDialed() {
+        FakeNodeConnectionPool pool = new FakeNodeConnectionPool();
+        AtomicInteger refreshes = new AtomicInteger();
+        RequestExecutor executor = new RequestExecutor(
+                pool,
+                new NodeFailureTracker(5000),
+                RetryPolicy.builder()
+                        .maxAttempts(1)
+                        .initialBackoffMs(0)
+                        .jitterPercent(0)
+                        .build(),
+                5_000,
+                refreshes::incrementAndGet);
+
+        ExecutionResult<String> result = executor.executeWithRetry(
+                "shard-1",
+                true,
+                true,
+                stub -> {
+                    throw shardMoved("");
+                },
+                () -> List.of(node("node-a", "nodeA:123")));
+
+        assertFalse(result.isSuccess());
+        assertEquals(Status.Code.FAILED_PRECONDITION, result.getErrorCode());
+        assertEquals(1, refreshes.get());
+        assertEquals(List.of("nodeA:123"), pool.dialed);
+    }
+
+    @Test
+    void shardMoved_validLeaderHintIsDialedAndNewNodeHintIsNot() {
+        FakeNodeConnectionPool pool = new FakeNodeConnectionPool();
+        AtomicInteger refreshes = new AtomicInteger();
+        RequestExecutor executor = new RequestExecutor(
+                pool,
+                new NodeFailureTracker(5000),
+                RetryPolicy.builder().maxAttempts(1).build(),
+                5_000,
+                refreshes::incrementAndGet);
+        AtomicInteger calls = new AtomicInteger();
+
+        ExecutionResult<String> result = executor.executeWithRetry(
+                "shard-1",
+                true,
+                true,
+                stub -> {
+                    if (calls.getAndIncrement() == 0) {
+                        Metadata trailers = new Metadata();
+                        trailers.put(GlobalExceptionInterceptor.LEADER_HINT_KEY, "leader:456");
+                        trailers.put(GlobalExceptionInterceptor.NEW_NODE_HINT_KEY, "untrusted.example:999");
+                        throw Status.FAILED_PRECONDITION
+                                .withDescription("SHARD_MOVED")
+                                .asRuntimeException(trailers);
+                    }
+                    return "ok";
+                },
+                () -> List.of(node("node-a", "nodeA:123")));
+
+        assertTrue(result.isSuccess());
+        assertEquals("leader:456", result.getLastNodeAddress());
+        assertEquals(0, refreshes.get());
+        assertEquals(List.of("nodeA:123", "leader:456"), pool.dialed);
+        assertFalse(pool.dialed.contains("untrusted.example:999"));
     }
 
     @Test
@@ -541,6 +733,13 @@ class RequestExecutorRoutingHintsTest {
                 .initialBackoffMs(0)
                 .jitterPercent(0)
                 .build();
+    }
+
+    private static StatusRuntimeException shardMoved(String newNodeHint) {
+        Metadata trailers = new Metadata();
+        trailers.put(GlobalExceptionInterceptor.SHARD_ID_KEY, "shard-1");
+        trailers.put(GlobalExceptionInterceptor.NEW_NODE_HINT_KEY, newNodeHint);
+        return new StatusRuntimeException(Status.FAILED_PRECONDITION.withDescription("SHARD_MOVED"), trailers);
     }
 
     private static StatusRuntimeException definiteRejection() {

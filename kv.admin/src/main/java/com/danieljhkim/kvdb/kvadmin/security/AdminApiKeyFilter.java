@@ -1,15 +1,18 @@
 package com.danieljhkim.kvdb.kvadmin.security;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Objects;
 
 public final class AdminApiKeyFilter extends org.springframework.web.filter.OncePerRequestFilter {
 
     private static final String HEADER = "X-Admin-Api-Key";
-    private final String expected;
+    private final byte[] expectedDigest;
 
     public AdminApiKeyFilter(String expected) {
-        this.expected = Objects.requireNonNull(expected, "apiKey");
+        this.expectedDigest = digest(Objects.requireNonNull(expected, "apiKey"));
     }
 
     @Override
@@ -26,7 +29,7 @@ public final class AdminApiKeyFilter extends org.springframework.web.filter.Once
             throws jakarta.servlet.ServletException, IOException {
 
         String provided = request.getHeader(HEADER);
-        if (provided == null || provided.isBlank() || !provided.equals(expected)) {
+        if (provided == null || provided.isBlank() || !MessageDigest.isEqual(digest(provided), expectedDigest)) {
             JsonError.write(
                     response,
                     jakarta.servlet.http.HttpServletResponse.SC_UNAUTHORIZED,
@@ -35,5 +38,13 @@ public final class AdminApiKeyFilter extends org.springframework.web.filter.Once
             return;
         }
         filterChain.doFilter(request, response);
+    }
+
+    private static byte[] digest(String value) {
+        try {
+            return MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is not available", e);
+        }
     }
 }

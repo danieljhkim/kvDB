@@ -6,6 +6,7 @@ import com.danieljhkim.kvdb.proto.gateway.KvGatewayGrpc;
 import com.danieljhkim.kvdb.proto.gateway.RequestContext;
 import com.danieljhkim.kvdb.proto.raft.RaftServiceGrpc;
 import com.kvdb.proto.kvstore.KVServiceGrpc;
+import com.kvdb.proto.kvstore.ReplicateMutationRequest;
 import io.grpc.Context;
 import io.grpc.Contexts;
 import io.grpc.ForwardingServerCallListener;
@@ -116,7 +117,7 @@ public final class InternalAuthServerInterceptor implements ServerInterceptor {
 
         Context context = Context.current().withValue(GrpcPeerIdentity.CURRENT, identity);
         ServerCall.Listener<ReqT> listener = Contexts.interceptCall(context, call, headers, next);
-        if (identity.role() != Role.EXTERNAL_CLIENT) {
+        if (identity.role() != Role.EXTERNAL_CLIENT && identity.role() != Role.STORAGE_NODE) {
             return listener;
         }
         return new ForwardingServerCallListener.SimpleForwardingServerCallListener<>(listener) {
@@ -124,13 +125,10 @@ public final class InternalAuthServerInterceptor implements ServerInterceptor {
 
             @Override
             public void onMessage(ReqT message) {
-                RequestContext requestContext = gatewayRequestContext(message);
-                if (requestContext != null && !matchesVerifiedIdentity(requestContext, identity)) {
+                String conflict = identityConflict(message, identity);
+                if (conflict != null) {
                     rejected = true;
-                    call.close(
-                            Status.PERMISSION_DENIED.withDescription(
-                                    "Request tenant/principal conflicts with the verified client identity"),
-                            new Metadata());
+                    call.close(Status.PERMISSION_DENIED.withDescription(conflict), new Metadata());
                     return;
                 }
                 super.onMessage(message);
@@ -143,6 +141,24 @@ public final class InternalAuthServerInterceptor implements ServerInterceptor {
                 }
             }
         };
+    }
+
+    /** Returns why a request field claims an identity other than the verified peer, or null when it does not. */
+    private static String identityConflict(Object message, GrpcIdentity identity) {
+        if (identity.role() == Role.EXTERNAL_CLIENT) {
+            RequestContext requestContext = gatewayRequestContext(message);
+            if (requestContext != null && !matchesVerifiedIdentity(requestContext, identity)) {
+                return "Request tenant/principal conflicts with the verified client identity";
+            }
+            return null;
+        }
+        // A storage node may only replicate mutations it originated; it cannot impersonate a shard leader.
+        if (message instanceof ReplicateMutationRequest request
+                && request.hasMutation()
+                && !request.getMutation().getOriginNodeId().equals(identity.principal())) {
+            return "Replicated mutation origin conflicts with the verified storage-node identity";
+        }
+        return null;
     }
 
     private static RequestContext gatewayRequestContext(Object message) {

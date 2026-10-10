@@ -1,6 +1,7 @@
 package com.danieljhkim.kvdb.kvcommon.grpc;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -11,7 +12,12 @@ import com.danieljhkim.kvdb.proto.gateway.BatchGetResponse;
 import com.danieljhkim.kvdb.proto.gateway.KvGatewayGrpc;
 import com.danieljhkim.kvdb.proto.gateway.RequestContext;
 import com.danieljhkim.kvdb.proto.raft.RaftServiceGrpc;
+import com.google.protobuf.ByteString;
 import com.kvdb.proto.kvstore.KVServiceGrpc;
+import com.kvdb.proto.kvstore.ReplicateMutationRequest;
+import com.kvdb.proto.kvstore.ReplicatedMutation;
+import com.kvdb.proto.kvstore.ReplicationAck;
+import com.kvdb.proto.kvstore.ReplicationPhase;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.ServerCall;
@@ -92,6 +98,62 @@ class InternalAuthServerInterceptorTest {
 
         assertEquals(Status.Code.PERMISSION_DENIED, call.closedStatus.getCode());
         assertTrue(call.closedStatus.getDescription().contains("verified client identity"));
+    }
+
+    @Test
+    void storageNodeCannotForgeReplicationOriginOfAnotherNode() {
+        RecordingCall<ReplicateMutationRequest, ReplicationAck> call =
+                new RecordingCall<>(KVServiceGrpc.getReplicateMutationMethod());
+        AtomicBoolean delivered = new AtomicBoolean(false);
+        ServerCall.Listener<ReplicateMutationRequest> listener =
+                replicationListener(call, "storage-node/node-1", delivered);
+
+        listener.onMessage(replicationFrom("node-2"));
+        listener.onHalfClose();
+
+        assertEquals(Status.Code.PERMISSION_DENIED, call.closedStatus.getCode());
+        assertTrue(call.closedStatus.getDescription().contains("verified storage-node identity"));
+        assertFalse(delivered.get());
+    }
+
+    @Test
+    void storageNodeReplicationOfItsOwnOriginReachesTheService() {
+        RecordingCall<ReplicateMutationRequest, ReplicationAck> call =
+                new RecordingCall<>(KVServiceGrpc.getReplicateMutationMethod());
+        AtomicBoolean delivered = new AtomicBoolean(false);
+        ServerCall.Listener<ReplicateMutationRequest> listener =
+                replicationListener(call, "storage-node/node-2", delivered);
+
+        listener.onMessage(replicationFrom("node-2"));
+
+        assertNull(call.closedStatus);
+        assertTrue(delivered.get());
+    }
+
+    private static ServerCall.Listener<ReplicateMutationRequest> replicationListener(
+            RecordingCall<ReplicateMutationRequest, ReplicationAck> call, String identity, AtomicBoolean delivered) {
+        InternalAuthServerInterceptor interceptor =
+                new InternalAuthServerInterceptor(GrpcSecurityConfig.development(Role.STORAGE_NODE, "node-3"));
+        return interceptor.interceptCall(
+                call, identity(identity), (ignoredCall, ignoredHeaders) -> new ServerCall.Listener<>() {
+                    @Override
+                    public void onMessage(ReplicateMutationRequest message) {
+                        delivered.set(true);
+                    }
+                });
+    }
+
+    private static ReplicateMutationRequest replicationFrom(String origin) {
+        return ReplicateMutationRequest.newBuilder()
+                .setMutation(ReplicatedMutation.newBuilder()
+                        .setRequestId("request")
+                        .setShardId("shard-0")
+                        .setEpoch(1)
+                        .setVersion(1)
+                        .setKey(ByteString.copyFromUtf8("k"))
+                        .setOriginNodeId(origin))
+                .setPhase(ReplicationPhase.PREPARE)
+                .build();
     }
 
     private static void assertAllowed(MethodDescriptor<?, ?> method, String identity) {

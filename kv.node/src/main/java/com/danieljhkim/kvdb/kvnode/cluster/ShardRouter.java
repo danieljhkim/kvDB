@@ -2,6 +2,7 @@ package com.danieljhkim.kvdb.kvnode.cluster;
 
 import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
 import com.danieljhkim.kvdb.kvcommon.exception.InvalidRequestException;
+import com.danieljhkim.kvdb.kvcommon.exception.NotLeaderException;
 import com.danieljhkim.kvdb.kvcommon.exception.ShardMapUnavailableException;
 import com.danieljhkim.kvdb.kvcommon.exception.ShardMovedException;
 import com.danieljhkim.kvdb.proto.coordinator.ShardRecord;
@@ -99,6 +100,21 @@ public class ShardRouter {
         if (requestEpoch != 0 && shard.getEpoch() != 0 && shard.getEpoch() != requestEpoch) {
             String hint = getRedirectHint(shardId);
             throw new ShardMovedException(shardId, hint);
+        }
+    }
+
+    /**
+     * Validates that a replication sender is the shard's current leader in this node's shard map. A leader handoff
+     * keeps the replica-set epoch, so epoch validation alone cannot fence a superseded leader.
+     *
+     * @param shardId the shard ID
+     * @param senderNodeId the verified node identity of the sender
+     * @throws NotLeaderException if the sender is not the current leader
+     */
+    public void validateReplicationLeader(String shardId, String senderNodeId) {
+        String leader = getShardRecord(shardId).getLeader();
+        if (leader.isEmpty() || !leader.equals(senderNodeId)) {
+            throw new NotLeaderException(shardMapCache.getLeaderAddress(shardId).orElse(""));
         }
     }
 

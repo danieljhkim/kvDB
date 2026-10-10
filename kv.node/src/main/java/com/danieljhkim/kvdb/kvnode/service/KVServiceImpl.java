@@ -5,6 +5,9 @@ import com.danieljhkim.kvdb.kvcommon.config.AppConfig;
 import com.danieljhkim.kvdb.kvcommon.exception.InvalidRequestException;
 import com.danieljhkim.kvdb.kvcommon.exception.NodeUnavailableException;
 import com.danieljhkim.kvdb.kvcommon.exception.PayloadTooLargeException;
+import com.danieljhkim.kvdb.kvcommon.exception.PermissionDeniedException;
+import com.danieljhkim.kvdb.kvcommon.grpc.GrpcIdentity;
+import com.danieljhkim.kvdb.kvcommon.grpc.GrpcPeerIdentity;
 import com.danieljhkim.kvdb.kvcommon.limits.KvRequestLimits;
 import com.danieljhkim.kvdb.kvnode.client.ReplicaWriteClient;
 import com.danieljhkim.kvdb.kvnode.cluster.ReplicationManager;
@@ -271,6 +274,16 @@ public class KVServiceImpl extends KVServiceGrpc.KVServiceImplBase {
         shardRouter.validateShardIdForKey(mutation.getKey(), shardId);
         shardRouter.validateReplica(shardId);
         shardRouter.validateEpoch(shardId, mutation.getEpoch());
+        String sender = verifiedReplicationPeer(shardId);
+        if (!sender.equals(mutation.getOriginNodeId())) {
+            throw new PermissionDeniedException(
+                    "origin_node_id conflicts with the verified storage-node identity", shardId);
+        }
+        // Only the current leader may stage or expose a mutation. A sender may still abort its own hidden prepare
+        // after a handoff: ABORT matches the exact staged mutation and cannot touch committed state.
+        if (request.getPhase() != ReplicationPhase.ABORT) {
+            shardRouter.validateReplicationLeader(shardId, sender);
+        }
 
         ShardKVStore store = shardStores.getOrCreate(shardId);
         ShardKVStore.MutationStatus status =
@@ -299,6 +312,9 @@ public class KVServiceImpl extends KVServiceGrpc.KVServiceImplBase {
         String shardId = request.getShardId();
         shardRouter.validateReplica(shardId);
         shardRouter.validateEpoch(shardId, request.getEpoch());
+        // Repair transfers committed history, so entries may originate from former leaders. The authority to push
+        // that history belongs to the current leader only.
+        shardRouter.validateReplicationLeader(shardId, verifiedReplicationPeer(shardId));
         ShardKVStore store = shardStores.getOrCreate(shardId);
         int applied = 0;
         for (ReplicatedMutation mutation : request.getCommittedMutationsList()) {
@@ -408,6 +424,17 @@ public class KVServiceImpl extends KVServiceGrpc.KVServiceImplBase {
         if (replicationManager != null) {
             replicationManager.close();
         }
+    }
+
+    /** Returns the certificate-derived node identity of the replication sender; request fields are not trusted. */
+    private static String verifiedReplicationPeer(String shardId) {
+        GrpcIdentity peer = GrpcPeerIdentity.CURRENT.get();
+        if (peer == null
+                || peer.role() != GrpcIdentity.Role.STORAGE_NODE
+                || peer.principal().isBlank()) {
+            throw new PermissionDeniedException("Replication requires a verified storage-node identity", shardId);
+        }
+        return peer.principal();
     }
 
     private static String stableRequestId(String requestId) {

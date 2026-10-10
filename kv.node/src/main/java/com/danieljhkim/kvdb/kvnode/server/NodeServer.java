@@ -49,6 +49,10 @@ public class NodeServer {
             throw new IllegalArgumentException("Node configuration not found for nodeId: " + nodeId);
         }
         GrpcSecurityConfig grpcSecurity = GrpcSecurityConfig.internal(GrpcIdentity.Role.STORAGE_NODE);
+        // Replicas authorize replication by matching the sender's verified principal to the shard leader's node id.
+        if (!nodeId.equals(grpcSecurity.localPrincipal())) {
+            throw new IllegalStateException("KVDB_IDENTITY_PRINCIPAL must equal the storage node id: " + nodeId);
+        }
 
         this.coordinatorClientManager = new CoordinatorClientManager(appConfig);
         this.shardMapCache = new ShardMapCache();

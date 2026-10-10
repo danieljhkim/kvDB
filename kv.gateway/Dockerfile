@@ -19,5 +19,5 @@ COPY --from=builder /build/kv.gateway/target/kv-gateway.jar /app/Gateway.jar
 
 EXPOSE 7000
 
-# Use shell form to allow environment variable expansion
-CMD java -Dkvdb.env=${KVDB_ENV:-docker} -jar Gateway.jar
+# Expand KVDB_ENV at container startup, then replace the shell with the JVM so it receives SIGTERM.
+CMD ["sh", "-c", "exec java -Dkvdb.env=${KVDB_ENV:-docker} -jar Gateway.jar"]

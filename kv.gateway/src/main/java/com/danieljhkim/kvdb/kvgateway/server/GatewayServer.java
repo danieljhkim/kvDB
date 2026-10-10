@@ -23,7 +23,6 @@ import com.danieljhkim.kvdb.kvgateway.service.KvGatewayServiceImpl;
 import io.grpc.Server;
 import io.grpc.ServerInterceptors;
 import io.grpc.ServerServiceDefinition;
-import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
 import java.io.IOException;
 import java.util.concurrent.TimeUnit;
 import lombok.Getter;
@@ -85,7 +84,7 @@ public class GatewayServer {
                 new InternalAuthServerInterceptor(gatewaySecurity),
                 new GlobalExceptionInterceptor());
 
-        this.grpcServer = GrpcSecurity.configureServer(NettyServerBuilder.forPort(port), gatewaySecurity)
+        this.grpcServer = GrpcSecurity.serverBuilder(port, gatewaySecurity)
                 .maxInboundMessageSize(requestLimits.maxMessageBytes())
                 .maxConcurrentCallsPerConnection(requestLimits.maxConcurrentRequestsPerConnection())
                 .addService(interceptedService)
@@ -93,7 +92,7 @@ public class GatewayServer {
         this.drainBudgetMillis = drainBudgetMillis();
         try {
             this.healthServer = new HealthHttpServer(
-                    healthPort(port),
+                    gatewaySecurity.serverAddress(healthPort(port)),
                     lifecycle,
                     () -> shardMapCache.isInitialized() && watchShardMapClient.isConnected());
         } catch (IOException e) {
@@ -134,7 +133,7 @@ public class GatewayServer {
         }
         grpcServer.start();
         healthServer.start();
-        logger.info("GatewayServer started on port {}", port);
+        logger.info("Gateway gRPC server listening on {}", grpcServer.getListenSockets());
     }
 
     /**

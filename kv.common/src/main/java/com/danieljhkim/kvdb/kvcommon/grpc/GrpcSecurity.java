@@ -10,6 +10,11 @@ public final class GrpcSecurity {
 
     private GrpcSecurity() {}
 
+    /** Creates a listener with the configured bind address and transport security. */
+    public static NettyServerBuilder serverBuilder(int port, GrpcSecurityConfig config) {
+        return configureServer(NettyServerBuilder.forAddress(config.serverAddress(port)), config);
+    }
+
     public static NettyServerBuilder configureServer(NettyServerBuilder builder, GrpcSecurityConfig config) {
         if (config.mode() == GrpcSecurityConfig.Mode.DEVELOPMENT_PLAINTEXT) {
             return builder;

@@ -8,15 +8,23 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Supplier;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Exposes unauthenticated, payload-free liveness, readiness, and metrics endpoints on a management port. */
 public final class HealthHttpServer implements AutoCloseable {
 
+    private static final Logger logger = LoggerFactory.getLogger(HealthHttpServer.class);
     private final HttpServer server;
     private final ExecutorService executor;
 
     public HealthHttpServer(int port, ServiceLifecycle lifecycle, Supplier<Boolean> ready) throws IOException {
-        server = HttpServer.create(new InetSocketAddress(port), 0);
+        this(new InetSocketAddress("127.0.0.1", port), lifecycle, ready);
+    }
+
+    public HealthHttpServer(InetSocketAddress address, ServiceLifecycle lifecycle, Supplier<Boolean> ready)
+            throws IOException {
+        server = HttpServer.create(address, 0);
         executor = Executors.newSingleThreadExecutor(r -> {
             Thread thread = new Thread(r, "kvdb-health-http");
             thread.setDaemon(true);
@@ -39,6 +47,11 @@ public final class HealthHttpServer implements AutoCloseable {
 
     public void start() {
         server.start();
+        logger.info("Health HTTP server listening on {}", server.getAddress());
+    }
+
+    public InetSocketAddress getAddress() {
+        return server.getAddress();
     }
 
     public int getPort() {

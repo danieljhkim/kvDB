@@ -158,8 +158,25 @@ and supplies role/principal headers for local smoke tests. The process refuses
 that mode unless `KVDB_ENV` is exactly `local`, `dev`, `development`, or `test`;
 the default mode is `mtls`, so a missing or mistyped production configuration
 fails closed. Development identities are forgeable and must never be exposed on
-an untrusted network. Docker Compose still binds published endpoints to
-loopback by default.
+an untrusted network.
+
+In `development-plaintext` mode, coordinator, storage-node, and gateway gRPC
+listeners and their HTTP health/metrics listeners bind to `127.0.0.1` by
+default. Set `KVDB_BIND_ADDRESS` explicitly to an IP address or resolvable
+hostname to change the bind for both listeners in a process (for example,
+`KVDB_BIND_ADDRESS=0.0.0.0` for a trusted container network, or `::1` for IPv6
+loopback). An unset or blank value uses the mode's default; an unresolvable
+value fails startup. Startup logs report each listener's effective address and
+port. The setting controls local listeners, not advertised peer addresses;
+configure peer hosts separately when using multiple machines.
+
+Docker Compose explicitly sets `KVDB_BIND_ADDRESS=0.0.0.0` inside containers so
+peers and the quorum health gate can reach each other. Published host endpoints
+remain bound to `127.0.0.1`. Its plaintext failover test sets `KVDB_ENV=test`;
+select an allowed development environment explicitly when running plaintext
+Compose yourself. Only use a non-loopback plaintext bind on a trusted network.
+In `mtls` mode the default remains the wildcard bind (`0.0.0.0`), with the same
+optional `KVDB_BIND_ADDRESS` override and client-certificate requirements.
 
 ---
 

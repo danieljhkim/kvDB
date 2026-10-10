@@ -18,8 +18,8 @@ var putCmd = &cobra.Command{
 	Long: `Write one key.
 
 The write is attempted exactly once. If the outcome is unknown the command
-exits 5 and does not retry; rerun it with the same --request-id so the cluster
-can de-duplicate the operation.`,
+exits 5 and does not retry; the error line reports the request_id that was sent.
+Rerun it with that --request-id so the cluster can de-duplicate the operation.`,
 	Example: `  kv put greeting hello
   kv put --key-file ./binary.key --value-file ./binary.value
   cat payload.bin | kv put greeting --value-file -

@@ -15,7 +15,7 @@ var delCmd = &cobra.Command{
 	Long: `Delete one key.
 
 Like put, the delete is attempted exactly once and an unknown outcome exits 5
-without an automatic retry.`,
+without an automatic retry. Failures report the request_id that was sent.`,
 	Example: `  kv del greeting
   kv del --key-file ./binary.key`,
 	Args:          cobra.MaximumNArgs(1),

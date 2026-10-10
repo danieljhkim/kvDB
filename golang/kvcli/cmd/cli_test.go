@@ -620,3 +620,82 @@ func withStdin(t *testing.T, contents []byte) {
 		_ = file.Close()
 	})
 }
+
+func TestAmbiguousWritesReportTheRequestIdSentWithoutSuccessMetadata(t *testing.T) {
+	unknown := &gateway.Status{Code: gateway.Status_WRITE_OUTCOME_UNKNOWN, Message: "ambiguous"}
+	server, connection := localGateway(t, testfixture.Hooks{
+		Put: func(context.Context, *gateway.PutRequest) (*gateway.PutResponse, error) {
+			return &gateway.PutResponse{Status: unknown}, nil
+		},
+		Delete: func(context.Context, *gateway.DeleteRequest) (*gateway.DeleteResponse, error) {
+			return &gateway.DeleteResponse{Status: unknown}, nil
+		},
+	})
+	const explicit = "5b1f6b1e-6d0e-4a54-9c94-1f9a8f4c2f10"
+	invocations := [][]string{
+		{"put", "k", "v"},
+		{"del", "k"},
+		{"put", "k", "v", "--request-id", explicit},
+		{"del", "k", "--request-id", explicit},
+	}
+	for index, args := range invocations {
+		stdout, stderr, code := run(t, withArgs(connection, args...)...)
+		if code != ExitWriteOutcomeUnknown {
+			t.Fatalf("%v: expected exit %d, got %d", args, ExitWriteOutcomeUnknown, code)
+		}
+		if stdout != "" || strings.Contains(stderr, "status=OK") {
+			t.Fatalf("%v: a failed write must not report success, stdout=%q stderr=%q", args, stdout, stderr)
+		}
+		calls := server.Calls()
+		if len(calls) != index+1 {
+			t.Fatalf("%v: ambiguous write was retried, saw %d calls", args, len(calls))
+		}
+		sent := calls[index].RequestID
+		if sent == "" || !strings.Contains(stderr, "request_id="+sent) {
+			t.Fatalf("%v: stderr must report the sent id %q, got %q", args, sent, stderr)
+		}
+		if index >= 2 && sent != explicit {
+			t.Fatalf("%v: explicit id was not sent, got %q", args, sent)
+		}
+	}
+}
+
+func TestApplicationRejectionsReportTheRequestIdSent(t *testing.T) {
+	server, connection := localGateway(t, testfixture.Hooks{
+		Put: func(context.Context, *gateway.PutRequest) (*gateway.PutResponse, error) {
+			return &gateway.PutResponse{Status: &gateway.Status{Code: gateway.Status_PAYLOAD_TOO_LARGE}}, nil
+		},
+	})
+	stdout, stderr, code := run(t, withArgs(connection, "put", "k", "v")...)
+	calls := server.Calls()
+	if code != ExitApplication || stdout != "" || len(calls) != 1 {
+		t.Fatalf("got code=%d stdout=%q calls=%d", code, stdout, len(calls))
+	}
+	if !strings.Contains(stderr, "request_id="+calls[0].RequestID) {
+		t.Fatalf("stderr must report the sent id %q, got %q", calls[0].RequestID, stderr)
+	}
+}
+
+func TestWriteTransportFailuresReportTheRequestIdAndKeepTheirExitCode(t *testing.T) {
+	server, connection := localGateway(t, testfixture.Hooks{
+		Put: func(context.Context, *gateway.PutRequest) (*gateway.PutResponse, error) {
+			return nil, grpcstatus.Error(grpccodes.Unavailable, "connection lost")
+		},
+		Delete: func(context.Context, *gateway.DeleteRequest) (*gateway.DeleteResponse, error) {
+			return nil, grpcstatus.Error(grpccodes.Unavailable, "connection lost")
+		},
+	})
+	for index, args := range [][]string{{"put", "k", "v"}, {"del", "k", "--request-id", "fixed-id"}} {
+		stdout, stderr, code := run(t, withArgs(connection, args...)...)
+		if code != ExitTransport || stdout != "" {
+			t.Fatalf("%v: got code=%d stdout=%q", args, code, stdout)
+		}
+		calls := server.Calls()
+		if len(calls) != index+1 {
+			t.Fatalf("%v: transport failure was retried, saw %d calls", args, len(calls))
+		}
+		if !strings.Contains(stderr, "Unavailable") || !strings.Contains(stderr, "request_id="+calls[index].RequestID) {
+			t.Fatalf("%v: stderr must name the transport status and sent id, got %q", args, stderr)
+		}
+	}
+}

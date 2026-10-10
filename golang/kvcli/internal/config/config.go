@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -75,7 +77,11 @@ type Config struct {
 
 // Address renders the gRPC target for the configured endpoint.
 func (c *Config) Address() string {
-	return fmt.Sprintf("%s:%d", c.Server.Host, c.Server.Port)
+	host := c.Server.Host
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	return net.JoinHostPort(host, strconv.Itoa(c.Server.Port))
 }
 
 // Load reads defaults, an optional config file, and environment overrides.

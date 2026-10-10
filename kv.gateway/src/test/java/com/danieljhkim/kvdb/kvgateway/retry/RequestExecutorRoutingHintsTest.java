@@ -15,8 +15,10 @@ import io.grpc.*;
 import java.time.Duration;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
@@ -245,6 +247,243 @@ class RequestExecutorRoutingHintsTest {
             context.cancel(null);
             scheduler.shutdownNow();
         }
+    }
+
+    @Test
+    void definiteRejectionRetriesAndExhaustsAsUnavailable() {
+        AtomicInteger calls = new AtomicInteger();
+        ExecutionResult<String> result = executor(retryTwice())
+                .executeWithRetry(
+                        "shard-1",
+                        true,
+                        false,
+                        stub -> {
+                            calls.incrementAndGet();
+                            throw definiteRejection();
+                        },
+                        () -> List.of(node("node-a", "nodeA:123")));
+        assertFalse(result.isAmbiguous());
+        assertEquals(Status.Code.UNAVAILABLE, result.getErrorCode());
+        assertEquals(2, calls.get());
+    }
+
+    @Test
+    void definiteRejectionCanBeRetriedSuccessfully() {
+        AtomicInteger calls = new AtomicInteger();
+        ExecutionResult<String> result = executor(retryTwice())
+                .executeWithRetry(
+                        "shard-1",
+                        true,
+                        false,
+                        stub -> {
+                            if (calls.getAndIncrement() == 0) {
+                                throw definiteRejection();
+                            }
+                            return "applied";
+                        },
+                        () -> List.of(node("node-a", "nodeA:123")));
+        assertTrue(result.isSuccess());
+        assertEquals(2, calls.get());
+    }
+
+    @Test
+    void unmarkedTransportAndServerFailuresStayAmbiguousWithoutReplay() {
+        for (Status status : List.of(Status.UNAVAILABLE, Status.INTERNAL, Status.UNKNOWN, Status.CANCELLED)) {
+            AtomicInteger calls = new AtomicInteger();
+            ExecutionResult<String> result = executor(retryTwice())
+                    .executeWithRetry(
+                            "shard-1",
+                            true,
+                            false,
+                            stub -> {
+                                calls.incrementAndGet();
+                                throw status.withDescription("response lost after send")
+                                        .withCause(new java.net.SocketException("Connection reset"))
+                                        .asRuntimeException();
+                            },
+                            () -> List.of(node("node-a", "nodeA:123")));
+            assertTrue(result.isAmbiguous(), status.toString());
+            assertEquals(1, calls.get());
+        }
+    }
+
+    @Test
+    void connectionEstablishmentFailureIsDefiniteButIoExceptionTextIsNot() {
+        AtomicInteger calls = new AtomicInteger();
+        ExecutionResult<String> refused = executor(retryTwice())
+                .executeWithRetry(
+                        "shard-1",
+                        true,
+                        false,
+                        stub -> {
+                            calls.incrementAndGet();
+                            throw Status.UNAVAILABLE
+                                    .withDescription("io exception")
+                                    .withCause(new java.io.IOException(
+                                            new java.net.ConnectException("Connection refused")))
+                                    .asRuntimeException();
+                        },
+                        () -> List.of(node("node-a", "nodeA:123")));
+        assertFalse(refused.isAmbiguous());
+        assertEquals(Status.Code.UNAVAILABLE, refused.getErrorCode());
+        assertEquals(2, calls.get());
+        ExecutionResult<String> unknown = executor(retryTwice())
+                .executeWithRetry(
+                        "shard-1",
+                        true,
+                        false,
+                        stub -> {
+                            throw Status.UNAVAILABLE
+                                    .withDescription("io exception")
+                                    .asRuntimeException();
+                        },
+                        () -> List.of(node("node-a", "nodeA:123")));
+        assertTrue(unknown.isAmbiguous());
+    }
+
+    @Test
+    void leaderHintDefiniteRejectionPreservesUnavailableAfterExhaustion() {
+        AtomicInteger calls = new AtomicInteger();
+        ExecutionResult<String> result = executor(
+                        RetryPolicy.builder().maxAttempts(1).build())
+                .executeWithRetry(
+                        "shard-1",
+                        true,
+                        false,
+                        stub -> {
+                            if (calls.getAndIncrement() == 0) {
+                                Metadata trailers = new Metadata();
+                                trailers.put(GlobalExceptionInterceptor.LEADER_HINT_KEY, "leader:456");
+                                throw Status.FAILED_PRECONDITION.asRuntimeException(trailers);
+                            }
+                            throw definiteRejection();
+                        },
+                        () -> List.of(node("node-a", "nodeA:123")));
+        assertFalse(result.isAmbiguous());
+        assertEquals(Status.Code.UNAVAILABLE, result.getErrorCode());
+        assertEquals("leader:456", result.getLastNodeAddress());
+        assertEquals(2, calls.get());
+    }
+
+    @Test
+    void leaderHintResponseLossStaysAmbiguous() {
+        AtomicInteger calls = new AtomicInteger();
+        ExecutionResult<String> result = executor(retryTwice())
+                .executeWithRetry(
+                        "shard-1",
+                        true,
+                        false,
+                        stub -> {
+                            if (calls.getAndIncrement() == 0) {
+                                Metadata trailers = new Metadata();
+                                trailers.put(GlobalExceptionInterceptor.LEADER_HINT_KEY, "leader:456");
+                                throw Status.FAILED_PRECONDITION.asRuntimeException(trailers);
+                            }
+                            throw Status.UNAVAILABLE
+                                    .withDescription("commit response lost")
+                                    .asRuntimeException();
+                        },
+                        () -> List.of(node("node-a", "nodeA:123")));
+        assertTrue(result.isAmbiguous());
+        assertEquals(2, calls.get());
+    }
+
+    @Test
+    void inboundCancellationAfterSendDoesNotEraseUnknownOutcome() throws Exception {
+        Context.CancellableContext context = Context.current().withCancellation();
+        try {
+            ExecutionResult<String> result = context.call(() -> executor(retryTwice())
+                    .executeWithRetry(
+                            "shard-1",
+                            true,
+                            false,
+                            stub -> {
+                                context.cancel(null);
+                                throw Status.CANCELLED.asRuntimeException();
+                            },
+                            () -> List.of(node("node-a", "nodeA:123"))));
+            assertTrue(result.isAmbiguous());
+        } finally {
+            context.cancel(null);
+        }
+    }
+
+    @Test
+    void expiredInboundDeadlineAfterSendDoesNotEraseUnknownOutcome() throws Exception {
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        Context.CancellableContext context = Context.current().withDeadlineAfter(1, TimeUnit.SECONDS, scheduler);
+        CountDownLatch expired = new CountDownLatch(1);
+        context.addListener(ignored -> expired.countDown(), Runnable::run);
+        try {
+            ExecutionResult<String> result = context.call(() -> executor(retryTwice())
+                    .executeWithRetry(
+                            "shard-1",
+                            true,
+                            false,
+                            stub -> {
+                                try {
+                                    assertTrue(expired.await(5, TimeUnit.SECONDS));
+                                } catch (InterruptedException e) {
+                                    Thread.currentThread().interrupt();
+                                    throw new AssertionError(e);
+                                }
+                                throw Status.DEADLINE_EXCEEDED.asRuntimeException();
+                            },
+                            () -> List.of(node("node-a", "nodeA:123"))));
+            assertTrue(result.isAmbiguous());
+        } finally {
+            context.cancel(null);
+            scheduler.shutdownNow();
+        }
+    }
+
+    @Test
+    void realGrpcConnectionRefusalIsDefinite() throws Exception {
+        int port;
+        try (java.net.ServerSocket reservation = new java.net.ServerSocket(0)) {
+            port = reservation.getLocalPort();
+        }
+        ManagedChannel channel = ManagedChannelBuilder.forAddress("localhost", port)
+                .usePlaintext()
+                .build();
+        try {
+            NodeConnectionPool pool = new NodeConnectionPool() {
+                @Override
+                public KVServiceGrpc.KVServiceBlockingStub getStub(String address) {
+                    return KVServiceGrpc.newBlockingStub(channel);
+                }
+            };
+            RequestExecutor executor = new RequestExecutor(pool, new NodeFailureTracker(5000), retryTwice(), 5000);
+            ExecutionResult<com.kvdb.proto.kvstore.SetResponse> result = executor.executeWithRetry(
+                    "shard-1",
+                    true,
+                    false,
+                    stub -> stub.set(com.kvdb.proto.kvstore.KeyValueRequest.newBuilder()
+                            .setKey(com.google.protobuf.ByteString.copyFromUtf8("key"))
+                            .setValue(com.google.protobuf.ByteString.copyFromUtf8("value"))
+                            .build()),
+                    () -> List.of(node("node-a", "localhost:" + port)));
+            assertFalse(result.isAmbiguous());
+            assertEquals(Status.Code.UNAVAILABLE, result.getErrorCode());
+        } finally {
+            channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
+    private static RetryPolicy retryTwice() {
+        return RetryPolicy.builder()
+                .maxAttempts(2)
+                .initialBackoffMs(0)
+                .jitterPercent(0)
+                .build();
+    }
+
+    private static StatusRuntimeException definiteRejection() {
+        Metadata trailers = new Metadata();
+        trailers.put(GlobalExceptionInterceptor.WRITE_OUTCOME_KEY, GlobalExceptionInterceptor.WRITE_NOT_APPLIED);
+        return Status.UNAVAILABLE
+                .withDescription("Leader reconciliation quorum not reached")
+                .asRuntimeException(trailers);
     }
 
     private static RequestExecutor executor(RetryPolicy policy) {

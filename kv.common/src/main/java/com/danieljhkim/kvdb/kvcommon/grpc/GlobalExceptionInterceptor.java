@@ -1,6 +1,7 @@
 package com.danieljhkim.kvdb.kvcommon.grpc;
 
 import com.danieljhkim.kvdb.kvcommon.exception.KvException;
+import com.danieljhkim.kvdb.kvcommon.exception.NodeUnavailableException;
 import com.danieljhkim.kvdb.kvcommon.exception.NotLeaderException;
 import com.danieljhkim.kvdb.kvcommon.exception.ShardMovedException;
 import com.google.protobuf.ServiceException;
@@ -29,6 +30,10 @@ public class GlobalExceptionInterceptor implements ServerInterceptor {
             Metadata.Key.of("x-leader-hint", Metadata.ASCII_STRING_MARSHALLER);
     public static final Metadata.Key<String> NEW_NODE_HINT_KEY =
             Metadata.Key.of("x-new-node-hint", Metadata.ASCII_STRING_MARSHALLER);
+    // Explicit opt-in: ordinary availability/transport failures carry no outcome guarantee.
+    public static final Metadata.Key<String> WRITE_OUTCOME_KEY =
+            Metadata.Key.of("x-write-outcome", Metadata.ASCII_STRING_MARSHALLER);
+    public static final String WRITE_NOT_APPLIED = "not-applied";
 
     @Override
     public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
@@ -118,6 +123,9 @@ public class GlobalExceptionInterceptor implements ServerInterceptor {
         Metadata trailers = new Metadata();
 
         if (t instanceof KvException kvEx) {
+            if (t instanceof NodeUnavailableException unavailable && unavailable.isRejectedBeforeMutation()) {
+                trailers.put(WRITE_OUTCOME_KEY, WRITE_NOT_APPLIED);
+            }
             // Add shard ID if available
             if (kvEx.getShardId() != null) {
                 trailers.put(SHARD_ID_KEY, kvEx.getShardId());

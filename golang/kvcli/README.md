@@ -201,7 +201,7 @@ the proto for application failures, the gRPC code name for transport failures.
 | --- | --- |
 | `0` | `OK`. A stored empty value also exits `0` with empty output. |
 | `1` | Usage or configuration error; no RPC was attempted. |
-| `2` | Non-OK application status (for example `RATE_LIMITED`, `INVALID_ARGUMENT`). Reusing a write request ID for a different mutation in the same shard returns non-retryable `INVALID_ARGUMENT`. |
+| `2` | Non-OK application status (for example `RATE_LIMITED`, `INVALID_ARGUMENT`, definite write rejection `UNAVAILABLE`). Reusing a write request ID for a different mutation in the same shard returns non-retryable `INVALID_ARGUMENT`. |
 | `3` | Transport failure (for example `DeadlineExceeded`, `Unauthenticated`). |
 | `4` | `NOT_FOUND` — the key does not exist, which is distinct from an empty value. |
 | `5` | `WRITE_OUTCOME_UNKNOWN` — the write may or may not have been applied. |

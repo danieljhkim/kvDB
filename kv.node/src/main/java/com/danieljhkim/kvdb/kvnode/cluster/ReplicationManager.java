@@ -473,7 +473,8 @@ public class ReplicationManager implements AutoCloseable {
 
     private void ensureLeaderReconciledLocked(String shardId, ShardRecord shard, boolean forceQuorumRead) {
         if (!nodeId.equals(shard.getLeader())) {
-            throw unavailable(shardId, "Node is not the shard leader for reconciliation");
+            throw NodeUnavailableException.rejectedBeforeMutation(
+                    "Node is not the shard leader for reconciliation", shardId);
         }
         if (!forceQuorumRead && reconciledEpochs.getOrDefault(shardId, 0L) >= shard.getEpoch()) {
             return;
@@ -485,7 +486,8 @@ public class ReplicationManager implements AutoCloseable {
             return;
         }
         if (replicaWriteClient == null) {
-            throw unavailable(shardId, "No replica client is configured for leader reconciliation");
+            throw NodeUnavailableException.rejectedBeforeMutation(
+                    "No replica client is configured for leader reconciliation", shardId);
         }
 
         ShardKVStore local = shardStores.getOrCreate(shardId);
@@ -497,11 +499,11 @@ public class ReplicationManager implements AutoCloseable {
         }
         if (durableStateAcks < required) {
             Metrics.increment("kvdb_replica_reconcile_total", "node", "leader", "unavailable");
-            throw unavailable(
-                    shardId,
+            throw NodeUnavailableException.rejectedBeforeMutation(
                     String.format(
                             "Leader reconciliation quorum not reached for shard %s (durableAcks=%d, required=%d)",
-                            shardId, durableStateAcks, required));
+                            shardId, durableStateAcks, required),
+                    shardId);
         }
         reconciledEpochs.put(shardId, shard.getEpoch());
         Metrics.increment("kvdb_replica_reconcile_total", "node", "leader", "ok");

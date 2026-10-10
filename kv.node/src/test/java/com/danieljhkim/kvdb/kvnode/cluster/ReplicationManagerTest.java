@@ -85,7 +85,7 @@ class ReplicationManagerTest {
         Fixture fixture = fixture();
         fixture.client.commitFailed.addAll(Set.of("node-2:9000", "node-3:9000"));
 
-        assertThrows(
+        NodeUnavailableException failure = assertThrows(
                 NodeUnavailableException.class,
                 () -> manager.replicateSet(
                         "shard-0",
@@ -94,6 +94,7 @@ class ReplicationManagerTest {
                         "not-acknowledged",
                         "request-commit-failure",
                         WriteDurability.QUORUM_SYNC));
+        assertFalse(failure.isRejectedBeforeMutation());
 
         assertEquals("(nil)", fixture.leader.getOrCreate("shard-0").get("key"));
         fixture.followers.values().forEach(store -> assertEquals("(nil)", store.get("key")));

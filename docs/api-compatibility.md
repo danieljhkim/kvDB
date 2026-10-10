@@ -40,8 +40,17 @@ Clients must use a fresh request ID for a different mutation. IDs are tracked
 per shard; this does not introduce cluster-wide request-ID uniqueness.
 
 The gateway preserves definitive node RPC status codes rather than converting
-request errors to retryable `UNAVAILABLE`. Genuine missing-node and quorum
-availability failures continue to return `UNAVAILABLE`.
+request errors to retryable `UNAVAILABLE`. Missing candidates and confirmed
+pre-mutation quorum failures return `UNAVAILABLE`. A storage node rejecting
+write admission before this request can prepare a mutation includes the
+`x-write-outcome: not-applied` trailer with gRPC `UNAVAILABLE`. The gateway may
+retry this definite rejection even without server replay enabled. Local
+connection-establishment failures with a `ConnectException` cause are also
+definite. Unmarked transport loss, generic I/O errors, and deadlines after a
+write may have reached the node remain `WRITE_OUTCOME_UNKNOWN` unless server
+replay is enabled. Older nodes without the trailer retain conservative outcome
+classification. The CLI reports application `UNAVAILABLE` as exit `2` and
+`WRITE_OUTCOME_UNKNOWN` as exit `5`.
 
 The `limits` configuration bounds key bytes, value bytes, decoded message size,
 replication batch entries, context-field bytes, and concurrent RPCs per

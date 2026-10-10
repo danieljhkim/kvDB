@@ -3,7 +3,8 @@ package com.danieljhkim.kvdb.kvcommon.exception;
 import io.grpc.Status;
 
 /**
- * Exception thrown when no nodes are available for a shard. Maps to gRPC UNAVAILABLE.
+ * Exception thrown when no nodes are available for a shard, or wrapping a definitive node RPC failure. Defaults to
+ * gRPC UNAVAILABLE; wrapped failures retain their original status.
  */
 public class NodeUnavailableException extends KvException {
 
@@ -28,14 +29,7 @@ public class NodeUnavailableException extends KvException {
 
     @Override
     public Status.Code getGrpcStatusCode() {
-        // Map original code if available
-        if (originalGrpcCode != null) {
-            return switch (originalGrpcCode) {
-                case DEADLINE_EXCEEDED -> Status.Code.DEADLINE_EXCEEDED;
-                case RESOURCE_EXHAUSTED -> Status.Code.RESOURCE_EXHAUSTED;
-                default -> Status.Code.UNAVAILABLE;
-            };
-        }
-        return Status.Code.UNAVAILABLE;
+        // Do not turn a permanent request error into a retryable availability failure.
+        return originalGrpcCode != null ? originalGrpcCode : Status.Code.UNAVAILABLE;
     }
 }

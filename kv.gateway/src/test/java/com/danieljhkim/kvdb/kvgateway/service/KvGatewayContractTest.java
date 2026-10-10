@@ -48,6 +48,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -210,6 +211,37 @@ class KvGatewayContractTest {
         assertEquals(Status.Code.VERSION_MISMATCH, observer.value.getStatus().getCode());
         assertFalse(observer.value.getStatus().getMessage().isBlank());
         assertEquals(1, executor.calls);
+    }
+
+    @Test
+    void definitiveNodeWriteErrorsRetainTheirPublicStatus() {
+        Map<io.grpc.Status.Code, Status.Code> codes = Map.of(
+                io.grpc.Status.Code.INVALID_ARGUMENT, Status.Code.INVALID_ARGUMENT,
+                io.grpc.Status.Code.FAILED_PRECONDITION, Status.Code.PRECONDITION_FAILED,
+                io.grpc.Status.Code.INTERNAL, Status.Code.INTERNAL,
+                io.grpc.Status.Code.ALREADY_EXISTS, Status.Code.ALREADY_EXISTS,
+                io.grpc.Status.Code.RESOURCE_EXHAUSTED, Status.Code.PAYLOAD_TOO_LARGE,
+                io.grpc.Status.Code.DEADLINE_EXCEEDED, Status.Code.TIMEOUT,
+                io.grpc.Status.Code.UNAVAILABLE, Status.Code.UNAVAILABLE);
+        codes.forEach((nodeCode, publicCode) -> {
+            CapturingExecutor executor = new CapturingExecutor();
+            executor.nextResult = RequestExecutor.ExecutionResult.failure(nodeCode, "node failure", "node-1:9000");
+            KvGatewayServiceImpl service = new KvGatewayServiceImpl(cache(), executor);
+            CapturingObserver<PutResponse> put = new CapturingObserver<>();
+            runAsClient(() -> service.put(request("node-error-put").build(), put));
+            assertEquals(publicCode, put.value.getStatus().getCode());
+            assertEquals("node failure", put.value.getStatus().getMessage());
+
+            CapturingObserver<com.danieljhkim.kvdb.proto.gateway.DeleteResponse> delete = new CapturingObserver<>();
+            runAsClient(() -> service.delete(
+                    com.danieljhkim.kvdb.proto.gateway.DeleteRequest.newBuilder()
+                            .setCtx(RequestContext.newBuilder().setRequestId("node-error-delete"))
+                            .setKey(ByteString.copyFromUtf8("key"))
+                            .build(),
+                    delete));
+            assertEquals(publicCode, delete.value.getStatus().getCode());
+            assertEquals("node failure", delete.value.getStatus().getMessage());
+        });
     }
 
     @Test

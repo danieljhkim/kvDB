@@ -18,6 +18,12 @@
     <dependencies>
         <dependency>
             <groupId>com.danieljhkim.kvdb</groupId>
+            <artifactId>kv.node</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.danieljhkim.kvdb</groupId>
             <artifactId>kv.common</artifactId>
             <version>${project.version}</version>
         </dependency>

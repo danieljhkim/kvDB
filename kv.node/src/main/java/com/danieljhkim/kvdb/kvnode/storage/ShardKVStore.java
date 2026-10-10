@@ -1,6 +1,7 @@
 package com.danieljhkim.kvdb.kvnode.storage;
 
 import com.danieljhkim.kvdb.kvcommon.annotations.Timer;
+import com.danieljhkim.kvdb.kvcommon.exception.RequestIdConflictException;
 import com.danieljhkim.kvdb.kvcommon.observability.Metrics;
 import com.danieljhkim.kvdb.kvcommon.persistence.WALManager;
 import com.danieljhkim.kvdb.kvnode.persistence.FilePersistenceManager;
@@ -177,7 +178,7 @@ public class ShardKVStore {
             ReplicatedMutation existing = mutationsByRequest.get(requestId);
             if (existing != null) {
                 if (!sameOperation(existing, epoch, kind, key, value, ttlMs, expectedVersion, ifNotExists)) {
-                    throw new IllegalStateException("request_id was already used for a different mutation");
+                    throw new RequestIdConflictException(shardId);
                 }
                 if (mutationStates.get(requestId) == MutationState.ABORTED) {
                     MutationStatus prepared = prepareMutationLocked(existing);

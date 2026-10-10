@@ -42,7 +42,7 @@ public class SecurityConfig {
     private String jwtAudience;
 
     /**
-     * API key for simple auth (not recommended for production). Only used in dev profile.
+     * API key for simple auth (not recommended for production). Required in every profile.
      */
     private String apiKey;
 
@@ -53,7 +53,7 @@ public class SecurityConfig {
      * Note: JWT/mTLS are not implemented yet. This module currently supports:
      * <ul>
      * <li>IP allowlist (CIDR)</li>
-     * <li>Dev-only API key (X-Admin-Api-Key)</li>
+     * <li>API key required in every profile (X-Admin-Api-Key)</li>
      * </ul>
      * </p>
      */

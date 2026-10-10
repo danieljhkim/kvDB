@@ -4,7 +4,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 	"time"
@@ -116,7 +118,16 @@ func Load(cfgFile string) (*Config, error) {
 		}
 	}
 
-	if err := v.ReadInConfig(); err == nil {
+	// An absent config is optional: an explicit path that does not exist, or
+	// no discovered file at all, falls back to defaults. Any other failure
+	// (malformed YAML, unreadable file) must stop the command before an RPC
+	// is issued with values the operator did not intend.
+	if err := v.ReadInConfig(); err != nil {
+		var notFound viper.ConfigFileNotFoundError
+		if !errors.As(err, &notFound) && !errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("cannot read config file: %w", err)
+		}
+	} else {
 		// Never write to stdout: raw value bytes are the only thing that
 		// may appear there.
 		fmt.Fprintln(os.Stderr, "Using config file:", v.ConfigFileUsed())

@@ -34,6 +34,26 @@ public class NodeConnectionPool {
         });
     }
 
+    /**
+     * Returns whether {@code nodeAddress} is a dialable {@code host:port} with a non-empty host and a port in
+     * 1..65535.
+     */
+    public static boolean isValidAddress(String nodeAddress) {
+        if (nodeAddress == null) {
+            return false;
+        }
+        int colonIndex = nodeAddress.indexOf(':');
+        if (colonIndex <= 0) {
+            return false;
+        }
+        try {
+            int port = Integer.parseInt(nodeAddress.substring(colonIndex + 1));
+            return port >= 1 && port <= 65535;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
     private ManagedChannel getOrCreateChannel(String nodeAddress) {
         return channels.computeIfAbsent(nodeAddress, addr -> {
             // Use indexOf instead of split for better performance

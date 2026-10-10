@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import lombok.Getter;
 
 /**
@@ -140,12 +141,21 @@ public class ClusterState {
      * to ALIVE nodes, so holding new nodes back would leave a freshly bootstrapped cluster unable to serve until the
      * first probe interval elapsed. The health checker demotes an unreachable node to SUSPECT and then DEAD on
      * consecutive failed probes, and a malformed address can no longer be registered.
+     *
+     * <p>
+     * A new node, or a change of address, zone, or return to {@link NodeRecord.NodeStatus#ALIVE}, publishes a newer
+     * map version. Watch and conditional-poll consumers apply a snapshot only when that version advances, so an
+     * endpoint or routability change that kept the old version would stay cached indefinitely. An identical
+     * re-registration refreshes the heartbeat and retains the version. Raft replay of an already-applied registration
+     * is therefore idempotent, and the version does not depend on the clock.
      */
     public void registerNode(String nodeId, String address, String zone) {
         ShardMapValidator.validateNodeAddress(address);
         NodeRecord existing = nodes.get(nodeId);
         if (existing != null) {
-            // Update existing node
+            boolean routingChange = !address.equals(existing.address())
+                    || !Objects.equals(zone, existing.zone())
+                    || existing.status() != NodeRecord.NodeStatus.ALIVE;
             nodes.put(
                     nodeId,
                     new NodeRecord(
@@ -156,27 +166,26 @@ public class ClusterState {
                             NodeRecord.NodeStatus.ALIVE,
                             System.currentTimeMillis(),
                             existing.capacityHints()));
+            if (routingChange) {
+                mapVersion++;
+            }
         } else {
-            // Create new node
             nodes.put(nodeId, NodeRecord.create(nodeId, address, zone));
+            mapVersion++;
         }
-        // Node registration doesn't bump mapVersion by default
-        // (only routing-affecting changes do)
     }
 
     /**
-     * Update node status. Bumps mapVersion if the change affects routing.
+     * Update node status. Any real transition publishes a newer map version: only ALIVE nodes are eligible for
+     * routing, so ALIVE to SUSPECT is as visible as a transition through DEAD. An unchanged status retains the version.
      */
     public void setNodeStatus(String nodeId, NodeRecord.NodeStatus status) {
         NodeRecord node = ShardMapValidator.requireNode(nodeId, nodes);
-
-        NodeRecord.NodeStatus oldStatus = node.status();
-        nodes.put(nodeId, node.withStatus(status));
-
-        // Bump version if status change affects routing (e.g., node going DEAD)
-        if (oldStatus != status && (status == NodeRecord.NodeStatus.DEAD || oldStatus == NodeRecord.NodeStatus.DEAD)) {
-            mapVersion++;
+        if (node.status() == status) {
+            return;
         }
+        nodes.put(nodeId, node.withStatus(status));
+        mapVersion++;
     }
 
     /**

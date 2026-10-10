@@ -76,12 +76,13 @@ class RaftNodeCommitIntegrationTest {
 
             assertEquals(3, leader.getState().getCommitIndex());
             assertEquals(3, leader.getState().getLastApplied());
-            assertEquals(1, stateMachines.get("n1").getMapVersion());
+            // Two registrations and shard initialization each publish one map version.
+            assertEquals(3, stateMachines.get("n1").getMapVersion());
             assertEquals(3, network.nodes.get("n2").getState().getLog().size());
             assertEquals(0, network.nodes.get("n3").getState().getLog().size());
 
             sendCommitHeartbeat(leader, network.nodes.get("n2"));
-            await(() -> stateMachines.get("n2").getMapVersion() == 1);
+            await(() -> stateMachines.get("n2").getMapVersion() == 3);
 
             network.block("n1", "n2");
             CompletableFuture<Void> minoritySubmission = leader.submitCommand(
@@ -90,7 +91,7 @@ class RaftNodeCommitIntegrationTest {
             Thread.sleep(100);
             assertFalse(minoritySubmission.isDone(), "A leader isolated from a majority must not acknowledge");
             assertEquals(3, leader.getState().getCommitIndex());
-            assertEquals(1, stateMachines.get("n1").getMapVersion());
+            assertEquals(3, stateMachines.get("n1").getMapVersion());
 
             network.unblock("n1", "n3");
             minoritySubmission.get(5, TimeUnit.SECONDS);
@@ -103,7 +104,7 @@ class RaftNodeCommitIntegrationTest {
 
             await(() -> network.nodes.values().stream()
                     .allMatch(node -> node.getState().getLastApplied() == 4));
-            assertTrue(stateMachines.values().stream().allMatch(stateMachine -> stateMachine.getMapVersion() == 2));
+            assertTrue(stateMachines.values().stream().allMatch(stateMachine -> stateMachine.getMapVersion() == 4));
             assertTrue(stateMachines.values().stream().allMatch(stateMachine -> stateMachine
                     .getSnapshot()
                     .getShard("shard-0")
@@ -131,7 +132,7 @@ class RaftNodeCommitIntegrationTest {
             sendCommitHeartbeat(leader, original.network.nodes.get("n3"));
             await(() -> original.stateMachines.values().stream().allMatch(stateMachine -> {
                 var snapshot = stateMachine.getSnapshot();
-                return snapshot.getMapVersion() == 1
+                return snapshot.getMapVersion() == 3
                         && snapshot.getNodes().keySet().equals(Set.of("storage-1", "storage-2"))
                         && snapshot.getShards().size() == 8;
             }));
@@ -148,7 +149,7 @@ class RaftNodeCommitIntegrationTest {
             elect(restarted, "n2");
             await(() -> restarted.stateMachines.values().stream().allMatch(stateMachine -> {
                 var snapshot = stateMachine.getSnapshot();
-                return snapshot.getMapVersion() == 1
+                return snapshot.getMapVersion() == 3
                         && snapshot.getNodes().keySet().equals(Set.of("storage-1", "storage-2"))
                         && snapshot.getShards().size() == 8;
             }));
@@ -183,7 +184,7 @@ class RaftNodeCommitIntegrationTest {
             elect(restarted, "n1");
             await(() -> restarted.stateMachines.values().stream().allMatch(stateMachine -> {
                 var snapshot = stateMachine.getSnapshot();
-                return snapshot.getMapVersion() == 0
+                return snapshot.getMapVersion() == 1
                         && snapshot.getNode("committed") != null
                         && snapshot.getNode("uncommitted") == null;
             }));

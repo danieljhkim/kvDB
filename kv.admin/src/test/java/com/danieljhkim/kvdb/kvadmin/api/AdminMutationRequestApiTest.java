@@ -175,6 +175,34 @@ class AdminMutationRequestApiTest {
         }
     }
 
+    @Test
+    void compactionEndpointsReturnNotImplemented() throws Exception {
+        try (ConfigurableApplicationContext context = startAdmin()) {
+            int port = ((ServletWebServerApplicationContext) context)
+                    .getWebServer()
+                    .getPort();
+            HttpClient http = HttpClient.newHttpClient();
+            RecordingOpsService ops = context.getBean(RecordingOpsService.class);
+
+            HttpResponse<String> compact =
+                    post(http, port, "/admin/ops/compact", json(), "{\"target_nodes\":[\"localhost:1\"]}");
+            assertClientError(compact, 501, "NOT_IMPLEMENTED");
+            assertTrue(compact.body().contains("Node compaction RPC is not implemented"));
+            assertFalse(compact.body().contains("target_nodes"));
+
+            HttpResponse<String> triggered = post(
+                    http,
+                    port,
+                    "/admin/ops/trigger",
+                    json(),
+                    "{\"operation\":\"COMPACT\",\"target_nodes\":[\"localhost:1\"]}");
+            assertClientError(triggered, 501, "NOT_IMPLEMENTED");
+            assertTrue(triggered.body().contains("Node compaction RPC is not implemented"));
+            assertFalse(triggered.body().contains("target_nodes"));
+            assertEquals(1, ops.triggerCalls.get());
+        }
+    }
+
     private static void assertClientError(HttpResponse<String> response, int status, String errorCode)
             throws IOException {
         assertEquals(status, response.statusCode());
@@ -288,7 +316,7 @@ class AdminMutationRequestApiTest {
         private final AtomicInteger triggerCalls = new AtomicInteger();
 
         RecordingOpsService(ShardAdminService shards) {
-            super(new NodeAdminClient(1, TimeUnit.MILLISECONDS), shards);
+            super(shards);
         }
 
         @Override

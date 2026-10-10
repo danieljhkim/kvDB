@@ -1,21 +1,21 @@
 package com.danieljhkim.kvdb.kvadmin.service;
 
 import com.danieljhkim.kvdb.kvadmin.api.dto.TriggerRequestDto;
-import com.danieljhkim.kvdb.kvadmin.client.NodeAdminClient;
 import java.util.Locale;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
 
 /**
- * Service for operational tasks (rebalance, compaction, etc.).
+ * Service for operational tasks such as rebalance.
  */
 @Service
 @RequiredArgsConstructor
 @Slf4j
 public class OpsService {
 
-    private final NodeAdminClient nodeAdminClient;
     private final ShardAdminService shardAdminService;
 
     public TriggerRequestDto triggerRebalance(TriggerRequestDto request) {
@@ -23,20 +23,9 @@ public class OpsService {
         return shardAdminService.triggerRebalance(request);
     }
 
-    public TriggerRequestDto triggerCompaction(TriggerRequestDto request) {
-        log.info("Triggering compaction operation: {}", request);
-        // TODO: Implement compaction logic
-        // For each target node, call compaction RPC
-        if (request.getTargetNodes() != null) {
-            for (String nodeAddress : request.getTargetNodes()) {
-                try {
-                    nodeAdminClient.triggerCompaction(nodeAddress);
-                } catch (Exception e) {
-                    log.warn("Failed to trigger compaction on node: {}", nodeAddress, e);
-                }
-            }
-        }
-        return request;
+    public TriggerRequestDto triggerCompaction() {
+        log.warn("Compaction requested but the node compaction RPC is not implemented");
+        throw new ResponseStatusException(HttpStatus.NOT_IMPLEMENTED, "Node compaction RPC is not implemented");
     }
 
     public TriggerRequestDto triggerOperation(TriggerRequestDto request) {
@@ -49,7 +38,7 @@ public class OpsService {
         String operation = request.getOperation();
         return switch (operation.toUpperCase(Locale.ROOT)) {
             case "REBALANCE" -> triggerRebalance(request);
-            case "COMPACT" -> triggerCompaction(request);
+            case "COMPACT" -> triggerCompaction();
             default -> {
                 log.warn("Unknown operation: {}", operation);
                 throw new IllegalArgumentException("Unknown operation: " + operation);

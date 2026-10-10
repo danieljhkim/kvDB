@@ -126,10 +126,12 @@ curl -X POST http://localhost:8089/admin/ops/trigger \
   -d '{"operation": "REBALANCE", "target_nodes": ["node-1"]}'
 ```
 
-`operation` is required. `REBALANCE` and `COMPACT` are recognized
-(case-insensitive). Any other value returns `400` / `INVALID_ARGUMENT`.
+`operation` is required. `REBALANCE` is supported (case-insensitive);
+`COMPACT` returns `501 Not Implemented` until a node compaction RPC is
+available. Any other value returns `400` / `INVALID_ARGUMENT`.
 `POST /admin/ops/rebalance` and `POST /admin/ops/compact` use the same JSON
-shape but do not require `operation`.
+shape but do not require `operation`. The compact endpoint also returns
+`501 Not Implemented` until node compaction is implemented.
 
 ### Client-error codes
 

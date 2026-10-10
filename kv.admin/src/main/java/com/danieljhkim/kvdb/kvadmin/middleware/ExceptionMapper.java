@@ -25,6 +25,7 @@ import java.util.Locale;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.MessageSourceResolvable;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.FieldError;
@@ -36,6 +37,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.HandlerMethodValidationException;
+import org.springframework.web.server.ResponseStatusException;
 
 /**
  * Global exception handler that maps domain exceptions to HTTP status codes and error responses.
@@ -264,6 +266,25 @@ public class ExceptionMapper {
                 .timestampMs(System.currentTimeMillis())
                 .build();
         return ResponseEntity.status(httpStatus).body(error);
+    }
+
+    @ExceptionHandler(ResponseStatusException.class)
+    public ResponseEntity<ErrorDto> handleResponseStatusException(ResponseStatusException e) {
+        HttpStatusCode statusCode = e.getStatusCode();
+        HttpStatus status = HttpStatus.resolve(statusCode.value());
+        String message = e.getReason();
+        if (message == null || message.isBlank()) {
+            message = "Request failed with HTTP status " + statusCode.value();
+        } else {
+            message = safeClientMessage(message);
+        }
+        ErrorDto error = ErrorDto.builder()
+                .error(status == null ? "HTTP_ERROR" : status.name())
+                .message(message)
+                .code(String.valueOf(statusCode.value()))
+                .timestampMs(System.currentTimeMillis())
+                .build();
+        return ResponseEntity.status(statusCode).body(error);
     }
 
     @ExceptionHandler(Exception.class)

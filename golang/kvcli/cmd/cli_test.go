@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -75,6 +77,27 @@ func localGateway(t *testing.T, hooks testfixture.Hooks) (*testfixture.Server, [
 	return server, []string{
 		"--config", configPath,
 		"--address", server.Address(),
+		"--security-mode", "development-plaintext",
+		"--tenant", "test-tenant",
+		"--principal", "test-principal",
+		"--timeout", "10s",
+	}
+}
+
+func localIPv6Gateway(t *testing.T, hooks testfixture.Hooks) (*testfixture.Server, []string) {
+	t.Helper()
+	probe, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skipf("IPv6 loopback is unavailable: %v", err)
+	}
+	if err := probe.Close(); err != nil {
+		t.Fatalf("cannot release IPv6 loopback probe listener: %v", err)
+	}
+
+	t.Setenv("KVDB_ENV", "test")
+	server := testfixture.StartOn(t, "[::1]:0", hooks, nil)
+	return server, []string{
+		"--config", filepath.Join(t.TempDir(), "missing.yaml"),
 		"--security-mode", "development-plaintext",
 		"--tenant", "test-tenant",
 		"--principal", "test-principal",
@@ -507,6 +530,33 @@ func TestPingReportsReachabilityWithoutStoringAnything(t *testing.T) {
 	calls := server.Calls()
 	if len(calls) != 1 || calls[0].Method != "Get" || !calls[0].HeadOnly {
 		t.Fatalf("ping must probe with a head-only read: %+v", calls)
+	}
+}
+
+func TestPingReachesIPv6LoopbackByAddressAndHostPort(t *testing.T) {
+	server, connection := localIPv6Gateway(t, testfixture.Hooks{})
+	wantEndpoint := net.JoinHostPort(server.Host(), strconv.Itoa(server.Port()))
+	for index, test := range []struct {
+		name  string
+		flags []string
+	}{
+		{name: "address", flags: []string{"--address", server.Address()}},
+		{name: "host and port", flags: []string{"--host", server.Host(), "--port", strconv.Itoa(server.Port())}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			args := append([]string{"ping"}, test.flags...)
+			stdout, stderr, code := run(t, withArgs(connection, args...)...)
+			if code != ExitOK {
+				t.Fatalf("IPv6 ping failed with %d: %s", code, stderr)
+			}
+			if !strings.Contains(stdout, "status=OK") || !strings.Contains(stdout, "endpoint="+wantEndpoint) {
+				t.Fatalf("ping should report the bracketed IPv6 endpoint, got %q", stdout)
+			}
+			calls := server.Calls()
+			if len(calls) != index+1 || calls[index].Method != "Get" || !calls[index].HeadOnly {
+				t.Fatalf("ping must reach the IPv6 gateway with a head-only read: %+v", calls)
+			}
+		})
 	}
 }
 

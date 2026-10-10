@@ -32,6 +32,28 @@ func TestLoadUsesExplicitConfiguration(t *testing.T) {
 	}
 }
 
+func TestAddressJoinsIPv6AndPreservesOtherHosts(t *testing.T) {
+	for _, test := range []struct {
+		host string
+		want string
+	}{
+		{host: "::1", want: "[::1]:7443"},
+		{host: "fe80::1%lo0", want: "[fe80::1%lo0]:7443"},
+		{host: "[::1]", want: "[::1]:7443"},
+		{host: "192.0.2.10", want: "192.0.2.10:7443"},
+		{host: "localhost", want: "localhost:7443"},
+	} {
+		t.Run(test.host, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Server.Host = test.host
+			cfg.Server.Port = 7443
+			if got := cfg.Address(); got != test.want {
+				t.Fatalf("Address() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestLoadFallsBackToSafeLocalDefaults(t *testing.T) {
 	cfg, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
 	if err != nil {

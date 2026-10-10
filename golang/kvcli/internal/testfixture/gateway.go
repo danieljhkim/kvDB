@@ -63,9 +63,15 @@ type Server struct {
 // Start listens on an ephemeral loopback port and serves until the test ends.
 // Passing nil credentials serves plaintext.
 func Start(t *testing.T, hooks Hooks, creds credentials.TransportCredentials, options ...grpc.ServerOption) *Server {
+	return StartOn(t, "127.0.0.1:0", hooks, creds, options...)
+}
+
+// StartOn listens on the supplied address and serves until the test ends.
+// Passing nil credentials serves plaintext.
+func StartOn(t *testing.T, listenAddress string, hooks Hooks, creds credentials.TransportCredentials, options ...grpc.ServerOption) *Server {
 	t.Helper()
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := net.Listen("tcp", listenAddress)
 	if err != nil {
 		t.Fatalf("cannot listen: %v", err)
 	}

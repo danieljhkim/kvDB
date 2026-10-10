@@ -6,13 +6,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.danieljhkim.kvdb.kvcommon.grpc.GrpcIdentity;
 import com.danieljhkim.kvdb.kvcommon.grpc.GrpcSecurityConfig;
+import com.danieljhkim.kvdb.proto.coordinator.CoordinatorGrpc;
+import com.danieljhkim.kvdb.proto.coordinator.ShardMapDelta;
+import com.danieljhkim.kvdb.proto.coordinator.WatchShardMapRequest;
 import com.kvdb.proto.kvstore.KVServiceGrpc;
 import com.kvdb.proto.kvstore.PingRequest;
 import com.kvdb.proto.kvstore.PingResponse;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.ServerCall;
-import io.grpc.ServerCallHandler;
 import io.grpc.Status;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -23,6 +25,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -130,6 +133,68 @@ class HealthHttpServerTest {
     }
 
     @Test
+    void cancelledUnaryRpcRecordsOutcomeAndAllowsImmediateDrain() throws Exception {
+        String service = "cancelled-unary-test";
+        ServiceLifecycle lifecycle = new ServiceLifecycle();
+        RequestMetricsInterceptor interceptor = new RequestMetricsInterceptor(service, lifecycle);
+        CapturedRpc<PingRequest, PingResponse> rpc = admitRpc(interceptor, lifecycle, KVServiceGrpc.getPingMethod());
+
+        rpc.listener().onCancel();
+
+        assertEquals(0, lifecycle.inFlight());
+        lifecycle.beginDrain();
+        assertTrue(lifecycle.awaitDrain(Duration.ZERO));
+        assertEquals(1, rpcOutcomeCount(service, "Ping", "cancelled"));
+        assertEquals(1, rpcDurationCount(service, "Ping"));
+    }
+
+    @Test
+    void cancelledStreamingRpcRecordsOutcomeAndAllowsImmediateDrain() throws Exception {
+        String service = "cancelled-streaming-test";
+        ServiceLifecycle lifecycle = new ServiceLifecycle();
+        RequestMetricsInterceptor interceptor = new RequestMetricsInterceptor(service, lifecycle);
+        CapturedRpc<WatchShardMapRequest, ShardMapDelta> rpc =
+                admitRpc(interceptor, lifecycle, CoordinatorGrpc.getWatchShardMapMethod());
+
+        rpc.listener().onCancel();
+
+        assertEquals(0, lifecycle.inFlight());
+        lifecycle.beginDrain();
+        assertTrue(lifecycle.awaitDrain(Duration.ZERO));
+        assertEquals(1, rpcOutcomeCount(service, "WatchShardMap", "cancelled"));
+        assertEquals(1, rpcDurationCount(service, "WatchShardMap"));
+    }
+
+    @Test
+    void cancellationRacingNormalCloseCompletesExactlyOnce() throws Exception {
+        String service = "cancel-close-race-test";
+        ServiceLifecycle lifecycle = new ServiceLifecycle();
+        RequestMetricsInterceptor interceptor = new RequestMetricsInterceptor(service, lifecycle);
+        CapturedRpc<PingRequest, PingResponse> rpc = admitRpc(interceptor, lifecycle, KVServiceGrpc.getPingMethod());
+        CyclicBarrier start = new CyclicBarrier(3);
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<?> cancellation = executor.submit(() -> {
+                start.await();
+                rpc.listener().onCancel();
+                return null;
+            });
+            Future<?> close = executor.submit(() -> {
+                start.await();
+                rpc.call().close(Status.OK, new Metadata());
+                return null;
+            });
+            start.await();
+            cancellation.get();
+            close.get();
+        }
+
+        assertEquals(0, lifecycle.inFlight());
+        assertEquals(1, rpcOutcomeCount(service, "Ping", "cancelled") + rpcOutcomeCount(service, "Ping", "ok"));
+        assertEquals(1, rpcDurationCount(service, "Ping"));
+    }
+
+    @Test
     void concurrentObservationsAndScrapesRemainValidPrometheusText() throws Exception {
         try (ExecutorService executor = Executors.newFixedThreadPool(4)) {
             List<Callable<Void>> operations = new ArrayList<>();
@@ -163,19 +228,39 @@ class HealthHttpServerTest {
     }
 
     private static void completeRpc(RequestMetricsInterceptor interceptor, ServiceLifecycle lifecycle, Status status) {
-        assertTrue(lifecycle.tryAdmit());
-        RecordingCall<PingRequest, PingResponse> call = new RecordingCall<>(KVServiceGrpc.getPingMethod());
-        AtomicReference<ServerCall<PingRequest, PingResponse>> measuredCall = new AtomicReference<>();
-        interceptor.interceptCall(call, new Metadata(), capture(measuredCall));
-        measuredCall.get().close(status, new Metadata());
+        CapturedRpc<PingRequest, PingResponse> rpc = admitRpc(interceptor, lifecycle, KVServiceGrpc.getPingMethod());
+        rpc.call().close(status, new Metadata());
     }
 
-    private static ServerCallHandler<PingRequest, PingResponse> capture(
-            AtomicReference<ServerCall<PingRequest, PingResponse>> measuredCall) {
-        return (call, headers) -> {
-            measuredCall.set(call);
-            return new ServerCall.Listener<>() {};
-        };
+    private static <ReqT, RespT> CapturedRpc<ReqT, RespT> admitRpc(
+            RequestMetricsInterceptor interceptor, ServiceLifecycle lifecycle, MethodDescriptor<ReqT, RespT> method) {
+        assertTrue(lifecycle.tryAdmit());
+        AtomicReference<ServerCall<ReqT, RespT>> measuredCall = new AtomicReference<>();
+        ServerCall.Listener<ReqT> listener =
+                interceptor.interceptCall(new RecordingCall<>(method), new Metadata(), (call, headers) -> {
+                    measuredCall.set(call);
+                    return new ServerCall.Listener<>() {};
+                });
+        return new CapturedRpc<>(measuredCall.get(), listener);
+    }
+
+    private static long rpcOutcomeCount(String service, String method, String outcome) {
+        String prefix = "kvdb_rpc_requests_total{service=\"" + service + "\",method=\"" + method + "\",outcome=\""
+                + outcome + "\"} ";
+        return metricValue(prefix);
+    }
+
+    private static long rpcDurationCount(String service, String method) {
+        return metricValue("kvdb_rpc_duration_seconds_count{service=\"" + service + "\",method=\"" + method + "\"} ");
+    }
+
+    private static long metricValue(String prefix) {
+        return Metrics.scrape()
+                .lines()
+                .filter(line -> line.startsWith(prefix))
+                .mapToLong(line -> Long.parseLong(line.substring(prefix.length())))
+                .findFirst()
+                .orElse(0);
     }
 
     private static void assertPrometheusTextFormat(String metrics) {
@@ -215,4 +300,6 @@ class HealthHttpServerTest {
             return method;
         }
     }
+
+    private record CapturedRpc<ReqT, RespT>(ServerCall<ReqT, RespT> call, ServerCall.Listener<ReqT> listener) {}
 }

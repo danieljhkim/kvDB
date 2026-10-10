@@ -2,7 +2,7 @@ package com.danieljhkim.kvdb.kvcommon.observability;
 
 import java.util.UUID;
 
-/** Keeps a validated correlation id available to outbound gRPC calls on the request thread. */
+/** Keeps a validated correlation id available to outbound gRPC calls while a request callback runs on this thread. */
 public final class CorrelationIds {
 
     private static final ThreadLocal<String> CURRENT = new ThreadLocal<>();

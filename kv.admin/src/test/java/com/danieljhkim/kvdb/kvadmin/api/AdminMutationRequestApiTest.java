@@ -77,15 +77,33 @@ class AdminMutationRequestApiTest {
                     "/admin/ops/trigger",
                     json(),
                     "{\"operation\":\"REBALANCE\",\"target_nodes\":[\"node-1\"]}");
-            assertEquals(200, triggered.statusCode());
-            JsonNode triggeredBody = mapper.readTree(triggered.body());
-            assertEquals("REBALANCE", triggeredBody.get("operation").asText());
-            assertEquals("node-1", triggeredBody.get("target_nodes").get(0).asText());
+            assertClientError(triggered, 501, "NOT_IMPLEMENTED");
+            assertFalse(triggered.body().contains("target_nodes"));
             assertEquals(1, ops.triggerCalls.get());
 
             HttpResponse<String> rebalance = post(http, port, "/admin/ops/rebalance", json(), "{}");
-            assertEquals(200, rebalance.statusCode());
+            assertClientError(rebalance, 501, "NOT_IMPLEMENTED");
+            assertFalse(rebalance.body().contains("target_nodes"));
             assertEquals(1, ops.triggerCalls.get());
+
+            HttpResponse<String> shardRebalance = post(
+                    http,
+                    port,
+                    "/admin/shards/rebalance",
+                    json(),
+                    "{\"target_nodes\":[\"node-1\"]}");
+            assertClientError(shardRebalance, 501, "NOT_IMPLEMENTED");
+            assertFalse(shardRebalance.body().contains("target_nodes"));
+
+            HttpResponse<String> config = post(
+                    http,
+                    port,
+                    "/admin/config",
+                    json(),
+                    "{\"replication_factor\":3,\"secret\":\"do-not-echo\"}");
+            assertClientError(config, 501, "NOT_IMPLEMENTED");
+            assertFalse(config.body().contains("replication_factor"));
+            assertFalse(config.body().contains("do-not-echo"));
 
             HttpResponse<String> banana =
                     post(http, port, "/admin/nodes/node-1/status", json(), "{\"status\":\"BANANA\"}");

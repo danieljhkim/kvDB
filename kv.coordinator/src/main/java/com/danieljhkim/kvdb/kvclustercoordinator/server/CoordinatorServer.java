@@ -120,13 +120,13 @@ public class CoordinatorServer {
                 coordinatorService,
                 new CorrelationIdInterceptor(),
                 new AdmissionControlInterceptor(lifecycle),
-                new RequestMetricsInterceptor("coordinator", lifecycle),
+                new RequestMetricsInterceptor("coordinator"),
                 authInterceptor,
                 exceptionInterceptor);
         ServerServiceDefinition interceptedRaftService = ServerInterceptors.intercept(
                 raftGrpcService,
                 new CorrelationIdInterceptor(),
-                new RequestMetricsInterceptor("coordinator_raft", lifecycle),
+                new RequestMetricsInterceptor("coordinator_raft"),
                 authInterceptor,
                 exceptionInterceptor);
 

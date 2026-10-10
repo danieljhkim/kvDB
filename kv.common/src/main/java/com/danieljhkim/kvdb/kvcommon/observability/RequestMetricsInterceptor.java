@@ -14,11 +14,9 @@ import java.util.function.Consumer;
 public final class RequestMetricsInterceptor implements ServerInterceptor {
 
     private final String service;
-    private final ServiceLifecycle lifecycle;
 
-    public RequestMetricsInterceptor(String service, ServiceLifecycle lifecycle) {
+    public RequestMetricsInterceptor(String service) {
         this.service = service;
-        this.lifecycle = lifecycle;
     }
 
     @Override
@@ -34,7 +32,6 @@ public final class RequestMetricsInterceptor implements ServerInterceptor {
                 Metrics.increment("kvdb_rpc_requests_total", service, method, outcome);
                 Metrics.observe(
                         "kvdb_rpc_duration_seconds", service, method, (System.nanoTime() - started) / 1_000_000_000d);
-                lifecycle.complete();
             }
         };
         ServerCall<ReqT, RespT> measuredCall = new SimpleForwardingServerCall<>(call) {

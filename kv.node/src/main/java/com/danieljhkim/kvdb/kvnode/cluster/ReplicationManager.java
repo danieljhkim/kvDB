@@ -159,18 +159,20 @@ public class ReplicationManager implements AutoCloseable {
             return;
         }
         ShardKVStore local = shardStores.getOrCreate(shardId);
-        List<ReplicatedMutation> mutations = local.committedMutations();
-        if (mutations.isEmpty()) {
+        if (local.committedHistoryAfter(0, 1).isEmpty()) {
             return;
         }
 
         for (String target : getReplicationTargets(shard)) {
             String progressKey = target + "/" + shardId;
             long cursor = repairCursors.getOrDefault(progressKey, 0L);
-            RepairBatch repairBatch = boundedRepairBatch(mutations, cursor, shardId, shard.getEpoch());
+            // Superseded entries travel too, so the replica keeps every acknowledged request identity if promoted.
+            RepairBatch repairBatch = boundedRepairBatch(
+                    local.committedHistoryAfter(cursor, limits.maxBatchEntries()), shardId, shard.getEpoch());
             if (repairBatch.untransferableVersion() > cursor) {
                 repairCursors.put(progressKey, repairBatch.untransferableVersion());
-                boolean complete = mutations.getLast().getVersion() <= repairBatch.untransferableVersion();
+                boolean complete = local.committedHistoryAfter(repairBatch.untransferableVersion(), 1)
+                        .isEmpty();
                 repairProgress.put(progressKey, new RepairProgress(0, 0, complete));
                 log.warn(
                         "Skipping untransferable replica repair mutation target={} shard={} version={}",
@@ -179,8 +181,7 @@ public class ReplicationManager implements AutoCloseable {
                         repairBatch.untransferableVersion());
                 continue;
             }
-            List<ReplicatedMutation> batch = repairBatch.mutations();
-            if (batch.isEmpty()) {
+            if (repairBatch.entries() == 0) {
                 repairCursors.put(progressKey, 0L);
                 repairProgress.put(progressKey, new RepairProgress(0, 0, true));
                 continue;
@@ -189,18 +190,12 @@ public class ReplicationManager implements AutoCloseable {
             int applied = 0;
             boolean complete = false;
             try {
-                ReplicaRepairResponse response = replicaWriteClient.repairReplica(
-                        target,
-                        ReplicaRepairRequest.newBuilder()
-                                .setShardId(shardId)
-                                .setEpoch(shard.getEpoch())
-                                .addAllCommittedMutations(batch)
-                                .build());
+                ReplicaRepairResponse response = replicaWriteClient.repairReplica(target, repairBatch.request());
                 if (response.getSuccess() && response.getDurable()) {
                     applied = response.getAppliedMutations();
-                    long lastVersion = batch.getLast().getVersion();
+                    long lastVersion = repairBatch.lastVersion();
                     repairCursors.put(progressKey, lastVersion);
-                    complete = mutations.getLast().getVersion() <= lastVersion;
+                    complete = local.committedHistoryAfter(lastVersion, 1).isEmpty();
                     Metrics.increment("kvdb_replica_repair_batches_total", "node", "repair", "ok");
                 } else {
                     Metrics.increment("kvdb_replica_repair_batches_total", "node", "repair", "error");
@@ -209,12 +204,12 @@ public class ReplicationManager implements AutoCloseable {
                 Metrics.increment("kvdb_replica_repair_batches_total", "node", "repair", "error");
                 log.debug("Replica repair failed target={} shard={}: {}", target, shardId, e.getMessage());
             }
-            repairProgress.put(progressKey, new RepairProgress(batch.size(), applied, complete));
+            repairProgress.put(progressKey, new RepairProgress(repairBatch.entries(), applied, complete));
             log.debug(
                     "Replica repair progress target={} shard={} sent={} applied={} complete={}",
                     target,
                     shardId,
-                    batch.size(),
+                    repairBatch.entries(),
                     applied,
                     complete);
         }
@@ -224,30 +219,33 @@ public class ReplicationManager implements AutoCloseable {
         return repairProgress.getOrDefault(target + "/" + shardId, new RepairProgress(0, 0, false));
     }
 
-    private RepairBatch boundedRepairBatch(
-            List<ReplicatedMutation> mutations, long cursor, String shardId, long epoch) {
+    private RepairBatch boundedRepairBatch(List<ShardKVStore.TransferEntry> candidates, String shardId, long epoch) {
         ReplicaRepairRequest.Builder request =
                 ReplicaRepairRequest.newBuilder().setShardId(shardId).setEpoch(epoch);
-        List<ReplicatedMutation> batch = new ArrayList<>();
-        for (ReplicatedMutation mutation : mutations) {
-            if (mutation.getVersion() <= cursor) {
-                continue;
-            }
-            if (batch.size() == limits.maxBatchEntries()) {
+        int entries = 0;
+        long lastVersion = 0;
+        for (ShardKVStore.TransferEntry entry : candidates) {
+            if (entries == limits.maxBatchEntries()) {
                 break;
             }
-            ReplicaRepairRequest candidate =
-                    request.clone().addCommittedMutations(mutation).build();
-            if (candidate.getSerializedSize() > limits.maxMessageBytes()) {
-                if (batch.isEmpty()) {
-                    return new RepairBatch(List.of(), mutation.getVersion());
+            ReplicatedMutation mutation = entry.mutation();
+            ReplicaRepairRequest.Builder candidate = request.clone();
+            if (entry.superseded()) {
+                candidate.addSupersededMutations(mutation);
+            } else {
+                candidate.addCommittedMutations(mutation);
+            }
+            if (candidate.build().getSerializedSize() > limits.maxMessageBytes()) {
+                if (entries == 0) {
+                    return new RepairBatch(request.build(), 0, 0, mutation.getVersion());
                 }
                 break;
             }
-            batch.add(mutation);
-            request.addCommittedMutations(mutation);
+            request = candidate;
+            entries++;
+            lastVersion = mutation.getVersion();
         }
-        return new RepairBatch(List.copyOf(batch), 0);
+        return new RepairBatch(request.build(), entries, lastVersion, 0);
     }
 
     /** Pulls committed state from a replica quorum before this node serves as a newly elected leader. */
@@ -514,6 +512,7 @@ public class ReplicationManager implements AutoCloseable {
         // committedVersion is only a high watermark: this replica may still be missing older keys or tombstones.
         // Begin each peer's transfer at the start of its retained state and use the cursor only for bounded
         // continuation. repairMutation applies entries by per-key version, so replaying the retained state is safe.
+        // Superseded entries carry the request identities this node needs to answer retries once it leads.
         long afterVersion = pullCursors.getOrDefault(cursorKey, 0L);
         for (int batchIndex = 0; batchIndex < MAX_PULL_BATCHES_PER_PASS; batchIndex++) {
             try {
@@ -524,23 +523,26 @@ public class ReplicationManager implements AutoCloseable {
                                 .setEpoch(epoch)
                                 .setAfterVersion(afterVersion)
                                 .setMaxMutations(limits.maxBatchEntries())
+                                .setIncludeSuperseded(true)
                                 .build());
                 if (!response.getSuccess() || !response.getDurable()) {
                     return false;
                 }
-                for (ReplicatedMutation mutation : response.getCommittedMutationsList()) {
-                    ShardKVStore.MutationStatus status = local.repairMutation(mutation);
+                List<ShardKVStore.TransferEntry> entries = ShardKVStore.TransferEntry.merge(
+                        response.getCommittedMutationsList(), response.getSupersededMutationsList());
+                for (ShardKVStore.TransferEntry entry : entries) {
+                    ShardKVStore.MutationStatus status = local.applyTransferEntry(entry);
                     if (!status.success() || !status.durable()) {
                         return false;
                     }
-                    afterVersion = Math.max(afterVersion, mutation.getVersion());
+                    afterVersion = Math.max(afterVersion, entry.mutation().getVersion());
                 }
                 pullCursors.put(cursorKey, afterVersion);
                 if (!response.getHasMore()) {
                     pullCursors.remove(cursorKey);
                     return true;
                 }
-                if (response.getCommittedMutationsCount() == 0) {
+                if (entries.isEmpty()) {
                     return false;
                 }
             } catch (RuntimeException e) {
@@ -587,5 +589,6 @@ public class ReplicationManager implements AutoCloseable {
 
     public record RepairProgress(int sent, int applied, boolean complete) {}
 
-    private record RepairBatch(List<ReplicatedMutation> mutations, long untransferableVersion) {}
+    private record RepairBatch(
+            ReplicaRepairRequest request, int entries, long lastVersion, long untransferableVersion) {}
 }

@@ -39,6 +39,18 @@ unchanged. An identical put or delete replay returns the original version.
 Clients must use a fresh request ID for a different mutation. IDs are tracked
 per shard; this does not introduce cluster-wide request-ID uniqueness.
 
+Replica repair and leader reconciliation carry these identities too. Besides
+the newest mutation per key in `committed_mutations`, a transfer lists the
+overwritten committed mutations in the additive `superseded_mutations` field.
+The receiver journals only their request identities and never exposes their
+values, so a promoted replica answers a retried put or delete with its original
+version. Both lists share one version cursor and the batch entry and message
+limits. `FetchReplicaState` returns superseded entries only when the request
+sets `include_superseded`, so older receivers keep their newest-per-key stream;
+older senders simply leave the field empty. The receiver journals these
+identities with a new replication-WAL record, so a node that has received one
+cannot be downgraded to a build that does not recognize it.
+
 The gateway preserves definitive node RPC status codes rather than converting
 request errors to retryable `UNAVAILABLE`. Missing candidates and confirmed
 pre-mutation quorum failures return `UNAVAILABLE`. A storage node rejecting

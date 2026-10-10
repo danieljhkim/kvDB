@@ -21,7 +21,7 @@ import com.google.protobuf.CodedOutputStream;
 import com.kvdb.proto.kvstore.*;
 import io.grpc.stub.StreamObserver;
 import java.time.Duration;
-import java.util.ArrayList;
+import java.util.List;
 import java.util.OptionalLong;
 import java.util.UUID;
 
@@ -308,7 +308,7 @@ public class KVServiceImpl extends KVServiceGrpc.KVServiceImplBase {
     @Override
     public void repairReplica(ReplicaRepairRequest request, StreamObserver<ReplicaRepairResponse> responseObserver) {
         limits.validateMessage(request);
-        limits.validateBatchSize(request.getCommittedMutationsCount());
+        limits.validateBatchSize(request.getCommittedMutationsCount() + request.getSupersededMutationsCount());
         String shardId = request.getShardId();
         shardRouter.validateReplica(shardId);
         shardRouter.validateEpoch(shardId, request.getEpoch());
@@ -317,7 +317,9 @@ public class KVServiceImpl extends KVServiceGrpc.KVServiceImplBase {
         shardRouter.validateReplicationLeader(shardId, verifiedReplicationPeer(shardId));
         ShardKVStore store = shardStores.getOrCreate(shardId);
         int applied = 0;
-        for (ReplicatedMutation mutation : request.getCommittedMutationsList()) {
+        for (ShardKVStore.TransferEntry entry : ShardKVStore.TransferEntry.merge(
+                request.getCommittedMutationsList(), request.getSupersededMutationsList())) {
+            ReplicatedMutation mutation = entry.mutation();
             limits.validateKey(mutation.getKey());
             limits.validateValue(mutation.getValue());
             if (!shardId.equals(mutation.getShardId())) {
@@ -331,7 +333,7 @@ public class KVServiceImpl extends KVServiceGrpc.KVServiceImplBase {
                 return;
             }
             shardRouter.validateShardIdForKey(mutation.getKey(), shardId);
-            ShardKVStore.MutationStatus status = store.repairMutation(mutation);
+            ShardKVStore.MutationStatus status = store.applyTransferEntry(entry);
             if (!status.success() || !status.durable()) {
                 responseObserver.onNext(ReplicaRepairResponse.newBuilder()
                         .setSuccess(false)
@@ -365,8 +367,13 @@ public class KVServiceImpl extends KVServiceGrpc.KVServiceImplBase {
         int requestedLimit = request.getMaxMutations() == 0 ? limits.maxBatchEntries() : request.getMaxMutations();
         limits.validateBatchSize(requestedLimit);
         int limit = Math.max(1, requestedLimit);
-        var candidates = store.committedMutationsAfter(request.getAfterVersion(), limit);
-        var mutations = new ArrayList<ReplicatedMutation>(candidates.size());
+        // Older receivers neither ask for nor understand superseded entries, and a page holding only those would stall
+        // their cursor. Keep their newest-per-key stream unchanged.
+        boolean includeSuperseded = request.getIncludeSuperseded();
+        var candidates = transferCandidates(store, includeSuperseded, request.getAfterVersion(), limit);
+        var response = ReplicaStateResponse.newBuilder();
+        int entries = 0;
+        long lastVersion = request.getAfterVersion();
         int responseBytes = ReplicaStateResponse.newBuilder()
                 .setSuccess(true)
                 .setDurable(true)
@@ -375,31 +382,45 @@ public class KVServiceImpl extends KVServiceGrpc.KVServiceImplBase {
                 .build()
                 .getSerializedSize();
         boolean truncatedByMessageLimit = false;
-        for (ReplicatedMutation candidate : candidates) {
-            int entryBytes = CodedOutputStream.computeMessageSize(3, candidate);
+        for (ShardKVStore.TransferEntry candidate : candidates) {
+            int fieldNumber = candidate.superseded()
+                    ? ReplicaStateResponse.SUPERSEDED_MUTATIONS_FIELD_NUMBER
+                    : ReplicaStateResponse.COMMITTED_MUTATIONS_FIELD_NUMBER;
+            int entryBytes = CodedOutputStream.computeMessageSize(fieldNumber, candidate.mutation());
             if (responseBytes + entryBytes > limits.maxMessageBytes()) {
-                if (mutations.isEmpty()) {
+                if (entries == 0) {
                     throw new PayloadTooLargeException("single replica mutation exceeds configured message limit");
                 }
                 truncatedByMessageLimit = true;
                 break;
             }
-            mutations.add(candidate);
+            if (candidate.superseded()) {
+                response.addSupersededMutations(candidate.mutation());
+            } else {
+                response.addCommittedMutations(candidate.mutation());
+            }
+            entries++;
+            lastVersion = candidate.mutation().getVersion();
             responseBytes += entryBytes;
         }
-        long lastVersion = mutations.isEmpty()
-                ? request.getAfterVersion()
-                : mutations.getLast().getVersion();
         boolean hasMore = truncatedByMessageLimit
-                || !store.committedMutationsAfter(lastVersion, 1).isEmpty();
-        responseObserver.onNext(ReplicaStateResponse.newBuilder()
-                .setSuccess(true)
+                || !transferCandidates(store, includeSuperseded, lastVersion, 1).isEmpty();
+        responseObserver.onNext(response.setSuccess(true)
                 .setDurable(true)
-                .addAllCommittedMutations(mutations)
                 .setHasMore(hasMore)
                 .setCommittedVersion(store.committedVersion())
                 .build());
         responseObserver.onCompleted();
+    }
+
+    private static List<ShardKVStore.TransferEntry> transferCandidates(
+            ShardKVStore store, boolean includeSuperseded, long afterVersion, int limit) {
+        if (includeSuperseded) {
+            return store.committedHistoryAfter(afterVersion, limit);
+        }
+        return store.committedMutationsAfter(afterVersion, limit).stream()
+                .map(mutation -> new ShardKVStore.TransferEntry(mutation, false))
+                .toList();
     }
 
     @Override

@@ -23,8 +23,10 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.NavigableMap;
 import java.util.Objects;
 import java.util.OptionalLong;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
@@ -59,7 +61,7 @@ public class ShardKVStore {
     private final WALManager replicationWalManager;
     private final Map<String, ReplicatedMutation> mutationsByRequest = new HashMap<>();
     private final Map<String, MutationState> mutationStates = new HashMap<>();
-    private final Map<Long, String> requestByVersion = new HashMap<>();
+    private final NavigableMap<Long, String> requestByVersion = new TreeMap<>();
     private final Map<ByteString, ReplicatedMutation> committedByKey = new HashMap<>();
     private long shardEpoch;
     private long highestVersion;
@@ -321,30 +323,13 @@ public class ShardKVStore {
         stateLock.lock();
         try {
             requireReplicationJournal();
-            String validation = validateMutation(mutation);
-            if (validation != null) {
-                return rejected(validation);
-            }
-            ReplicatedMutation known = mutationsByRequest.get(mutation.getRequestId());
-            if (known != null && !known.equals(mutation)) {
-                return rejected("request_id conflicts with an existing mutation");
-            }
-            String versionOwner = requestByVersion.get(mutation.getVersion());
-            if (versionOwner != null && !versionOwner.equals(mutation.getRequestId())) {
-                ReplicatedMutation preparedOwner = mutationsByRequest.get(versionOwner);
-                if (preparedOwner == null || mutationStates.get(versionOwner) != MutationState.PREPARED) {
-                    return rejected("version conflicts with a different mutation");
-                }
-                // The repair RPC's current epoch is fenced by the service. Its payload can legitimately contain a
-                // committed mutation from an older epoch, which takes precedence over an uncommitted local prepare.
-                abortPreparedLocked(preparedOwner);
-                requestByVersion.remove(mutation.getVersion(), versionOwner);
+            String conflict = admitTransferredMutationLocked(mutation);
+            if (conflict != null) {
+                return rejected(conflict);
             }
             ReplicatedMutation current = committedByKey.get(mutation.getKey());
             if (current != null && current.getVersion() >= mutation.getVersion()) {
-                if (known != null && mutationStates.get(mutation.getRequestId()) == MutationState.PREPARED) {
-                    abortPreparedLocked(known);
-                }
+                recordSupersededLocked(mutation);
                 return accepted("repair entry is already superseded");
             }
 
@@ -359,6 +344,30 @@ public class ShardKVStore {
         } finally {
             stateLock.unlock();
         }
+    }
+
+    /**
+     * Records a committed state-transfer entry that a newer committed mutation of the same key replaced. Only its
+     * request identity is kept, so a retry returns the original version and a conflicting reuse is still rejected. The
+     * value is never exposed, even when the newer mutation has not been transferred yet.
+     */
+    public MutationStatus recordSupersededMutation(ReplicatedMutation mutation) {
+        stateLock.lock();
+        try {
+            requireReplicationJournal();
+            String conflict = admitTransferredMutationLocked(mutation);
+            if (conflict != null) {
+                return rejected(conflict);
+            }
+            return recordSupersededLocked(mutation);
+        } finally {
+            stateLock.unlock();
+        }
+    }
+
+    /** Applies one transferred entry according to whether the sender still exposes it as the key's newest state. */
+    public MutationStatus applyTransferEntry(TransferEntry entry) {
+        return entry.superseded() ? recordSupersededMutation(entry.mutation()) : repairMutation(entry.mutation());
     }
 
     public List<ReplicatedMutation> committedMutations() {
@@ -383,6 +392,37 @@ public class ShardKVStore {
                     .sorted(Comparator.comparingLong(ReplicatedMutation::getVersion))
                     .limit(limit)
                     .toList();
+        } finally {
+            stateLock.unlock();
+        }
+    }
+
+    /**
+     * Returns every committed mutation after {@code afterVersion} in version order, including mutations that a newer
+     * mutation of the same key replaced. State transfer needs those entries so the receiver keeps their request
+     * identities.
+     */
+    public List<TransferEntry> committedHistoryAfter(long afterVersion, int limit) {
+        if (afterVersion < 0 || limit <= 0) {
+            throw new IllegalArgumentException("afterVersion must be non-negative and limit must be positive");
+        }
+        stateLock.lock();
+        try {
+            List<TransferEntry> entries = new ArrayList<>();
+            for (String requestId :
+                    requestByVersion.tailMap(afterVersion, false).values()) {
+                if (entries.size() == limit) {
+                    break;
+                }
+                if (mutationStates.get(requestId) != MutationState.COMMITTED) {
+                    continue;
+                }
+                ReplicatedMutation mutation = mutationsByRequest.get(requestId);
+                ReplicatedMutation newest = committedByKey.get(mutation.getKey());
+                entries.add(
+                        new TransferEntry(mutation, newest == null || newest.getVersion() != mutation.getVersion()));
+            }
+            return List.copyOf(entries);
         } finally {
             stateLock.unlock();
         }
@@ -731,6 +771,47 @@ public class ShardKVStore {
         mutationStates.put(mutation.getRequestId(), MutationState.ABORTED);
     }
 
+    /**
+     * Checks a committed state-transfer entry against local identities. The transfer RPC's current epoch is fenced by
+     * the service. Its payload can legitimately contain a committed mutation from an older epoch, which takes
+     * precedence over an uncommitted local prepare of the same version.
+     */
+    private String admitTransferredMutationLocked(ReplicatedMutation mutation) {
+        String validation = validateMutation(mutation);
+        if (validation != null) {
+            return validation;
+        }
+        ReplicatedMutation known = mutationsByRequest.get(mutation.getRequestId());
+        if (known != null && !known.equals(mutation)) {
+            return "request_id conflicts with an existing mutation";
+        }
+        String versionOwner = requestByVersion.get(mutation.getVersion());
+        if (versionOwner != null && !versionOwner.equals(mutation.getRequestId())) {
+            ReplicatedMutation preparedOwner = mutationsByRequest.get(versionOwner);
+            if (preparedOwner == null || mutationStates.get(versionOwner) != MutationState.PREPARED) {
+                return "version conflicts with a different mutation";
+            }
+            abortPreparedLocked(preparedOwner);
+            requestByVersion.remove(mutation.getVersion(), versionOwner);
+        }
+        return null;
+    }
+
+    /**
+     * Durably marks a transferred committed mutation as committed without exposing it. A local prepare of the same
+     * mutation was committed elsewhere, so it becomes committed here too instead of being aborted.
+     */
+    private MutationStatus recordSupersededLocked(ReplicatedMutation mutation) {
+        if (mutationStates.get(mutation.getRequestId()) == MutationState.COMMITTED) {
+            return accepted("already committed");
+        }
+        abortSupersededPreparesLocked(mutation);
+        replicationWalManager.log(
+                "SUPERSEDED", mutation.getRequestId().getBytes(StandardCharsets.UTF_8), mutation.toByteArray());
+        recordCommittedIdentity(mutation);
+        return accepted("superseded identity recorded");
+    }
+
     private String validateMutation(ReplicatedMutation mutation) {
         if (mutation == null || mutation.getRequestId().isBlank()) {
             return "request_id is required";
@@ -774,13 +855,18 @@ public class ShardKVStore {
     }
 
     private void markCommitted(ReplicatedMutation mutation) {
-        mutationsByRequest.put(mutation.getRequestId(), mutation);
-        mutationStates.put(mutation.getRequestId(), MutationState.COMMITTED);
-        requestByVersion.put(mutation.getVersion(), mutation.getRequestId());
+        recordCommittedIdentity(mutation);
         ReplicatedMutation current = committedByKey.get(mutation.getKey());
         if (current == null || current.getVersion() < mutation.getVersion()) {
             committedByKey.put(mutation.getKey(), mutation);
         }
+    }
+
+    /** Records a committed request identity without changing which mutation is visible for its key. */
+    private void recordCommittedIdentity(ReplicatedMutation mutation) {
+        mutationsByRequest.put(mutation.getRequestId(), mutation);
+        mutationStates.put(mutation.getRequestId(), MutationState.COMMITTED);
+        requestByVersion.put(mutation.getVersion(), mutation.getRequestId());
         shardEpoch = Math.max(shardEpoch, mutation.getEpoch());
         highestVersion = Math.max(highestVersion, mutation.getVersion());
         committedVersion = Math.max(committedVersion, mutation.getVersion());
@@ -817,6 +903,7 @@ public class ShardKVStore {
                     ReplicatedMutation mutation = parseMutation(record.value());
                     markCommitted(mutation);
                 }
+                case "SUPERSEDED" -> recordCommittedIdentity(parseMutation(record.value()));
                 default ->
                     throw new WALManager.WALCorruptionException(
                             "Unknown replication WAL operation " + record.operation());
@@ -958,6 +1045,26 @@ public class ShardKVStore {
     }
 
     public record MutationStatus(boolean success, boolean durable, String message, long committedVersion) {}
+
+    /**
+     * A committed mutation selected for state transfer. A superseded entry carries only a request identity: a newer
+     * committed mutation of the same key replaced its value.
+     */
+    public record TransferEntry(ReplicatedMutation mutation, boolean superseded) {
+
+        public TransferEntry {
+            Objects.requireNonNull(mutation, "mutation");
+        }
+
+        /** Merges the two wire lists back into the sender's version order. */
+        public static List<TransferEntry> merge(List<ReplicatedMutation> newest, List<ReplicatedMutation> superseded) {
+            List<TransferEntry> entries = new ArrayList<>(newest.size() + superseded.size());
+            newest.forEach(mutation -> entries.add(new TransferEntry(mutation, false)));
+            superseded.forEach(mutation -> entries.add(new TransferEntry(mutation, true)));
+            entries.sort(Comparator.comparingLong(entry -> entry.mutation().getVersion()));
+            return entries;
+        }
+    }
 
     public record ReadResult(
             ByteString value,

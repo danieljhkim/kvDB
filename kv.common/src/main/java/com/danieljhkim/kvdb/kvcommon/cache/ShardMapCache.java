@@ -135,26 +135,40 @@ public class ShardMapCache implements Consumer<ShardMapDelta> {
         return Optional.empty();
     }
 
+    /**
+     * Captures the cluster snapshot a compound lookup must use for both its shard record and its node records.
+     * A subclass may publish a newer state before returning, and must still return the snapshot captured here.
+     */
+    protected ClusterState captureState() {
+        return stateRef.get();
+    }
+
     public NodeRecord getLeaderNode(String shardId) {
-        ClusterState state = stateRef.get();
-        ShardRecord shard = getShard(shardId);
-        if (state == null || shard == null || shard.getLeader().isEmpty()) {
+        ClusterState state = captureState();
+        ShardRecord shard = shardRecord(state, shardId);
+        if (shard == null || shard.getLeader().isEmpty()) {
             return null;
         }
-        NodeRecord leaderNode = state.getNodesMap().get(shard.getLeader());
-        return leaderNode;
+        return state.getNodesMap().get(shard.getLeader());
     }
 
     public List<NodeRecord> getReplicaNodes(String shardId) {
-        ClusterState state = stateRef.get();
-        ShardRecord shard = getShard(shardId);
-        if (state == null || shard == null) {
+        ClusterState state = captureState();
+        ShardRecord shard = shardRecord(state, shardId);
+        if (shard == null) {
             return List.of();
         }
         return shard.getReplicasList().stream()
                 .map(replicaId -> state.getNodesMap().get(replicaId))
                 .filter(node -> node != null)
                 .toList();
+    }
+
+    private static ShardRecord shardRecord(ClusterState state, String shardId) {
+        if (state == null) {
+            return null;
+        }
+        return state.getShardsMap().get(shardId);
     }
 
     public Optional<String> getNodeAddress(String nodeId) {

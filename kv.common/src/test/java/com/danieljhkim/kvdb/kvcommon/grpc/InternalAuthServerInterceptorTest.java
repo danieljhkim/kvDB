@@ -41,6 +41,8 @@ class InternalAuthServerInterceptorTest {
     @Test
     void rolesAreScopedAcrossControlDataAndRaftPlanes() {
         assertAllowed(CoordinatorGrpc.getInitShardsMethod(), "admin/operator-1");
+        assertAllowed(CoordinatorGrpc.getRegisterNodeMethod(), "admin/operator-1");
+        assertAllowed(CoordinatorGrpc.getRegisterNodeMethod(), "storage-node/node-1");
         assertAllowed(CoordinatorGrpc.getHeartbeatMethod(), "storage-node/node-1");
         assertAllowed(KVServiceGrpc.getSetMethod(), "gateway/gateway-1");
         assertAllowed(KVServiceGrpc.getReplicateMutationMethod(), "storage-node/node-1");

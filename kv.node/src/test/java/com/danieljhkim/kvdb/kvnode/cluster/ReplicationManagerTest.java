@@ -250,10 +250,13 @@ class ReplicationManagerTest {
             assertEquals(nearLimit, repaired.get("first"));
             assertEquals("(nil)", repaired.get("removed"));
             assertEquals(nearLimit, repaired.get("last"));
+            // The overwritten put travels as a superseded identity without resurrecting its value.
+            assertTrue(repaired.isCommitted("near-limit-2"));
             assertTrue(manager.repairProgress("node-2:9000", "shard-0").complete());
             assertTrue(client.repairRequests.size() >= 2);
+            assertTrue(client.repairRequests.stream().anyMatch(request -> request.getSupersededMutationsCount() > 0));
             client.repairRequests.forEach(request -> {
-                assertTrue(request.getCommittedMutationsCount() <= 2);
+                assertTrue(request.getCommittedMutationsCount() + request.getSupersededMutationsCount() <= 2);
                 assertTrue(request.getSerializedSize() <= 300);
             });
         } finally {
@@ -687,6 +690,201 @@ class ReplicationManagerTest {
         }
     }
 
+    @Test
+    void promotedLaggingReplicaReturnsOriginalVersionsForSupersededWritesAfterSameEpochTransfer() {
+        ShardRecord original = ShardRecord.newBuilder()
+                .setShardId("shard-0")
+                .setEpoch(3)
+                .setLeader("node-1")
+                .addReplicas("node-1")
+                .addReplicas("node-2")
+                .addReplicas("node-3")
+                .build();
+        // The same epoch isolates request-identity transfer from epoch fencing.
+        ShardRecord handedOff = original.toBuilder().setLeader("node-3").build();
+        ShardMapCache node1Cache = cache(original);
+        ShardMapCache node2Cache = cache(original);
+        ShardMapCache node3Cache = cache(original);
+        ShardStoreRegistry node1 = registry("superseded-node-1");
+        ShardStoreRegistry node2 = registry("superseded-node-2");
+        ShardStoreRegistry node3 = registry("superseded-node-3");
+        // Two entries per page forces the superseded entries to share bounded, paginated transfers.
+        AppConfig.LimitsConfig limits = limits(128, 4 * 1024, 2);
+        Map<String, KVServiceImpl> peers = Map.of(
+                "node-1:9000", new KVServiceImpl("node-1", node1Cache, node1, null, Duration.ofSeconds(5), limits),
+                "node-2:9000", new KVServiceImpl("node-2", node2Cache, node2, null, Duration.ofSeconds(5), limits),
+                "node-3:9000", new KVServiceImpl("node-3", node3Cache, node3, null, Duration.ofSeconds(5), limits));
+        PeerServiceReplicaClient fromNode1 = new PeerServiceReplicaClient("node-1", peers);
+        manager = new ReplicationManager(
+                "node-1", node1Cache, node1, fromNode1, Duration.ofSeconds(5), new KvRequestLimits(limits));
+        try {
+            fromNode1.partitioned.add("node-3:9000");
+            ReplicationManager.MutationResult first =
+                    manager.replicateSet("shard-0", original, "key", "one", "history-r1", WriteDurability.QUORUM_SYNC);
+            manager.replicateSet("shard-0", original, "key", "two", "history-r2", WriteDurability.QUORUM_SYNC);
+            ReplicationManager.MutationResult deletedPut = manager.replicateSet(
+                    "shard-0", original, "removed", "seed", "history-seed", WriteDurability.QUORUM_SYNC);
+            manager.replicateDelete("shard-0", original, "removed", "history-tombstone", WriteDurability.QUORUM_SYNC);
+            ReplicationManager.MutationResult overwrittenDelete = manager.replicateDelete(
+                    "shard-0", original, "revived", "history-delete", WriteDurability.QUORUM_SYNC);
+            manager.replicateSet("shard-0", original, "revived", "back", "history-revive", WriteDurability.QUORUM_SYNC);
+            manager.close();
+            manager = null;
+            assertEquals(0, node3.getOrCreate("shard-0").committedVersion());
+
+            node2Cache.refreshFromFullState(clusterState(handedOff, 2));
+            node3Cache.refreshFromFullState(clusterState(handedOff, 2));
+            PeerServiceReplicaClient fromNode3 = new PeerServiceReplicaClient("node-3", peers);
+            manager = new ReplicationManager(
+                    "node-3", node3Cache, node3, fromNode3, Duration.ofSeconds(5), new KvRequestLimits(limits));
+
+            assertEquals(
+                    first.version(),
+                    manager.replicateSet("shard-0", handedOff, "key", "one", "history-r1", WriteDurability.QUORUM_SYNC)
+                            .version());
+            assertEquals(
+                    deletedPut.version(),
+                    manager.replicateSet(
+                                    "shard-0",
+                                    handedOff,
+                                    "removed",
+                                    "seed",
+                                    "history-seed",
+                                    WriteDurability.QUORUM_SYNC)
+                            .version());
+            assertEquals(
+                    overwrittenDelete.version(),
+                    manager.replicateDelete(
+                                    "shard-0", handedOff, "revived", "history-delete", WriteDurability.QUORUM_SYNC)
+                            .version());
+            assertThrows(
+                    RequestIdConflictException.class,
+                    () -> manager.replicateSet(
+                            "shard-0", handedOff, "key", "different", "history-r1", WriteDurability.QUORUM_SYNC));
+            assertThrows(
+                    RequestIdConflictException.class,
+                    () -> manager.replicateDelete(
+                            "shard-0", handedOff, "key", "history-delete", WriteDurability.QUORUM_SYNC));
+            for (ShardStoreRegistry node : List.of(node1, node2, node3)) {
+                ShardKVStore store = node.getOrCreate("shard-0");
+                assertEquals("two", store.get("key"));
+                assertEquals("(nil)", store.get("removed"));
+                assertEquals("back", store.get("revived"));
+                assertEquals(6, store.committedVersion());
+            }
+            assertEquals(
+                    7,
+                    manager.replicateSet(
+                                    "shard-0", handedOff, "fresh", "v", "after-promotion", WriteDurability.QUORUM_SYNC)
+                            .version());
+        } finally {
+            if (manager != null) {
+                manager.close();
+                manager = null;
+            }
+            peers.values().forEach(KVServiceImpl::shutdownReplication);
+            node1.shutdown();
+            node2.shutdown();
+            node3.shutdown();
+        }
+
+        // The transferred identities are durable on the promoted node, so its journal alone answers retries.
+        ShardStoreRegistry restarted = registry("superseded-node-3");
+        try {
+            ShardKVStore store = restarted.getOrCreate("shard-0");
+            assertTrue(store.isCommitted("history-r1"));
+            assertTrue(store.isCommitted("history-delete"));
+            assertEquals(
+                    1,
+                    store.prepareNewMutation("history-r1", 3, MutationKind.SET, "key", "one", "node-3")
+                            .getVersion());
+            assertThrows(
+                    RequestIdConflictException.class,
+                    () -> store.prepareNewMutation("history-r1", 3, MutationKind.SET, "key", "other", "node-3"));
+            assertEquals("two", store.get("key"));
+            assertEquals("(nil)", store.get("removed"));
+            assertEquals("back", store.get("revived"));
+        } finally {
+            restarted.shutdown();
+        }
+    }
+
+    @Test
+    void replicaStateServesSupersededIdentitiesOnlyToReceiversThatAskWithinLimits() {
+        ShardRecord shard = repairShard();
+        AppConfig.LimitsConfig limits = limits(128, 300, 2);
+        ShardStoreRegistry registry = registry("state-limits");
+        KVServiceImpl service =
+                new KVServiceImpl("node-2", cache(shard), registry, null, Duration.ofMillis(40), limits);
+        try {
+            ShardKVStore store = registry.getOrCreate("shard-0");
+            for (int version = 1; version <= 5; version++) {
+                ReplicatedMutation mutation = store.prepareNewMutation(
+                        "state-" + version,
+                        3,
+                        MutationKind.SET,
+                        version % 2 == 0 ? "even" : "odd",
+                        "v".repeat(100),
+                        "node-1");
+                assertTrue(store.commitMutation(mutation).success());
+            }
+
+            List<Long> newest = new ArrayList<>();
+            List<Long> superseded = new ArrayList<>();
+            int pages = drainReplicaState(service, true, 300, newest, superseded);
+            assertEquals(List.of(4L, 5L), newest);
+            assertEquals(List.of(1L, 2L, 3L), superseded);
+            assertTrue(pages >= 3);
+
+            // An older receiver does not set include_superseded and keeps its newest-per-key stream.
+            newest.clear();
+            superseded.clear();
+            drainReplicaState(service, false, 300, newest, superseded);
+            assertEquals(List.of(4L, 5L), newest);
+            assertTrue(superseded.isEmpty());
+        } finally {
+            service.shutdownReplication();
+            registry.shutdown();
+        }
+    }
+
+    private static int drainReplicaState(
+            KVServiceImpl service,
+            boolean includeSuperseded,
+            int maxMessageBytes,
+            List<Long> newest,
+            List<Long> superseded) {
+        long afterVersion = 0;
+        for (int page = 1; page <= 10; page++) {
+            CapturingObserver<ReplicaStateResponse> observer = new CapturingObserver<>();
+            service.fetchReplicaState(
+                    ReplicaStateRequest.newBuilder()
+                            .setShardId("shard-0")
+                            .setEpoch(3)
+                            .setAfterVersion(afterVersion)
+                            .setIncludeSuperseded(includeSuperseded)
+                            .build(),
+                    observer);
+            ReplicaStateResponse response = observer.value;
+            assertTrue(response.getCommittedMutationsCount() + response.getSupersededMutationsCount() <= 2);
+            assertTrue(response.getSerializedSize() <= maxMessageBytes);
+            for (ReplicatedMutation mutation : response.getCommittedMutationsList()) {
+                newest.add(mutation.getVersion());
+                afterVersion = Math.max(afterVersion, mutation.getVersion());
+            }
+            for (ReplicatedMutation mutation : response.getSupersededMutationsList()) {
+                superseded.add(mutation.getVersion());
+                afterVersion = Math.max(afterVersion, mutation.getVersion());
+            }
+            if (!response.getHasMore()) {
+                newest.sort(null);
+                superseded.sort(null);
+                return page;
+            }
+        }
+        throw new AssertionError("replica state transfer did not finish");
+    }
+
     private Fixture fixture() {
         ShardRecord shard = ShardRecord.newBuilder()
                 .setShardId("shard-0")
@@ -869,8 +1067,9 @@ class ReplicationManagerTest {
             unavailableIfNeeded(targetAddress, false);
             ShardKVStore store = stores.get(targetAddress);
             int applied = 0;
-            for (var mutation : request.getCommittedMutationsList()) {
-                ShardKVStore.MutationStatus status = store.repairMutation(mutation);
+            for (var entry : ShardKVStore.TransferEntry.merge(
+                    request.getCommittedMutationsList(), request.getSupersededMutationsList())) {
+                ShardKVStore.MutationStatus status = store.applyTransferEntry(entry);
                 if (!status.success()) {
                     return ReplicaRepairResponse.newBuilder()
                             .setSuccess(false)
@@ -898,6 +1097,26 @@ class ReplicationManagerTest {
             largestRequestedStateBatch.accumulateAndGet(request.getMaxMutations(), Math::max);
             List<ReplicatedMutation> configuredState = replicaStates.get(targetAddress);
             ShardKVStore store = stores.get(targetAddress);
+            if (configuredState == null && request.getIncludeSuperseded()) {
+                var entries =
+                        store.committedHistoryAfter(request.getAfterVersion(), Math.max(1, request.getMaxMutations()));
+                long lastVersion = entries.isEmpty()
+                        ? request.getAfterVersion()
+                        : entries.getLast().mutation().getVersion();
+                ReplicaStateResponse.Builder response = ReplicaStateResponse.newBuilder()
+                        .setSuccess(true)
+                        .setDurable(true)
+                        .setHasMore(!store.committedHistoryAfter(lastVersion, 1).isEmpty())
+                        .setCommittedVersion(store.committedVersion());
+                entries.forEach(entry -> {
+                    if (entry.superseded()) {
+                        response.addSupersededMutations(entry.mutation());
+                    } else {
+                        response.addCommittedMutations(entry.mutation());
+                    }
+                });
+                return response.build();
+            }
             var mutations = configuredState == null
                     ? store.committedMutationsAfter(request.getAfterVersion(), Math.max(1, request.getMaxMutations()))
                     : configuredState.stream()

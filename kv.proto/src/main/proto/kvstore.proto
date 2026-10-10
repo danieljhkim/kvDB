@@ -149,6 +149,11 @@ message ReplicaRepairRequest {
   string shard_id = 1;
   uint64 epoch = 2;
   repeated ReplicatedMutation committed_mutations = 3;
+  // Committed mutations that a newer committed mutation of the same key has
+  // replaced. Receivers record only their request identities, so a retry keeps
+  // its original version, and never expose their values. Entries in both lists
+  // share one version cursor and the batch entry and message limits.
+  repeated ReplicatedMutation superseded_mutations = 4;
 }
 
 message ReplicaRepairResponse {
@@ -163,6 +168,9 @@ message ReplicaStateRequest {
   uint64 epoch = 2;
   uint64 after_version = 3;
   uint32 max_mutations = 4;
+  // Set by receivers that record superseded_mutations. Senders return only the
+  // newest mutation per key when it is unset, as older receivers expect.
+  bool include_superseded = 5;
 }
 
 message ReplicaStateResponse {
@@ -171,6 +179,9 @@ message ReplicaStateResponse {
   repeated ReplicatedMutation committed_mutations = 3;
   bool has_more = 4;
   uint64 committed_version = 5;
+  // Populated only when include_superseded is set. Same meaning as
+  // ReplicaRepairRequest.superseded_mutations.
+  repeated ReplicatedMutation superseded_mutations = 6;
 }
 
 message PingRequest {

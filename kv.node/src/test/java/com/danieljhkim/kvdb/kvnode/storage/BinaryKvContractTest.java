@@ -440,6 +440,125 @@ class BinaryKvContractTest {
         registry.shutdown();
     }
 
+    @Test
+    void transferredSupersededIdentitiesAnswerRetriesAcrossRestartWithoutResurrectingValues() {
+        ShardKVStore source = newStore("history-source");
+        long now = System.currentTimeMillis();
+        ReplicatedMutation first = commitNew(source, "history-r1", MutationKind.SET, "key", "one", now);
+        ReplicatedMutation second = commitNew(source, "history-r2", MutationKind.SET, "key", "two", now);
+        ReplicatedMutation seed = commitNew(source, "history-seed", MutationKind.SET, "removed", "seed", now);
+        ReplicatedMutation tombstone = commitNew(source, "history-delete", MutationKind.DELETE, "removed", "", now);
+
+        List<ShardKVStore.TransferEntry> history = source.committedHistoryAfter(0, 10);
+        assertEquals(
+                List.of(first, second, seed, tombstone),
+                history.stream().map(ShardKVStore.TransferEntry::mutation).toList());
+        assertEquals(
+                List.of(true, false, true, false),
+                history.stream().map(ShardKVStore.TransferEntry::superseded).toList());
+        assertEquals(history.subList(2, 4), source.committedHistoryAfter(2, 10));
+        assertEquals(history.subList(0, 1), source.committedHistoryAfter(0, 1));
+
+        ShardKVStore receiver = newStore("history-receiver");
+        history.forEach(entry -> assertTrue(receiver.applyTransferEntry(entry).success()));
+        assertTransferredHistory(receiver, first, seed, now);
+        receiver.shutdown();
+
+        ShardKVStore restarted = newStore("history-receiver");
+        assertTransferredHistory(restarted, first, seed, now);
+        assertEquals(history, restarted.committedHistoryAfter(0, 10));
+        // New writes still allocate above every transferred version.
+        assertEquals(
+                5,
+                replay(restarted, "history-new", MutationKind.SET, "fresh", "v", now)
+                        .getVersion());
+        restarted.shutdown();
+        source.shutdown();
+    }
+
+    @Test
+    void supersededIdentityAheadOfVisibleStateStaysHiddenAndCommitsALostPrepare() {
+        long now = System.currentTimeMillis();
+        ShardKVStore source = newStore("partial-source");
+        ReplicatedMutation first = commitNew(source, "partial-r1", MutationKind.SET, "key", "one", now);
+        ReplicatedMutation second = commitNew(source, "partial-r2", MutationKind.SET, "key", "two", now);
+
+        // The transfer stops after the superseded entry: its value must stay hidden until the newer entry arrives.
+        ShardKVStore interrupted = newStore("partial-interrupted");
+        assertTrue(interrupted.recordSupersededMutation(first).success());
+        assertFalse(interrupted.read("key").found());
+        interrupted.shutdown();
+        ShardKVStore reloaded = newStore("partial-interrupted");
+        assertFalse(reloaded.read("key").found());
+        assertTrue(reloaded.isCommitted("partial-r1"));
+        assertEquals(first, replay(reloaded, "partial-r1", MutationKind.SET, "key", "one", now));
+        assertTrue(reloaded.repairMutation(second).success());
+        assertRead(reloaded, second.getKey(), second.getValue(), second.getVersion());
+        reloaded.shutdown();
+
+        // A replica whose commit for the first write was lost later learns it was committed and superseded.
+        ShardKVStore lostCommit = newStore("partial-lost-commit");
+        assertTrue(lostCommit.prepareMutation(first).success());
+        assertTrue(lostCommit.repairMutation(second).success());
+        assertTrue(lostCommit.repairMutation(first).success());
+        assertTrue(lostCommit.isCommitted("partial-r1"));
+        assertEquals(first, replay(lostCommit, "partial-r1", MutationKind.SET, "key", "one", now));
+        assertRead(lostCommit, second.getKey(), second.getValue(), second.getVersion());
+        // A different mutation reusing the transferred request ID or version is still refused.
+        assertFalse(lostCommit
+                .recordSupersededMutation(first.toBuilder()
+                        .setValue(ByteString.copyFromUtf8("other"))
+                        .build())
+                .success());
+        assertFalse(lostCommit
+                .recordSupersededMutation(
+                        first.toBuilder().setRequestId("partial-other").build())
+                .success());
+        lostCommit.shutdown();
+        source.shutdown();
+    }
+
+    private static void assertTransferredHistory(
+            ShardKVStore store, ReplicatedMutation supersededPut, ReplicatedMutation deletedPut, long now) {
+        assertEquals(supersededPut, replay(store, "history-r1", MutationKind.SET, "key", "one", now));
+        assertEquals(deletedPut, replay(store, "history-seed", MutationKind.SET, "removed", "seed", now));
+        assertEquals(
+                4,
+                replay(store, "history-delete", MutationKind.DELETE, "removed", "", now)
+                        .getVersion());
+        assertRead(store, ByteString.copyFromUtf8("key"), ByteString.copyFromUtf8("two"), 2);
+        assertFalse(store.read("removed").found());
+        assertEquals(4, store.committedVersion());
+        assertThrows(
+                RequestIdConflictException.class,
+                () -> replay(store, "history-r1", MutationKind.SET, "key", "different", now));
+        assertThrows(
+                RequestIdConflictException.class,
+                () -> replay(store, "history-seed", MutationKind.DELETE, "removed", "", now));
+    }
+
+    private static ReplicatedMutation commitNew(
+            ShardKVStore store, String requestId, MutationKind kind, String key, String value, long nowMs) {
+        ReplicatedMutation mutation = replay(store, requestId, kind, key, value, nowMs);
+        assertTrue(store.commitMutation(mutation).success());
+        return mutation;
+    }
+
+    private static ReplicatedMutation replay(
+            ShardKVStore store, String requestId, MutationKind kind, String key, String value, long nowMs) {
+        return store.prepareNewMutation(
+                requestId,
+                1,
+                kind,
+                ByteString.copyFromUtf8(key),
+                ByteString.copyFromUtf8(value),
+                "leader",
+                0,
+                OptionalLong.empty(),
+                false,
+                nowMs);
+    }
+
     private ShardKVStore newStore(String name) {
         return new ShardKVStore(
                 "shard-0",

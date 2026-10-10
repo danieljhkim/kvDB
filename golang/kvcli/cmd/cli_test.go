@@ -320,6 +320,23 @@ func TestTransportFailuresExitDistinctlyFromApplicationFailures(t *testing.T) {
 	}
 }
 
+func TestDefiniteWriteRejectionUsesApplicationExitCode(t *testing.T) {
+	server, connection := localGateway(t, testfixture.Hooks{
+		Delete: func(context.Context, *gateway.DeleteRequest) (*gateway.DeleteResponse, error) {
+			return &gateway.DeleteResponse{Status: &gateway.Status{
+				Code: gateway.Status_UNAVAILABLE, Message: "rejected before mutation",
+			}}, nil
+		},
+	})
+	_, stderr, code := run(t, withArgs(connection, "del", "k")...)
+	if code != ExitApplication || !strings.Contains(stderr, "UNAVAILABLE") {
+		t.Fatalf("expected UNAVAILABLE exit %d, got %d (%s)", ExitApplication, code, stderr)
+	}
+	if len(server.Calls()) != 1 {
+		t.Fatalf("the CLI must not retry a rejected write, saw %d attempts", len(server.Calls()))
+	}
+}
+
 func TestUnknownWriteOutcomeHasItsOwnExitCode(t *testing.T) {
 	server, connection := localGateway(t, testfixture.Hooks{
 		Delete: func(context.Context, *gateway.DeleteRequest) (*gateway.DeleteResponse, error) {

@@ -6,6 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
 import com.danieljhkim.kvdb.kvcommon.config.AppConfig;
+import com.danieljhkim.kvdb.kvcommon.exception.NodeUnavailableException;
+import com.danieljhkim.kvdb.kvcommon.grpc.GlobalExceptionInterceptor;
 import com.danieljhkim.kvdb.kvcommon.grpc.GrpcIdentity;
 import com.danieljhkim.kvdb.kvcommon.grpc.GrpcPeerIdentity;
 import com.danieljhkim.kvdb.kvcommon.limits.KvRequestLimits;
@@ -21,6 +23,8 @@ import com.danieljhkim.kvdb.proto.coordinator.ShardRecord;
 import com.danieljhkim.kvdb.proto.gateway.BatchGetRequest;
 import com.danieljhkim.kvdb.proto.gateway.BatchGetResponse;
 import com.danieljhkim.kvdb.proto.gateway.Consistency;
+import com.danieljhkim.kvdb.proto.gateway.DeleteRequest;
+import com.danieljhkim.kvdb.proto.gateway.DeleteResponse;
 import com.danieljhkim.kvdb.proto.gateway.GetRequest;
 import com.danieljhkim.kvdb.proto.gateway.GetResponse;
 import com.danieljhkim.kvdb.proto.gateway.PutRequest;
@@ -31,11 +35,18 @@ import com.danieljhkim.kvdb.proto.gateway.Status;
 import com.danieljhkim.kvdb.proto.gateway.WriteOptions;
 import com.google.protobuf.ByteString;
 import com.kvdb.proto.kvstore.KVServiceGrpc;
+import com.kvdb.proto.kvstore.KeyValueRequest;
 import com.kvdb.proto.kvstore.SetResponse;
 import com.kvdb.proto.kvstore.ValueResponse;
 import io.grpc.Context;
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
+import io.grpc.Server;
+import io.grpc.ServerBuilder;
 import io.grpc.stub.StreamObserver;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.Test;
@@ -164,6 +175,85 @@ class KvGatewayConsistencyTest {
                 Status.Code.WRITE_OUTCOME_UNKNOWN, observer.value.getStatus().getCode());
         assertFalse(executor.replaySafe);
         assertEquals(1, executor.calls);
+    }
+
+    @Test
+    void nodeWireOutcomesMapToPutAndDeleteApplicationStatuses() throws Exception {
+        for (boolean definite : List.of(true, false)) {
+            AtomicInteger calls = new AtomicInteger();
+            Server server = ServerBuilder.forPort(0)
+                    .directExecutor()
+                    .intercept(new GlobalExceptionInterceptor())
+                    .addService(new KVServiceGrpc.KVServiceImplBase() {
+                        private void reject() {
+                            calls.incrementAndGet();
+                            if (definite) {
+                                throw NodeUnavailableException.rejectedBeforeMutation(
+                                        "Leader reconciliation quorum not reached", "shard-0");
+                            }
+                            throw new NodeUnavailableException("Replication commit quorum not reached", "shard-0");
+                        }
+
+                        @Override
+                        public void set(KeyValueRequest request, StreamObserver<SetResponse> observer) {
+                            reject();
+                        }
+
+                        @Override
+                        public void delete(
+                                com.kvdb.proto.kvstore.DeleteRequest request,
+                                StreamObserver<com.kvdb.proto.kvstore.DeleteResponse> observer) {
+                            reject();
+                        }
+                    })
+                    .build()
+                    .start();
+            ManagedChannel channel = ManagedChannelBuilder.forAddress("localhost", server.getPort())
+                    .usePlaintext()
+                    .build();
+            try {
+                NodeConnectionPool pool = new NodeConnectionPool() {
+                    @Override
+                    public KVServiceGrpc.KVServiceBlockingStub getStub(String address) {
+                        return KVServiceGrpc.newBlockingStub(channel);
+                    }
+                };
+                RequestExecutor executor = new RequestExecutor(
+                        pool,
+                        new NodeFailureTracker(5000),
+                        RetryPolicy.builder()
+                                .maxAttempts(2)
+                                .initialBackoffMs(0)
+                                .jitterPercent(0)
+                                .build(),
+                        5000);
+                KvGatewayServiceImpl service = new KvGatewayServiceImpl(cache(), executor);
+                CapturingObserver<PutResponse> put = new CapturingObserver<>();
+                runAsClient(() -> service.put(
+                        PutRequest.newBuilder()
+                                .setCtx(RequestContext.newBuilder().setRequestId("put-id"))
+                                .setKey(ByteString.copyFromUtf8("key"))
+                                .setValue(ByteString.copyFromUtf8("value"))
+                                .setOptions(WriteOptions.newBuilder().setRequireIdempotency(false))
+                                .build(),
+                        put));
+                CapturingObserver<DeleteResponse> delete = new CapturingObserver<>();
+                runAsClient(() -> service.delete(
+                        DeleteRequest.newBuilder()
+                                .setCtx(RequestContext.newBuilder().setRequestId("delete-id"))
+                                .setKey(ByteString.copyFromUtf8("key"))
+                                .setOptions(WriteOptions.newBuilder().setRequireIdempotency(false))
+                                .build(),
+                        delete));
+                Status.Code expected = definite ? Status.Code.UNAVAILABLE : Status.Code.WRITE_OUTCOME_UNKNOWN;
+                assertEquals(expected, put.value.getStatus().getCode());
+                assertEquals(expected, delete.value.getStatus().getCode());
+                assertEquals(definite ? 4 : 2, calls.get());
+            } finally {
+                channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+                server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+            }
+        }
     }
 
     @Test

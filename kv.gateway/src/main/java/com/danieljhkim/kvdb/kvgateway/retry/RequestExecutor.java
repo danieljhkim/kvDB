@@ -1,5 +1,6 @@
 package com.danieljhkim.kvdb.kvgateway.retry;
 
+import com.danieljhkim.kvdb.kvcommon.grpc.GlobalExceptionInterceptor;
 import com.danieljhkim.kvdb.kvcommon.observability.Metrics;
 import com.danieljhkim.kvdb.kvgateway.cache.NodeFailureTracker;
 import com.danieljhkim.kvdb.kvgateway.client.NodeConnectionPool;
@@ -9,6 +10,7 @@ import io.grpc.Context;
 import io.grpc.Deadline;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
+import java.net.ConnectException;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -144,25 +146,34 @@ public class RequestExecutor {
                         code,
                         e.getStatus().getDescription());
 
+                failureTracker.recordFailure(lastNodeAddress);
+                // A caller deadline/cancellation does not prove an in-flight write was rejected.
+                if (isWrite && !replaySafe && isAmbiguousWriteFailure(e)) {
+                    return ExecutionResult.ambiguous(
+                            code,
+                            "Write outcome is unknown after " + code + "; request was not replayed",
+                            lastNodeAddress);
+                }
+
                 ExecutionResult<T> stoppedAfterCall = stoppedResult(context, callerDeadline, lastNodeAddress);
                 if (stoppedAfterCall != null) {
                     return stoppedAfterCall;
                 }
 
-                failureTracker.recordFailure(lastNodeAddress);
                 // Try leader hint if available
                 if (code == Status.Code.FAILED_PRECONDITION) {
-                    ExecutionResult<T> hintResult = tryLeaderHint(operation, e, replaySafe, context, callerDeadline);
+                    ExecutionResult<T> hintResult =
+                            tryLeaderHint(operation, e, isWrite, replaySafe, context, callerDeadline);
                     if (hintResult != null) {
-                        return hintResult;
+                        if (hintResult.isSuccess() || hintResult.isAmbiguous()) {
+                            return hintResult;
+                        }
+                        code = hintResult.getErrorCode();
+                        lastNodeAddress = hintResult.getLastNodeAddress();
+                        lastException = Status.fromCode(code)
+                                .withDescription(hintResult.getErrorMessage())
+                                .asRuntimeException();
                     }
-                }
-
-                if (isWrite && !replaySafe && isAmbiguousWriteFailure(code)) {
-                    return ExecutionResult.ambiguous(
-                            code,
-                            "Write outcome is unknown after " + code + "; request was not replayed",
-                            lastNodeAddress);
                 }
 
                 if (!retryPolicy.isRetryable(code) && code != Status.Code.FAILED_PRECONDITION) {
@@ -195,6 +206,7 @@ public class RequestExecutor {
     private <T> ExecutionResult<T> tryLeaderHint(
             Function<KVServiceGrpc.KVServiceBlockingStub, T> operation,
             StatusRuntimeException e,
+            boolean isWrite,
             boolean replaySafe,
             Context context,
             Deadline callerDeadline) {
@@ -220,6 +232,14 @@ public class RequestExecutor {
             failureTracker.clearFailure(hintedAddress);
             return ExecutionResult.success(response, hintedAddress);
         } catch (StatusRuntimeException hintedEx) {
+            Status.Code code = hintedEx.getStatus().getCode();
+            failureTracker.recordFailure(hintedAddress);
+            if (isWrite && !replaySafe && isAmbiguousWriteFailure(hintedEx)) {
+                return ExecutionResult.ambiguous(
+                        code,
+                        "Write outcome is unknown after leader-hint retry " + code + "; request was not replayed",
+                        hintedAddress);
+            }
             ExecutionResult<T> stoppedAfterCall = stoppedResult(context, callerDeadline, hintedAddress);
             if (stoppedAfterCall != null) {
                 return stoppedAfterCall;
@@ -229,18 +249,7 @@ public class RequestExecutor {
                     "Leader-hint retry failed (node={}): {}",
                     hintedAddress,
                     hintedEx.getStatus().getDescription());
-            failureTracker.recordFailure(hintedAddress);
-            Status.Code code = hintedEx.getStatus().getCode();
-            if (!replaySafe && isAmbiguousWriteFailure(code)) {
-                return ExecutionResult.ambiguous(
-                        code,
-                        "Write outcome is unknown after leader-hint retry " + code + "; request was not replayed",
-                        hintedAddress);
-            }
-            if (!retryPolicy.isRetryable(code) && code != Status.Code.FAILED_PRECONDITION) {
-                return ExecutionResult.failure(code, hintedEx.getStatus().getDescription(), hintedAddress);
-            }
-            return null;
+            return ExecutionResult.failure(code, hintedEx.getStatus().getDescription(), hintedAddress);
         }
     }
 
@@ -287,7 +296,22 @@ public class RequestExecutor {
         return null;
     }
 
-    private boolean isAmbiguousWriteFailure(Status.Code code) {
+    private boolean isAmbiguousWriteFailure(StatusRuntimeException failure) {
+        Status.Code code = failure.getStatus().getCode();
+        if (code == Status.Code.UNAVAILABLE) {
+            if (failure.getTrailers() != null
+                    && GlobalExceptionInterceptor.WRITE_NOT_APPLIED.equals(
+                            failure.getTrailers().get(GlobalExceptionInterceptor.WRITE_OUTCOME_KEY))) {
+                return false;
+            }
+            // gRPC preserves local connection-establishment causes. A refused connection cannot
+            // have sent this RPC; generic I/O errors or connection resets give no such guarantee.
+            for (Throwable cause = failure.getStatus().getCause(); cause != null; cause = cause.getCause()) {
+                if (cause instanceof ConnectException) {
+                    return false;
+                }
+            }
+        }
         return retryPolicy.isRetryable(code)
                 || code == Status.Code.CANCELLED
                 || code == Status.Code.UNKNOWN

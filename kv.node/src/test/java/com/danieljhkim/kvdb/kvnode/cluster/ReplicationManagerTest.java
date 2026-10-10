@@ -9,6 +9,8 @@ import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
 import com.danieljhkim.kvdb.kvcommon.config.AppConfig;
 import com.danieljhkim.kvdb.kvcommon.exception.NodeUnavailableException;
 import com.danieljhkim.kvdb.kvcommon.exception.RequestIdConflictException;
+import com.danieljhkim.kvdb.kvcommon.grpc.GrpcIdentity;
+import com.danieljhkim.kvdb.kvcommon.grpc.GrpcPeerIdentity;
 import com.danieljhkim.kvdb.kvcommon.limits.KvRequestLimits;
 import com.danieljhkim.kvdb.kvnode.client.ReplicaWriteClient;
 import com.danieljhkim.kvdb.kvnode.service.KVServiceImpl;
@@ -29,6 +31,7 @@ import com.kvdb.proto.kvstore.ReplicatedMutation;
 import com.kvdb.proto.kvstore.ReplicationAck;
 import com.kvdb.proto.kvstore.ReplicationPhase;
 import com.kvdb.proto.kvstore.WriteDurability;
+import io.grpc.Context;
 import io.grpc.stub.StreamObserver;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -40,6 +43,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiConsumer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -604,6 +608,85 @@ class ReplicationManagerTest {
         promotedStore.shutdown();
     }
 
+    @Test
+    void supersededLeaderIsFencedAfterSameEpochHandoffWhileNewLeaderRepairsItsHistory() {
+        ShardRecord original = ShardRecord.newBuilder()
+                .setShardId("shard-0")
+                .setEpoch(3)
+                .setLeader("node-1")
+                .addReplicas("node-1")
+                .addReplicas("node-2")
+                .addReplicas("node-3")
+                .build();
+        // The coordinator moves leadership without changing the replica set, so the epoch stays the same.
+        ShardRecord handedOff = original.toBuilder().setLeader("node-2").build();
+        ShardMapCache node1Cache = cache(original);
+        ShardMapCache node2Cache = cache(original);
+        ShardMapCache node3Cache = cache(original);
+        ShardStoreRegistry node1 = registry("handoff-node-1");
+        ShardStoreRegistry node2 = registry("handoff-node-2");
+        ShardStoreRegistry node3 = registry("handoff-node-3");
+        AppConfig.LimitsConfig limits = new AppConfig.LimitsConfig();
+        Map<String, KVServiceImpl> peers = Map.of(
+                "node-1:9000", new KVServiceImpl("node-1", node1Cache, node1, null, Duration.ofMillis(500), limits),
+                "node-2:9000", new KVServiceImpl("node-2", node2Cache, node2, null, Duration.ofMillis(500), limits),
+                "node-3:9000", new KVServiceImpl("node-3", node3Cache, node3, null, Duration.ofMillis(500), limits));
+        PeerServiceReplicaClient fromNode1 = new PeerServiceReplicaClient("node-1", peers);
+        manager = new ReplicationManager("node-1", node1Cache, node1, fromNode1, Duration.ofMillis(500));
+        ReplicationManager newLeader = null;
+        try {
+            fromNode1.partitioned.add("node-3:9000");
+            manager.replicateSet(
+                    "shard-0", original, "history", "before-handoff", "request-before", WriteDurability.QUORUM_SYNC);
+            assertEquals("(nil)", node3.getOrCreate("shard-0").get("history"));
+
+            node2Cache.refreshFromFullState(clusterState(handedOff, 2));
+            node3Cache.refreshFromFullState(clusterState(handedOff, 2));
+            fromNode1.partitioned.clear();
+
+            // node-1 still holds the stale map and believes it leads; followers with current metadata refuse it.
+            assertThrows(
+                    NodeUnavailableException.class,
+                    () -> manager.replicateSet(
+                            "shard-0",
+                            original,
+                            "fenced",
+                            "former-leader-value",
+                            "request-fenced",
+                            WriteDurability.QUORUM_SYNC));
+            for (ShardStoreRegistry follower : List.of(node2, node3)) {
+                ShardKVStore store = follower.getOrCreate("shard-0");
+                assertEquals("(nil)", store.get("fenced"));
+                assertFalse(store.isCommitted("request-fenced"));
+                assertTrue(store.committedMutations().stream()
+                        .noneMatch(mutation -> mutation.getRequestId().equals("request-fenced")));
+            }
+
+            PeerServiceReplicaClient fromNode2 = new PeerServiceReplicaClient("node-2", peers);
+            newLeader = new ReplicationManager("node-2", node2Cache, node2, fromNode2, Duration.ofMillis(500));
+            newLeader.ensureLeaderReconciled("shard-0", handedOff);
+            newLeader.repairReplicas("shard-0", handedOff);
+            // Committed history staged by the former leader still reaches the lagging replica through the new leader.
+            ShardKVStore repaired = node3.getOrCreate("shard-0");
+            assertEquals("before-handoff", repaired.get("history"));
+            assertEquals("node-1", repaired.committedMutations().getFirst().getOriginNodeId());
+
+            ReplicationManager.MutationResult accepted = newLeader.replicateSet(
+                    "shard-0", handedOff, "fresh", "new-leader-value", "request-after", WriteDurability.QUORUM_SYNC);
+            assertEquals(2, accepted.durableAcks());
+            assertEquals("new-leader-value", node2.getOrCreate("shard-0").get("fresh"));
+            assertEquals("new-leader-value", repaired.get("fresh"));
+        } finally {
+            if (newLeader != null) {
+                newLeader.close();
+            }
+            peers.values().forEach(KVServiceImpl::shutdownReplication);
+            node1.shutdown();
+            node2.shutdown();
+            node3.shutdown();
+        }
+    }
+
     private Fixture fixture() {
         ShardRecord shard = ShardRecord.newBuilder()
                 .setShardId("shard-0")
@@ -671,15 +754,26 @@ class ReplicationManagerTest {
 
     private static ShardMapCache cache(ShardRecord shard) {
         ShardMapCache cache = new ShardMapCache();
-        cache.refreshFromFullState(ClusterState.newBuilder()
-                .setMapVersion(1)
+        cache.refreshFromFullState(clusterState(shard, 1));
+        return cache;
+    }
+
+    private static ClusterState clusterState(ShardRecord shard, long mapVersion) {
+        return ClusterState.newBuilder()
+                .setMapVersion(mapVersion)
                 .setPartitioning(PartitioningConfig.newBuilder().setNumShards(1).setReplicationFactor(3))
                 .putNodes("node-1", node("node-1", "node-1:9000"))
                 .putNodes("node-2", node("node-2", "node-2:9000"))
                 .putNodes("node-3", node("node-3", "node-3:9000"))
                 .putShards("shard-0", shard)
-                .build());
-        return cache;
+                .build();
+    }
+
+    /** Runs an RPC handler as the interceptor would after verifying a storage-node certificate. */
+    private static void asPeer(String nodeId, Runnable rpc) {
+        Context.current()
+                .withValue(GrpcPeerIdentity.CURRENT, new GrpcIdentity(GrpcIdentity.Role.STORAGE_NODE, "", nodeId))
+                .run(rpc);
     }
 
     private ShardStoreRegistry registry(String name) {
@@ -881,7 +975,7 @@ class ReplicationManagerTest {
         public ReplicaRepairResponse repairReplica(String targetAddress, ReplicaRepairRequest request) {
             repairRequests.add(request);
             CapturingObserver<ReplicaRepairResponse> observer = new CapturingObserver<>();
-            receiver.repairReplica(request, observer);
+            asPeer("node-1", () -> receiver.repairReplica(request, observer));
             return observer.value;
         }
 
@@ -891,6 +985,43 @@ class ReplicationManagerTest {
                     .setSuccess(true)
                     .setDurable(true)
                     .build();
+        }
+    }
+
+    /** Delivers every replication RPC to a real receiver service under the sender's verified node identity. */
+    private static final class PeerServiceReplicaClient extends ReplicaWriteClient {
+        private final String sender;
+        private final Map<String, KVServiceImpl> peers;
+        private final Set<String> partitioned = ConcurrentHashMap.newKeySet();
+
+        private PeerServiceReplicaClient(String sender, Map<String, KVServiceImpl> peers) {
+            super(Duration.ofMillis(20));
+            this.sender = sender;
+            this.peers = peers;
+        }
+
+        @Override
+        public ReplicationAck replicateMutation(String targetAddress, ReplicateMutationRequest request) {
+            return call(targetAddress, (peer, observer) -> peer.replicateMutation(request, observer));
+        }
+
+        @Override
+        public ReplicaRepairResponse repairReplica(String targetAddress, ReplicaRepairRequest request) {
+            return call(targetAddress, (peer, observer) -> peer.repairReplica(request, observer));
+        }
+
+        @Override
+        public ReplicaStateResponse fetchReplicaState(String targetAddress, ReplicaStateRequest request) {
+            return call(targetAddress, (peer, observer) -> peer.fetchReplicaState(request, observer));
+        }
+
+        private <T> T call(String targetAddress, BiConsumer<KVServiceImpl, StreamObserver<T>> rpc) {
+            if (partitioned.contains(targetAddress)) {
+                throw new IllegalStateException("partitioned");
+            }
+            CapturingObserver<T> observer = new CapturingObserver<>();
+            asPeer(sender, () -> rpc.accept(peers.get(targetAddress), observer));
+            return observer.value;
         }
     }
 

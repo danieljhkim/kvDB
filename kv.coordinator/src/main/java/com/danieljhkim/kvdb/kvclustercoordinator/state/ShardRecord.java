@@ -54,6 +54,10 @@ public record ShardRecord(
 
     /**
      * Returns a new ShardRecord with updated leader hint. Only valid if the provided epoch matches the current epoch.
+     *
+     * <p>
+     * The epoch is unchanged because the replica set is unchanged. Replicas fence a superseded leader by matching the
+     * sender's verified node identity to this leader, not by epoch.
      */
     public ShardRecord withLeader(long expectedEpoch, String newLeader) {
         if (this.epoch != expectedEpoch) {

@@ -22,7 +22,7 @@ public class KVGrpcServer implements BaseServer {
     private final int port;
     private final Server server;
     private final List<BindableService> services = new ArrayList<>();
-    private boolean running = false;
+    private volatile boolean running = false;
 
     private KVGrpcServer(Builder builder) {
         this.port = builder.port;
@@ -36,13 +36,18 @@ public class KVGrpcServer implements BaseServer {
 
     public void start() throws Exception {
         server.start();
-        System.out.println("gRPC KV server started on port " + port);
-        server.awaitTermination();
         running = true;
+        System.out.println("gRPC KV server started on port " + port);
+        try {
+            server.awaitTermination();
+        } finally {
+            running = false;
+        }
     }
 
     public void shutdown() {
         System.out.println("Shutting down gRPC KV server...");
+        running = false;
         try {
             server.shutdown().awaitTermination(5, TimeUnit.SECONDS);
             System.out.println("gRPC KV server shut down successfully.");

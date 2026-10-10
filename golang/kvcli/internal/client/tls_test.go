@@ -2,15 +2,24 @@ package client_test
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+	grpccodes "google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	grpcstatus "google.golang.org/grpc/status"
+
 	"github.com/danieljhkim/kv/internal/client"
 	"github.com/danieljhkim/kv/internal/config"
+	gateway "github.com/danieljhkim/kv/internal/gen/kvdb/gateway"
 	"github.com/danieljhkim/kv/internal/testfixture"
 )
 
@@ -92,7 +101,51 @@ func TestServerNameMismatchIsRejected(t *testing.T) {
 	}
 }
 
+// rawGatewayClient dials the gateway over TLS with the CA and server name
+// trusted but no client certificate. client.Dial always loads a client
+// identity, so the gRPC client is built directly.
+func rawGatewayClient(t *testing.T, pki *testfixture.PKI, address string) gateway.KvGatewayClient {
+	t.Helper()
+	caPEM, err := os.ReadFile(pki.CABundlePath)
+	if err != nil {
+		t.Fatalf("cannot read CA bundle: %v", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		t.Fatal("CA bundle contains no certificates")
+	}
+	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
+		MinVersion: tls.VersionTLS12,
+		RootCAs:    pool,
+		ServerName: "localhost",
+	})))
+	if err != nil {
+		t.Fatalf("cannot create gateway client: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return gateway.NewKvGatewayClient(conn)
+}
+
 func TestMissingClientIdentityIsRejectedByTheGateway(t *testing.T) {
+	pki := testfixture.NewPKI(t)
+	server := testfixture.Start(t, testfixture.Hooks{}, pki.ServerCredentials())
+
+	api := rawGatewayClient(t, pki, server.Address())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := api.Get(ctx, &gateway.GetRequest{Key: []byte("k")})
+	if err == nil {
+		t.Fatal("a TLS client without a certificate must not reach a gateway that requires one")
+	}
+	// The handshake is rejected at the transport, so the failure must be a
+	// transport-class UNAVAILABLE, not an application status such as NOT_FOUND.
+	if code := grpcstatus.Code(err); code != grpccodes.Unavailable {
+		t.Fatalf("expected transport rejection as UNAVAILABLE, got %s: %v", code, err)
+	}
+}
+
+func TestPlaintextClientIsRejectedByTheTLSGateway(t *testing.T) {
 	pki := testfixture.NewPKI(t)
 	server := testfixture.Start(t, testfixture.Hooks{}, pki.ServerCredentials())
 

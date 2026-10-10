@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
 import com.danieljhkim.kvdb.kvcommon.config.AppConfig;
 import com.danieljhkim.kvdb.kvcommon.exception.NodeUnavailableException;
+import com.danieljhkim.kvdb.kvcommon.exception.RequestIdConflictException;
 import com.danieljhkim.kvdb.kvcommon.limits.KvRequestLimits;
 import com.danieljhkim.kvdb.kvnode.client.ReplicaWriteClient;
 import com.danieljhkim.kvdb.kvnode.service.KVServiceImpl;
@@ -328,6 +329,85 @@ class ReplicationManagerTest {
 
         fixture.leader.shutdown();
         fixture.followers.values().forEach(ShardKVStore::shutdown);
+    }
+
+    @Test
+    void identicalRetriesAfterLeaderChangeReturnOriginalVersionsAcrossReconciliationAndRestart() {
+        Fixture fixture = fixture();
+        manager.close();
+        // A generous phase window keeps the setup writes off the cold-JVM timing path; partitioned peers fail fast.
+        manager = new ReplicationManager(
+                "node-1", cache(fixture.shard), fixture.leader, fixture.client, Duration.ofSeconds(5));
+        fixture.client.partitioned.add("node-3:9000");
+        ReplicationManager.MutationResult put = manager.replicateSet(
+                "shard-0", fixture.shard, "key", "value", "retry-put", WriteDurability.QUORUM_SYNC);
+        manager.replicateSet("shard-0", fixture.shard, "gone", "seed", "retry-seed", WriteDurability.QUORUM_SYNC);
+        ReplicationManager.MutationResult delete =
+                manager.replicateDelete("shard-0", fixture.shard, "gone", "retry-delete", WriteDurability.QUORUM_SYNC);
+        manager.close();
+
+        ShardKVStore oldLeader = fixture.leader.getOrCreate("shard-0");
+        ShardKVStore peer = fixture.followers.get("node-2:9000");
+        ShardKVStore promotedStore = fixture.followers.get("node-3:9000");
+        assertEquals(0, promotedStore.committedVersion());
+        ShardRecord promotedShard = promotedShard();
+        FakeReplicaClient promotedClient = new FakeReplicaClient(Map.of("node-1:9000", oldLeader, "node-2:9000", peer));
+        manager = new ReplicationManager(
+                "node-3",
+                cache(promotedShard),
+                new FixedRegistry(tempDir.resolve("retry-promoted-registry"), promotedStore),
+                promotedClient,
+                Duration.ofSeconds(5));
+
+        assertIdenticalRetriesReturnOriginals(promotedShard, put, delete, promotedStore, oldLeader, peer);
+
+        manager.close();
+        manager = null;
+        promotedStore.shutdown();
+        ShardKVStore restarted = newStore("follower-3");
+        manager = new ReplicationManager(
+                "node-3",
+                cache(promotedShard),
+                new FixedRegistry(tempDir.resolve("retry-restarted-registry"), restarted),
+                promotedClient,
+                Duration.ofSeconds(5));
+
+        assertIdenticalRetriesReturnOriginals(promotedShard, put, delete, restarted, oldLeader, peer);
+
+        restarted.shutdown();
+        oldLeader.shutdown();
+        peer.shutdown();
+    }
+
+    private void assertIdenticalRetriesReturnOriginals(
+            ShardRecord promotedShard,
+            ReplicationManager.MutationResult put,
+            ReplicationManager.MutationResult delete,
+            ShardKVStore promotedStore,
+            ShardKVStore oldLeader,
+            ShardKVStore peer) {
+        ReplicationManager.MutationResult replayedPut = manager.replicateSet(
+                "shard-0", promotedShard, "key", "value", "retry-put", WriteDurability.QUORUM_SYNC);
+        ReplicationManager.MutationResult replayedDelete =
+                manager.replicateDelete("shard-0", promotedShard, "gone", "retry-delete", WriteDurability.QUORUM_SYNC);
+
+        assertEquals(put.version(), replayedPut.version());
+        assertEquals(delete.version(), replayedDelete.version());
+        assertThrows(
+                RequestIdConflictException.class,
+                () -> manager.replicateSet(
+                        "shard-0", promotedShard, "key", "different", "retry-put", WriteDurability.QUORUM_SYNC));
+        assertThrows(
+                RequestIdConflictException.class,
+                () -> manager.replicateDelete(
+                        "shard-0", promotedShard, "key", "retry-delete", WriteDurability.QUORUM_SYNC));
+        for (ShardKVStore store : List.of(promotedStore, oldLeader, peer)) {
+            assertEquals(delete.version(), store.committedVersion());
+            assertEquals("value", store.get("key"));
+            assertEquals(put.version(), store.read("key").version());
+            assertEquals("(nil)", store.get("gone"));
+            assertEquals(delete.version(), store.read("gone").version());
+        }
     }
 
     @Test

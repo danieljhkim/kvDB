@@ -4,6 +4,7 @@ import com.danieljhkim.kvdb.kvclient.utils.Constants;
 import java.io.*;
 import java.net.ConnectException;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.util.Objects;
 import java.util.Scanner;
 
@@ -116,32 +117,34 @@ public class CLIClient {
         writer.flush();
 
         StringBuilder response = new StringBuilder();
-        String line;
         socket.setSoTimeout(3000);
         try {
-            while ((line = reader.readLine()) != null) {
-                if (line.equals(Constants.END_MARKER)) {
-                    break;
-                }
+            String line = readResponseLine();
+            while (line != null && !line.equals(Constants.END_MARKER)) {
                 if (!response.isEmpty()) {
                     response.append("\n");
                 }
                 response.append(line);
-                if (!reader.ready()) {
-                    break;
-                }
+                line = readResponseLine();
             }
+            if (line == null) {
+                throw new EOFException("Connection closed before " + Constants.END_MARKER);
+            }
+        } catch (SocketTimeoutException e) {
+            // Any late bytes of this response would be read as the reply to the next command.
+            disconnect();
+            throw new SocketTimeoutException("Server response timed out before " + Constants.END_MARKER);
         } catch (IOException e) {
-            if (e.getMessage().contains("Read timed out")) {
-                System.err.println("Server response timed out.");
-            } else {
-                throw e;
-            }
-        } finally {
-            socket.setSoTimeout(0);
+            disconnect();
+            throw e;
         }
+        socket.setSoTimeout(0);
 
         return response.toString();
+    }
+
+    String readResponseLine() throws IOException {
+        return reader.readLine();
     }
 
     public boolean isConnected() {

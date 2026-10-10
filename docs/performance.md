@@ -74,3 +74,22 @@ This document summarizes local performance benchmarks for kvDB using `ghz` again
 - See `benchmark/scripts/` for reproducible benchmark commands.
 
 _Last updated: 2025-12-28_
+
+---
+
+## BatchGet fixed-fixture baseline
+
+`KvGatewayContractTest.fixedMultiShardBaselineShowsOneClientRpcWithEqualBackendReadsAndBoundedFanout`
+is a reproducible comparison using eight one-byte keys spread across four
+shards, a deterministic 15 ms storage-call fixture, and BatchGet concurrency of
+four. One run on 2026-09-04 produced:
+
+| Path | Client RPCs | Elapsed | Backend reads | Max active reads |
+|---|---:|---:|---:|---:|
+| 8 sequential unary `Get`s | 8 | 152 ms | 8 | 1 |
+| 1 `BatchGet` | 1 | 45 ms | 8 | 4 |
+
+This controlled baseline demonstrates the saved client round trips and bounded
+fanout. It does **not** show fewer backend reads: both paths issued eight. The
+elapsed values are test-fixture observations, not production latency claims;
+rerun the named test on the target hardware for a local baseline.

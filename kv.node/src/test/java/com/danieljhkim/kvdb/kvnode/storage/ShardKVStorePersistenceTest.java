@@ -9,9 +9,14 @@ import com.danieljhkim.kvdb.kvcommon.persistence.WALManager;
 import com.danieljhkim.kvdb.kvnode.persistence.FilePersistenceManager;
 import com.danieljhkim.kvdb.kvnode.persistence.PersistenceManager;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.kvdb.proto.kvstore.MutationKind;
+import com.kvdb.proto.kvstore.ReplicatedMutation;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.channels.FileChannel;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -89,6 +94,62 @@ class ShardKVStorePersistenceTest {
 
         ShardKVStore recovered = newStore("after-rotation");
         assertEquals("kept", recovered.get("snapshotted"));
+    }
+
+    @Test
+    void tornPrimaryWalIsRepairedBeforeAWriteThatSurvivesRestart() throws IOException {
+        Path walPath = tempDir.resolve("torn-primary.wal");
+        WALManager wal = new WALManager(walPath.toString());
+        wal.log("SET", "first", "kept");
+        long prefixSize = Files.size(walPath);
+        wal.log("SET", "torn", "discarded");
+        wal.close();
+        try (var channel = FileChannel.open(walPath, StandardOpenOption.WRITE)) {
+            channel.truncate(Files.size(walPath) - 2);
+        }
+
+        ShardKVStore recovered = newStore("torn-primary");
+        assertEquals(prefixSize, Files.size(walPath));
+        assertEquals("kept", recovered.get("first"));
+        assertEquals("(nil)", recovered.get("torn"));
+        assertTrue(recovered.set("acknowledged", "survives"));
+
+        // Reopen before snapshot/rotation so only the WAL can provide the acknowledged write.
+        ShardKVStore reopened = newStore("torn-primary");
+        assertEquals(Map.of("first", "kept", "acknowledged", "survives"), reopened.snapshot());
+        recovered.shutdown();
+        reopened.shutdown();
+    }
+
+    @Test
+    void tornReplicationWalIsRepairedAcrossSnapshotsAndFurtherCommits() throws IOException {
+        Path replicationWal = tempDir.resolve("torn-replication.wal.replication");
+        ShardKVStore store = newStore("torn-replication");
+        ReplicatedMutation first = store.prepareNewMutation("first", 1, MutationKind.SET, "first", "kept", "leader");
+        assertTrue(store.commitMutation(first).success());
+        long prefixSize = Files.size(replicationWal);
+        store.prepareNewMutation("torn", 1, MutationKind.SET, "torn", "discarded", "leader");
+        store.shutdown();
+        try (var channel = FileChannel.open(replicationWal, StandardOpenOption.WRITE)) {
+            channel.truncate(Files.size(replicationWal) - 2);
+        }
+
+        ShardKVStore recovered = newStore("torn-replication");
+        assertEquals(prefixSize, Files.size(replicationWal));
+        assertEquals("kept", recovered.get("first"));
+        assertEquals("(nil)", recovered.get("torn"));
+        ReplicatedMutation appended =
+                recovered.prepareNewMutation("acknowledged", 1, MutationKind.SET, "acknowledged", "survives", "leader");
+        assertEquals(2, appended.getVersion());
+        assertTrue(recovered.commitMutation(appended).success());
+        recovered.shutdown();
+
+        ShardKVStore reopened = newStore("torn-replication");
+        assertEquals(Map.of("first", "kept", "acknowledged", "survives"), reopened.snapshot());
+        assertEquals(2, reopened.committedVersion());
+        assertEquals("already committed", reopened.commitMutation(first).message());
+        assertEquals("already committed", reopened.commitMutation(appended).message());
+        reopened.shutdown();
     }
 
     @Test

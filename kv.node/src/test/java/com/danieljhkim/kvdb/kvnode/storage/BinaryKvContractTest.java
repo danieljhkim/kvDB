@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
+import com.danieljhkim.kvdb.kvcommon.exception.RequestIdConflictException;
 import com.danieljhkim.kvdb.kvnode.cluster.ReplicationManager;
 import com.danieljhkim.kvdb.proto.coordinator.ClusterState;
 import com.danieljhkim.kvdb.proto.coordinator.PartitioningConfig;
@@ -17,6 +18,7 @@ import com.kvdb.proto.kvstore.ReplicatedMutation;
 import com.kvdb.proto.kvstore.WriteDurability;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.List;
 import java.util.OptionalLong;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -169,6 +171,216 @@ class BinaryKvContractTest {
         assertFalse(store.read(key).found());
         store.shutdown();
     }
+
+    @Test
+    void identicalCommittedReplayAfterHigherEpochReturnsOriginalVersionAcrossRestart() {
+        ByteString key = ByteString.copyFromUtf8("epoch-key");
+        ByteString value = ByteString.copyFromUtf8("epoch-value");
+        ByteString deletedKey = ByteString.copyFromUtf8("epoch-deleted");
+        long now = System.currentTimeMillis();
+        ShardKVStore store = newStore("epoch-retry");
+
+        ReplicatedMutation put = store.prepareNewMutation(
+                "epoch-put", 1, MutationKind.SET, key, value, "old-leader", 60_000, OptionalLong.empty(), true, now);
+        assertTrue(store.commitMutation(put).success());
+        ReplicatedMutation seed = store.prepareNewMutation(
+                "epoch-seed",
+                1,
+                MutationKind.SET,
+                deletedKey,
+                value,
+                "old-leader",
+                0,
+                OptionalLong.empty(),
+                false,
+                now);
+        assertTrue(store.commitMutation(seed).success());
+        ReplicatedMutation delete = store.prepareNewMutation(
+                "epoch-delete",
+                1,
+                MutationKind.DELETE,
+                deletedKey,
+                ByteString.EMPTY,
+                "old-leader",
+                0,
+                OptionalLong.of(seed.getVersion()),
+                false,
+                now);
+        assertTrue(store.commitMutation(delete).success());
+        // A replica-set change advances the shard epoch before the client retries.
+        ReplicatedMutation newerEpoch = store.prepareNewMutation(
+                "epoch-2-write",
+                2,
+                MutationKind.SET,
+                ByteString.copyFromUtf8("other"),
+                value,
+                "new-leader",
+                0,
+                OptionalLong.empty(),
+                false,
+                now + 1);
+        assertTrue(store.commitMutation(newerEpoch).success());
+        assertEquals(2, store.shardEpoch());
+        assertEquals(4, store.committedVersion());
+
+        assertIdenticalReplaysReturnOriginals(store, put, delete, now + 5);
+        assertConflictingReplaysAreRejected(store, now + 5);
+        store.shutdown();
+
+        ShardKVStore restarted = newStore("epoch-retry");
+        assertIdenticalReplaysReturnOriginals(restarted, put, delete, now + 10);
+        assertConflictingReplaysAreRejected(restarted, now + 10);
+        assertEquals(4, restarted.committedVersion());
+        assertRead(restarted, key, value, put.getVersion());
+        assertFalse(restarted.read(deletedKey).found());
+        assertEquals(delete.getVersion(), restarted.read(deletedKey).version());
+        restarted.shutdown();
+    }
+
+    @Test
+    void crossEpochReplayOfAnUncommittedPrepareStaysFenced() {
+        ByteString key = ByteString.copyFromUtf8("orphan");
+        ByteString value = ByteString.copyFromUtf8("hidden");
+        long now = System.currentTimeMillis();
+        ShardKVStore store = newStore("epoch-orphan");
+
+        ReplicatedMutation orphan = store.prepareNewMutation(
+                "epoch-orphan", 1, MutationKind.SET, key, value, "old-leader", 0, OptionalLong.empty(), false, now);
+        ReplicatedMutation successor = store.prepareNewMutation(
+                "epoch-successor",
+                2,
+                MutationKind.SET,
+                ByteString.copyFromUtf8("successor"),
+                value,
+                "new-leader",
+                0,
+                OptionalLong.empty(),
+                false,
+                now);
+        assertTrue(store.commitMutation(successor).success());
+
+        // The replay keeps the old mutation's identity, so the newer commit still fences it.
+        assertThrows(
+                IllegalStateException.class,
+                () -> store.prepareNewMutation(
+                        "epoch-orphan",
+                        3,
+                        MutationKind.SET,
+                        key,
+                        value,
+                        "newest-leader",
+                        0,
+                        OptionalLong.empty(),
+                        false,
+                        now + 1));
+        assertFalse(store.commitMutation(orphan).success());
+        assertFalse(store.isCommitted("epoch-orphan"));
+        assertFalse(store.read(key).found());
+        assertFalse(store.prepareMutation(orphan.toBuilder()
+                        .setRequestId("epoch-stale")
+                        .setVersion(successor.getVersion() + 1)
+                        .build())
+                .success());
+        assertEquals(successor.getVersion(), store.committedVersion());
+        store.shutdown();
+    }
+
+    private static void assertIdenticalReplaysReturnOriginals(
+            ShardKVStore store, ReplicatedMutation put, ReplicatedMutation delete, long nowMs) {
+        long committedVersion = store.committedVersion();
+        ReplicatedMutation replayedPut = store.prepareNewMutation(
+                "epoch-put",
+                3,
+                MutationKind.SET,
+                put.getKey(),
+                put.getValue(),
+                "newest-leader",
+                put.getTtlMs(),
+                OptionalLong.empty(),
+                true,
+                nowMs);
+        ReplicatedMutation replayedDelete = store.prepareNewMutation(
+                "epoch-delete",
+                3,
+                MutationKind.DELETE,
+                delete.getKey(),
+                ByteString.EMPTY,
+                "newest-leader",
+                0,
+                OptionalLong.of(delete.getIfVersionEquals()),
+                false,
+                nowMs);
+
+        assertEquals(put, replayedPut);
+        assertEquals(delete, replayedDelete);
+        assertTrue(store.isCommitted("epoch-put"));
+        assertTrue(store.isCommitted("epoch-delete"));
+        assertEquals("already committed", store.commitMutation(replayedPut).message());
+        assertEquals("already committed", store.commitMutation(replayedDelete).message());
+        assertEquals(committedVersion, store.committedVersion());
+        assertRead(store, put.getKey(), put.getValue(), put.getVersion());
+        assertFalse(store.read(delete.getKey()).found());
+        // A stale or rewritten copy of the committed mutation is still fenced as a different mutation.
+        assertFalse(store.prepareMutation(put.toBuilder().setEpoch(3).build()).success());
+        assertFalse(store.repairMutation(put.toBuilder().setEpoch(3).build()).success());
+    }
+
+    private static void assertConflictingReplaysAreRejected(ShardKVStore store, long nowMs) {
+        ByteString key = ByteString.copyFromUtf8("epoch-key");
+        ByteString value = ByteString.copyFromUtf8("epoch-value");
+        List<ConflictingReplay> conflicts = List.of(
+                new ConflictingReplay(
+                        MutationKind.SET,
+                        ByteString.copyFromUtf8("other-key"),
+                        value,
+                        60_000,
+                        OptionalLong.empty(),
+                        true),
+                new ConflictingReplay(
+                        MutationKind.SET, key, ByteString.copyFromUtf8("other"), 60_000, OptionalLong.empty(), true),
+                new ConflictingReplay(MutationKind.DELETE, key, ByteString.EMPTY, 0, OptionalLong.empty(), false),
+                new ConflictingReplay(MutationKind.SET, key, value, 1, OptionalLong.empty(), true),
+                new ConflictingReplay(MutationKind.SET, key, value, 60_000, OptionalLong.empty(), false),
+                new ConflictingReplay(MutationKind.SET, key, value, 60_000, OptionalLong.of(0), true));
+        for (ConflictingReplay conflict : conflicts) {
+            for (long epoch : new long[] {1, 3}) {
+                assertThrows(
+                        RequestIdConflictException.class,
+                        () -> store.prepareNewMutation(
+                                "epoch-put",
+                                epoch,
+                                conflict.kind(),
+                                conflict.key(),
+                                conflict.value(),
+                                "newest-leader",
+                                conflict.ttlMs(),
+                                conflict.expectedVersion(),
+                                conflict.ifNotExists(),
+                                nowMs));
+            }
+        }
+        assertThrows(
+                RequestIdConflictException.class,
+                () -> store.prepareNewMutation(
+                        "epoch-delete",
+                        3,
+                        MutationKind.DELETE,
+                        ByteString.copyFromUtf8("epoch-deleted"),
+                        ByteString.EMPTY,
+                        "newest-leader",
+                        0,
+                        OptionalLong.empty(),
+                        false,
+                        nowMs));
+    }
+
+    private record ConflictingReplay(
+            MutationKind kind,
+            ByteString key,
+            ByteString value,
+            long ttlMs,
+            OptionalLong expectedVersion,
+            boolean ifNotExists) {}
 
     @Test
     void concurrentCreateOnlyRaceHasExactlyOneWinner() throws Exception {

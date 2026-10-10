@@ -142,7 +142,9 @@ public class ShardKVStore {
 
     /**
      * Durably stages a new leader mutation without changing the visible keyspace. Reusing a request id returns the
-     * original mutation when its immutable fields match.
+     * original mutation, with its original epoch and version, when the client operation matches. The epoch only
+     * stamps newly staged mutations: a retry after a topology change is the same operation, and the original
+     * mutation stays subject to the usual stale epoch and version fencing when it is not yet committed.
      */
     public ReplicatedMutation prepareNewMutation(
             String requestId, long epoch, MutationKind kind, String key, String value, String originNodeId) {
@@ -177,7 +179,7 @@ public class ShardKVStore {
             Objects.requireNonNull(value, "value");
             ReplicatedMutation existing = mutationsByRequest.get(requestId);
             if (existing != null) {
-                if (!sameOperation(existing, epoch, kind, key, value, ttlMs, expectedVersion, ifNotExists)) {
+                if (!sameOperation(existing, kind, key, value, ttlMs, expectedVersion, ifNotExists)) {
                     throw new RequestIdConflictException(shardId);
                 }
                 if (mutationStates.get(requestId) == MutationState.ABORTED) {
@@ -934,17 +936,19 @@ public class ShardKVStore {
         return value;
     }
 
+    /**
+     * Compares only the fields a client chose. Epoch and origin node describe the topology that staged the mutation,
+     * so they are deliberately excluded.
+     */
     private static boolean sameOperation(
             ReplicatedMutation mutation,
-            long epoch,
             MutationKind kind,
             ByteString key,
             ByteString value,
             long ttlMs,
             OptionalLong expectedVersion,
             boolean ifNotExists) {
-        return mutation.getEpoch() == epoch
-                && mutation.getKind() == kind
+        return mutation.getKind() == kind
                 && mutation.getKey().equals(key)
                 && mutation.getValue().equals(value)
                 && mutation.getTtlMs() == ttlMs

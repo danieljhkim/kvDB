@@ -83,7 +83,8 @@ output.`,
 		if _, err := out.Write(result.Value); err != nil {
 			return &UsageError{Err: fmt.Errorf("cannot write value: %w", err)}
 		}
-		if !raw {
+		// An empty value has no bytes to terminate, so it writes nothing.
+		if !raw && len(result.Value) > 0 {
 			if _, err := fmt.Fprintln(out); err != nil {
 				return &UsageError{Err: fmt.Errorf("cannot write value: %w", err)}
 			}

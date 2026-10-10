@@ -9,7 +9,7 @@ evidence.
 | Surface | Supported release target |
 |---|---|
 | Java | Temurin/OpenJDK 21 |
-| Go CLI | Go 1.24.x; `go.mod` is the minimum toolchain contract |
+| Go CLI | Go 1.25.x; `go.mod` is the minimum toolchain contract |
 | Developer validation | Linux amd64/arm64 and macOS arm64 |
 | Published containers | Linux amd64 and arm64 |
 | Persistent storage | Local Linux/macOS filesystems with working file fsync, atomic rename, and directory fsync |

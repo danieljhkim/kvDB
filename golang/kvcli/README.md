@@ -43,7 +43,7 @@ The generated protocol bindings are committed under
 make proto-go            # requires protoc on PATH
 ```
 
-Prerequisites: Go 1.24 or later; `protoc` only if you regenerate bindings.
+Prerequisites: Go 1.25 or later; `protoc` only if you regenerate bindings.
 
 ---
 
@@ -180,7 +180,10 @@ Output rules:
 - `--consistency strong|eventual` selects the read consistency; the default
   leaves the server policy in place.
 - `batch-get --input <path|->` accepts one JSON array of standard-base64 key
-  strings (up to 1 MiB and 1024 keys) from a file or stdin. Its stdout is one
+  strings (up to 1 MiB) from a file or stdin. The CLI rejects more than 1024
+  keys before sending. The gateway's default `limits.maxBatchEntries` is 128,
+  so a larger batch fails with `PAYLOAD_TOO_LARGE` unless the deployment raises
+  that limit. Its stdout is one
   versioned JSON document. Each item retains `request_index` and `key_base64`,
   with an item `status`, terminal `outcome`, and metadata. A found empty value
   has `value_base64: ""`; a missing key has `status: "NOT_FOUND"` and omits

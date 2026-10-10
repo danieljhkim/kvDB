@@ -212,11 +212,17 @@ public class RequestExecutor {
             Deadline callerDeadline) {
         GrpcRoutingHints.RoutingHints hints = GrpcRoutingHints.from(e);
 
-        if (hints.leaderHint().isEmpty()) {
+        if (hints.leaderHint().isEmpty() || hints.leaderHint().get().isBlank()) {
             return null;
         }
 
         String hintedAddress = hints.leaderHint().get();
+        if (!NodeConnectionPool.isValidAddress(hintedAddress)) {
+            // Never dial a malformed hint; fall back to the original FAILED_PRECONDITION and normal retry loop.
+            logger.warn("Ignoring malformed leader hint: '{}'", hintedAddress);
+            Metrics.increment("kvdb_retries_total", "gateway", "leader_hint", "invalid");
+            return null;
+        }
         if (failureTracker.isRecentlyFailed(hintedAddress)) {
             return null;
         }

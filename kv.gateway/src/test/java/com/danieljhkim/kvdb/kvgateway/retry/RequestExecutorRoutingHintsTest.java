@@ -41,9 +41,11 @@ class RequestExecutorRoutingHintsTest {
 
     private static final class FakeNodeConnectionPool extends NodeConnectionPool {
         private final KVServiceGrpc.KVServiceBlockingStub stub = KVServiceGrpc.newBlockingStub(new NoopChannel());
+        private final List<String> dialed = new java.util.concurrent.CopyOnWriteArrayList<>();
 
         @Override
         public KVServiceGrpc.KVServiceBlockingStub getStub(String nodeAddress) {
+            dialed.add(nodeAddress);
             return stub;
         }
     }
@@ -80,6 +82,69 @@ class RequestExecutorRoutingHintsTest {
 
         assertTrue(result.isSuccess());
         assertEquals("leader:456", result.getLastNodeAddress());
+    }
+
+    @Test
+    void blankOrMalformedLeaderHintIsIgnoredWithoutDialing() {
+        for (String hint : List.of("", "   ", "leader", "leader:abc", ":123", "leader:0", "leader:70000")) {
+            FakeNodeConnectionPool pool = new FakeNodeConnectionPool();
+            RequestExecutor executor =
+                    new RequestExecutor(pool, new NodeFailureTracker(5000), retryTwice(), 5_000);
+            AtomicInteger calls = new AtomicInteger();
+
+            ExecutionResult<String> result = executor.executeWithRetry(
+                    "shard-1",
+                    true,
+                    false,
+                    stub -> {
+                        calls.incrementAndGet();
+                        Metadata trailers = new Metadata();
+                        trailers.put(GlobalExceptionInterceptor.LEADER_HINT_KEY, hint);
+                        throw Status.FAILED_PRECONDITION
+                                .withDescription("NOT_LEADER")
+                                .asRuntimeException(trailers);
+                    },
+                    () -> List.of(node("node-a", "nodeA:123")));
+
+            assertFalse(result.isSuccess(), hint);
+            assertFalse(result.isAmbiguous(), hint);
+            assertEquals(Status.Code.FAILED_PRECONDITION, result.getErrorCode(), hint);
+            assertEquals("nodeA:123", result.getLastNodeAddress(), hint);
+            assertEquals(2, calls.get(), hint);
+            assertEquals(List.of("nodeA:123", "nodeA:123"), pool.dialed, hint);
+        }
+    }
+
+    @Test
+    void blankLeaderHintDoesNotPreventRetryOnTheNextAttempt() {
+        AtomicInteger calls = new AtomicInteger();
+        ExecutionResult<String> result = executor(retryTwice())
+                .executeWithRetry(
+                        "shard-1",
+                        true,
+                        false,
+                        stub -> {
+                            if (calls.getAndIncrement() == 0) {
+                                Metadata trailers = new Metadata();
+                                trailers.put(GlobalExceptionInterceptor.LEADER_HINT_KEY, "");
+                                throw Status.FAILED_PRECONDITION.asRuntimeException(trailers);
+                            }
+                            return "ok";
+                        },
+                        () -> List.of(node("node-a", "nodeA:123")));
+        assertTrue(result.isSuccess());
+        assertEquals(2, calls.get());
+    }
+
+    @Test
+    void addressValidationAcceptsOnlyHostPort() {
+        assertTrue(NodeConnectionPool.isValidAddress("host:50051"));
+        assertFalse(NodeConnectionPool.isValidAddress(null));
+        assertFalse(NodeConnectionPool.isValidAddress(""));
+        assertFalse(NodeConnectionPool.isValidAddress("host"));
+        assertFalse(NodeConnectionPool.isValidAddress("host:"));
+        assertFalse(NodeConnectionPool.isValidAddress("host:x"));
+        assertFalse(NodeConnectionPool.isValidAddress(":50051"));
     }
 
     @Test

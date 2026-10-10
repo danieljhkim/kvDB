@@ -170,6 +170,11 @@ func TestMissingKeyAndEmptyValueAreDistinct(t *testing.T) {
 		t.Fatalf("an empty value must succeed with empty output, got %d %q", code, stdout)
 	}
 
+	stdout, _, code = run(t, withArgs(connection, "get", "empty")...)
+	if code != ExitOK || stdout != "" {
+		t.Fatalf("a non-raw read of an empty value must also write nothing, got %d %q", code, stdout)
+	}
+
 	stdout, stderr, code := run(t, withArgs(connection, "get", "absent", "--raw")...)
 	if code != ExitNotFound {
 		t.Fatalf("a missing key must exit %d, got %d", ExitNotFound, code)

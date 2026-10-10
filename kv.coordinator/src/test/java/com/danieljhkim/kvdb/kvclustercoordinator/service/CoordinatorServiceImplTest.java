@@ -3,6 +3,7 @@ package com.danieljhkim.kvdb.kvclustercoordinator.service;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -20,8 +21,15 @@ import com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine.StubRaftState
 import com.danieljhkim.kvdb.kvclustercoordinator.state.RejectedMutationException;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardRecord;
+import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
+import com.danieljhkim.kvdb.kvcommon.config.AppConfig;
+import com.danieljhkim.kvdb.kvcommon.grpc.CoordinatorClient;
+import com.danieljhkim.kvdb.kvcommon.grpc.CoordinatorClientManager;
 import com.danieljhkim.kvdb.kvcommon.grpc.GlobalExceptionInterceptor;
+import com.danieljhkim.kvdb.kvcommon.grpc.WatchShardMapClient;
+import com.danieljhkim.kvdb.proto.coordinator.ClusterState;
 import com.danieljhkim.kvdb.proto.coordinator.CoordinatorGrpc;
+import com.danieljhkim.kvdb.proto.coordinator.GetShardMapResponse;
 import com.danieljhkim.kvdb.proto.coordinator.InitShardsRequest;
 import com.danieljhkim.kvdb.proto.coordinator.InitShardsResponse;
 import com.danieljhkim.kvdb.proto.coordinator.NodeStatus;
@@ -281,6 +289,94 @@ class CoordinatorServiceImplTest {
         }
     }
 
+    @Test
+    void routingChangesReachWatchClientAndConditionalPoll() throws Exception {
+        RaftStateMachineImpl stateMachine = new RaftStateMachineImpl();
+        try (SingleNodeCoordinator coordinator = new SingleNodeCoordinator(tempDir, stateMachine, stateMachine)) {
+            CoordinatorGrpc.CoordinatorBlockingStub stub = coordinator.stub();
+            stub.registerNode(registerNode("node-1", "localhost:8001"));
+            stub.initShards(InitShardsRequest.newBuilder()
+                    .setNumShards(1)
+                    .setReplicationFactor(1)
+                    .build());
+            long bootVersion = stateMachine.getMapVersion();
+            assertEquals(2, bootVersion);
+
+            try (RoutingConsumers consumers = RoutingConsumers.start(coordinator.port())) {
+                consumers.awaitConverged("localhost:8001", NodeStatus.ALIVE, bootVersion);
+
+                stub.registerNode(registerNode("node-1", "localhost:8001"));
+                assertEquals(bootVersion, stateMachine.getMapVersion());
+                assertTrue(consumers.poll(bootVersion).getNotModified());
+                assertNull(consumers.fetch(bootVersion));
+                consumers.awaitConverged("localhost:8001", NodeStatus.ALIVE, bootVersion);
+
+                stub.registerNode(registerNode("node-1", "localhost:8002"));
+                assertEquals(bootVersion + 1, stateMachine.getMapVersion());
+                assertPublished(consumers, bootVersion, "localhost:8002", NodeStatus.ALIVE);
+
+                stub.setNodeStatus(setNodeStatus("node-1", NodeStatus.SUSPECT));
+                assertEquals(bootVersion + 2, stateMachine.getMapVersion());
+                assertPublished(consumers, bootVersion + 1, "localhost:8002", NodeStatus.SUSPECT);
+
+                stub.setNodeStatus(setNodeStatus("node-1", NodeStatus.SUSPECT));
+                assertEquals(bootVersion + 2, stateMachine.getMapVersion());
+                assertTrue(consumers.poll(bootVersion + 2).getNotModified());
+
+                stub.setNodeStatus(setNodeStatus("node-1", NodeStatus.DEAD));
+                assertEquals(bootVersion + 3, stateMachine.getMapVersion());
+                assertPublished(consumers, bootVersion + 2, "localhost:8002", NodeStatus.DEAD);
+
+                stub.setNodeStatus(setNodeStatus("node-1", NodeStatus.ALIVE));
+                assertEquals(bootVersion + 4, stateMachine.getMapVersion());
+                assertPublished(consumers, bootVersion + 3, "localhost:8002", NodeStatus.ALIVE);
+
+                stub.setNodeStatus(setNodeStatus("node-1", NodeStatus.DEAD));
+                long deadVersion = stateMachine.getMapVersion();
+                assertEquals(bootVersion + 5, deadVersion);
+                consumers.awaitConverged("localhost:8002", NodeStatus.DEAD, deadVersion);
+
+                stub.registerNode(registerNode("node-1", "localhost:8002"));
+                assertEquals(deadVersion + 1, stateMachine.getMapVersion());
+                assertPublished(consumers, deadVersion, "localhost:8002", NodeStatus.ALIVE);
+
+                long settled = stateMachine.getMapVersion();
+                stub.registerNode(registerNode("node-1", "localhost:8002"));
+                assertEquals(settled, stateMachine.getMapVersion());
+                assertTrue(consumers.poll(settled).getNotModified());
+                assertNull(consumers.fetch(settled));
+                consumers.awaitConverged("localhost:8002", NodeStatus.ALIVE, settled);
+            }
+        }
+    }
+
+    private static void assertPublished(
+            RoutingConsumers consumers, long previousVersion, String address, NodeStatus status) throws Exception {
+        GetShardMapResponse response = consumers.poll(previousVersion);
+        assertFalse(response.getNotModified());
+        com.danieljhkim.kvdb.proto.coordinator.NodeRecord polled =
+                response.getState().getNodesMap().get("node-1");
+        assertEquals(address, polled.getAddress());
+        assertEquals(status, polled.getStatus());
+        assertEquals(previousVersion + 1, response.getState().getMapVersion());
+
+        ClusterState fetched = consumers.fetch(previousVersion);
+        assertNotNull(fetched);
+        assertTrue(consumers.pollCache().refreshFromFullState(fetched));
+        assertEquals(address, consumers.pollCache().getNodeAddress("node-1").orElseThrow());
+        assertEquals(status, consumers.pollCache().getLeaderNode("shard-0").getStatus());
+        assertEquals(previousVersion + 1, consumers.pollCache().getMapVersion());
+
+        consumers.awaitConverged(address, status, previousVersion + 1);
+    }
+
+    private static SetNodeStatusRequest setNodeStatus(String nodeId, NodeStatus status) {
+        return SetNodeStatusRequest.newBuilder()
+                .setNodeId(nodeId)
+                .setStatus(status)
+                .build();
+    }
+
     private static RegisterNodeRequest registerNode(String nodeId, String address) {
         return RegisterNodeRequest.newBuilder()
                 .setNodeId(nodeId)
@@ -339,15 +435,21 @@ class CoordinatorServiceImplTest {
             node.start();
             node.getState().becomeCandidate();
             node.getState().becomeLeader(config.getPeers().keySet());
+            WatcherManager watcherManager = new WatcherManager();
+            stateMachine.addWatcher(watcherManager);
             server = NettyServerBuilder.forPort(0)
                     .addService(ServerInterceptors.intercept(
-                            new CoordinatorServiceImpl(node, serviceView, new WatcherManager()),
+                            new CoordinatorServiceImpl(node, serviceView, watcherManager),
                             new GlobalExceptionInterceptor()))
                     .build()
                     .start();
             channel = NettyChannelBuilder.forAddress("localhost", server.getPort())
                     .usePlaintext()
                     .build();
+        }
+
+        int port() {
+            return server.getPort();
         }
 
         CoordinatorGrpc.CoordinatorBlockingStub stub() {
@@ -403,6 +505,75 @@ class CoordinatorServiceImplTest {
 
         void releaseApply() {
             applyGate.complete(null);
+        }
+    }
+
+    /**
+     * Production watch and conditional-poll consumers pointed at the in-process coordinator. The watch cache is filled
+     * only by {@link WatchShardMapClient}. The poll cache is filled only by {@link CoordinatorClient#fetchShardMap}.
+     */
+    private static final class RoutingConsumers implements AutoCloseable {
+
+        private final CoordinatorClientManager clientManager;
+        private final CoordinatorClient client;
+        private final ShardMapCache watchCache = new ShardMapCache();
+        private final ShardMapCache pollCache = new ShardMapCache();
+        private final WatchShardMapClient watchClient;
+
+        private RoutingConsumers(int port) {
+            AppConfig.NodeConfig node = new AppConfig.NodeConfig();
+            node.setId("coordinator-1");
+            node.setHost("127.0.0.1");
+            node.setPort(port);
+            AppConfig.NodeGroupConfig group = new AppConfig.NodeGroupConfig();
+            group.setNodes(List.of(node));
+            AppConfig config = new AppConfig();
+            config.setCoordinatorNodes(group);
+            this.clientManager = new CoordinatorClientManager(config);
+            this.client = clientManager.getClient("coordinator-1");
+            this.watchClient = new WatchShardMapClient(watchCache, clientManager);
+            this.watchClient.start(0);
+        }
+
+        static RoutingConsumers start(int port) {
+            return new RoutingConsumers(port);
+        }
+
+        ShardMapCache pollCache() {
+            return pollCache;
+        }
+
+        GetShardMapResponse poll(long ifVersionGt) {
+            return client.getShardMap(ifVersionGt);
+        }
+
+        ClusterState fetch(long ifVersionGt) {
+            return client.fetchShardMap(ifVersionGt);
+        }
+
+        void awaitConverged(String address, NodeStatus status, long version) throws InterruptedException {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (System.nanoTime() < deadline) {
+                var node = watchCache.getLeaderNode("shard-0");
+                if (watchCache.getMapVersion() == version
+                        && node != null
+                        && address.equals(node.getAddress())
+                        && node.getStatus() == status) {
+                    return;
+                }
+                Thread.sleep(20);
+            }
+            var node = watchCache.getLeaderNode("shard-0");
+            fail("watch cache did not converge to " + address + " " + status + " version " + version + "; cacheVersion="
+                    + watchCache.getMapVersion()
+                    + " node="
+                    + (node == null ? "absent" : node.getAddress() + " " + node.getStatus()));
+        }
+
+        @Override
+        public void close() {
+            watchClient.shutdown();
+            clientManager.shutdown();
         }
     }
 

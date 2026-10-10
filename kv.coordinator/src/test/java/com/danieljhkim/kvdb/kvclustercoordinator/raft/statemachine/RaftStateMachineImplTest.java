@@ -65,7 +65,8 @@ class RaftStateMachineImplTest {
         }
 
         assertSame(before, stateMachine.getSnapshot());
-        assertEquals(1, stateMachine.getMapVersion());
+        // Two registrations and shard initialization each publish a map version. The rejected commands do not.
+        assertEquals(3, stateMachine.getMapVersion());
         assertTrue(deltas.isEmpty());
     }
 }

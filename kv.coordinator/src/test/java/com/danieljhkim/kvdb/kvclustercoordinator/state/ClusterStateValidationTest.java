@@ -129,6 +129,52 @@ class ClusterStateValidationTest {
     }
 
     @Test
+    void routingEndpointAndStatusChangesAdvanceMapVersion() {
+        long version = state.getMapVersion();
+
+        state.registerNode("node-1", "localhost:8001", "zone-a");
+        assertEquals(version, state.getMapVersion());
+
+        state.registerNode("node-1", "localhost:9001", "zone-a");
+        assertEquals("localhost:9001", state.getNode("node-1").address());
+        assertEquals(version + 1, state.getMapVersion());
+
+        state.registerNode("node-1", "localhost:9001", "zone-b");
+        assertEquals("zone-b", state.getNode("node-1").zone());
+        assertEquals(version + 2, state.getMapVersion());
+
+        state.setNodeStatus("node-1", NodeRecord.NodeStatus.ALIVE);
+        assertEquals(version + 2, state.getMapVersion());
+
+        state.setNodeStatus("node-1", NodeRecord.NodeStatus.SUSPECT);
+        assertEquals(NodeRecord.NodeStatus.SUSPECT, state.getNode("node-1").status());
+        assertEquals(version + 3, state.getMapVersion());
+
+        state.setNodeStatus("node-1", NodeRecord.NodeStatus.SUSPECT);
+        assertEquals(version + 3, state.getMapVersion());
+
+        state.setNodeStatus("node-1", NodeRecord.NodeStatus.DEAD);
+        assertEquals(version + 4, state.getMapVersion());
+
+        state.setNodeStatus("node-1", NodeRecord.NodeStatus.ALIVE);
+        assertEquals(NodeRecord.NodeStatus.ALIVE, state.getNode("node-1").status());
+        assertEquals(version + 5, state.getMapVersion());
+
+        state.setNodeStatus("node-1", NodeRecord.NodeStatus.DEAD);
+        state.registerNode("node-1", "localhost:9001", "zone-b");
+        assertEquals(NodeRecord.NodeStatus.ALIVE, state.getNode("node-1").status());
+        assertEquals("localhost:9001", state.getNode("node-1").address());
+        assertEquals(version + 7, state.getMapVersion());
+
+        state.registerNode("node-1", "localhost:9001", "zone-b");
+        assertEquals(version + 7, state.getMapVersion());
+
+        state.registerNode("node-new", "localhost:9010", "zone-a");
+        assertEquals(NodeRecord.NodeStatus.ALIVE, state.getNode("node-new").status());
+        assertEquals(version + 8, state.getMapVersion());
+    }
+
+    @Test
     void setNodeStatusAndConflictingInitShardsAreRejections() {
         assertRejected(() -> state.setNodeStatus("node-9", NodeRecord.NodeStatus.DEAD), "Node not found: node-9");
         assertRejected(() -> state.initializeShards(4, 2), "already initialized with different configuration");

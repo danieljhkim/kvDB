@@ -60,7 +60,9 @@ public sealed interface RaftCommand
     }
 
     /**
-     * Registers a new node or updates an existing node's address/zone. Marks the node as ALIVE.
+     * Registers a new node or updates an existing node's address/zone. Marks the node as ALIVE. A new endpoint, a changed
+     * address or zone, or a return to ALIVE publishes a new map version. An identical registration retains the current
+     * version.
      *
      * @param nodeId unique identifier for the node
      * @param address gRPC address (host:port)
@@ -83,8 +85,8 @@ public sealed interface RaftCommand
     }
 
     /**
-     * Updates a node's status (ALIVE, SUSPECT, DEAD). Status changes that affect routing (e.g., to/from DEAD) will bump
-     * the map version.
+     * Updates a node's status (ALIVE, SUSPECT, DEAD). Any real status transition publishes a new map version, because
+     * only ALIVE nodes are eligible for routing. An unchanged status retains the current version.
      *
      * @param nodeId unique identifier for the node
      * @param status new status for the node

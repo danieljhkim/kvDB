@@ -101,7 +101,8 @@ class RaftStateMachineApplierTest {
 
         assertEquals(4, state.getLastApplied());
         assertTrue(applier.isRunning());
-        assertEquals(1, stateMachine.getMapVersion());
+        // Both registrations and shard initialization publish a version. The rejected leader command does not.
+        assertEquals(3, stateMachine.getMapVersion());
         assertEquals("node-1", stateMachine.getSnapshot().getShard("shard-0").leader());
         assertTrue(stateMachine.getSnapshot().getNodes().containsKey("node-2"));
         RejectedMutationException rejection =

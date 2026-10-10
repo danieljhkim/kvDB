@@ -41,8 +41,6 @@ public class RaftStateMachineApplier {
 
     private volatile Throwable failure;
 
-    private final Object applyLock = new Object();
-
     private final Map<Long, RejectedMutationException> rejections = new LinkedHashMap<>() {
         @Override
         protected boolean removeEldestEntry(Map.Entry<Long, RejectedMutationException> eldest) {
@@ -108,7 +106,7 @@ public class RaftStateMachineApplier {
      * Applies all committed but not yet applied entries.
      */
     private void doApply() {
-        synchronized (applyLock) {
+        synchronized (state.getApplicationLock()) {
             if (failure != null) {
                 throw new CompletionException("State machine applier is unavailable", failure);
             }

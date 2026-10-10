@@ -36,48 +36,49 @@ public class RaftInstallSnapshotHandler {
         this.electionTimer = electionTimer;
     }
 
-    public synchronized InstallSnapshotResponse handleInstallSnapshot(InstallSnapshotRequest request)
-            throws IOException {
-        if (request.getTerm() < state.getCurrentTerm()) {
-            return response(false, 0);
-        }
-        if (request.getTerm() > state.getCurrentTerm()) {
-            persistentStore.save(request.getTerm(), null);
-            state.updateTerm(request.getTerm());
-        }
-        state.transitionToFollower(request.getLeaderId());
-        electionTimer.reset();
+    public InstallSnapshotResponse handleInstallSnapshot(InstallSnapshotRequest request) throws IOException {
+        synchronized (state.getApplicationLock()) {
+            if (request.getTerm() < state.getCurrentTerm()) {
+                return response(false, 0);
+            }
+            if (request.getTerm() > state.getCurrentTerm()) {
+                persistentStore.save(request.getTerm(), null);
+                state.updateTerm(request.getTerm());
+            }
+            state.transitionToFollower(request.getLeaderId());
+            electionTimer.reset();
 
-        if (request.getLastIncludedIndex() <= state.getLastApplied()) {
-            // A retry or delayed older snapshot cannot replace newer applied state.
-            return response(true, request.getTotalSize());
-        }
+            if (request.getLastIncludedIndex() <= state.getLastApplied()) {
+                // A retry or delayed older snapshot cannot replace newer applied state.
+                return response(true, request.getTotalSize());
+            }
 
-        RaftSnapshotStore.ChunkResult result = snapshotStore.installChunk(
-                request.getLastIncludedIndex(),
-                request.getLastIncludedTerm(),
-                request.getOffset(),
-                request.getData().toByteArray(),
-                request.getDone(),
-                request.getTotalSize(),
-                request.getChecksum());
-        if (!result.accepted()) {
-            return response(false, result.nextOffset());
+            RaftSnapshotStore.ChunkResult result = snapshotStore.installChunk(
+                    request.getLastIncludedIndex(),
+                    request.getLastIncludedTerm(),
+                    request.getOffset(),
+                    request.getData().toByteArray(),
+                    request.getDone(),
+                    request.getTotalSize(),
+                    request.getChecksum());
+            if (!result.accepted()) {
+                return response(false, result.nextOffset());
+            }
+            if (result.complete()) {
+                RaftSnapshotStore.Snapshot snapshot = result.snapshot();
+                // The snapshot is durable before either state-machine replacement or log compaction.
+                stateMachine.installSnapshot(snapshot.data());
+                state.getLog().compactThrough(snapshot.lastIncludedIndex(), snapshot.lastIncludedTerm());
+                state.advanceCommitIndex(snapshot.lastIncludedIndex());
+                state.advanceLastApplied(snapshot.lastIncludedIndex());
+                log.info(
+                        "[{}] Installed snapshot through index {} term {}",
+                        nodeId,
+                        snapshot.lastIncludedIndex(),
+                        snapshot.lastIncludedTerm());
+            }
+            return response(true, result.nextOffset());
         }
-        if (result.complete()) {
-            RaftSnapshotStore.Snapshot snapshot = result.snapshot();
-            // The snapshot is durable before either state-machine replacement or log compaction.
-            stateMachine.installSnapshot(snapshot.data());
-            state.getLog().compactThrough(snapshot.lastIncludedIndex(), snapshot.lastIncludedTerm());
-            state.advanceCommitIndex(snapshot.lastIncludedIndex());
-            state.advanceLastApplied(snapshot.lastIncludedIndex());
-            log.info(
-                    "[{}] Installed snapshot through index {} term {}",
-                    nodeId,
-                    snapshot.lastIncludedIndex(),
-                    snapshot.lastIncludedTerm());
-        }
-        return response(true, result.nextOffset());
     }
 
     private InstallSnapshotResponse response(boolean success, long nextOffset) {

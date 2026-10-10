@@ -30,42 +30,46 @@ public class RaftSnapshotManager {
         this.threshold = threshold;
     }
 
-    public synchronized void restoreOnStartup() throws IOException {
-        var snapshot = snapshotStore.load();
-        if (snapshot.isEmpty()) {
-            if (state.getLog().compactedIndex() > 0) {
-                throw new IOException("Raft log is compacted through index "
-                        + state.getLog().compactedIndex() + " but no durable snapshot exists");
+    public void restoreOnStartup() throws IOException {
+        synchronized (state.getApplicationLock()) {
+            var snapshot = snapshotStore.load();
+            if (snapshot.isEmpty()) {
+                if (state.getLog().compactedIndex() > 0) {
+                    throw new IOException("Raft log is compacted through index "
+                            + state.getLog().compactedIndex() + " but no durable snapshot exists");
+                }
+                return;
             }
-            return;
+            RaftSnapshotStore.Snapshot durable = snapshot.get();
+            if (state.getLog().compactedIndex() > durable.lastIncludedIndex()) {
+                throw new IOException("Raft log compaction index is newer than the durable snapshot");
+            }
+            stateMachine.installSnapshot(durable.data());
+            state.getLog().compactThrough(durable.lastIncludedIndex(), durable.lastIncludedTerm());
+            state.advanceCommitIndex(durable.lastIncludedIndex());
+            state.advanceLastApplied(durable.lastIncludedIndex());
+            log.info("[{}] Restored durable snapshot through index {}", nodeId, durable.lastIncludedIndex());
         }
-        RaftSnapshotStore.Snapshot durable = snapshot.get();
-        if (state.getLog().compactedIndex() > durable.lastIncludedIndex()) {
-            throw new IOException("Raft log compaction index is newer than the durable snapshot");
-        }
-        stateMachine.installSnapshot(durable.data());
-        state.getLog().compactThrough(durable.lastIncludedIndex(), durable.lastIncludedTerm());
-        state.advanceCommitIndex(durable.lastIncludedIndex());
-        state.advanceLastApplied(durable.lastIncludedIndex());
-        log.info("[{}] Restored durable snapshot through index {}", nodeId, durable.lastIncludedIndex());
     }
 
-    public synchronized boolean createIfThresholdReached() throws IOException {
-        if (threshold <= 0 || !state.isLeader()) {
-            return false;
+    public boolean createIfThresholdReached() throws IOException {
+        synchronized (state.getApplicationLock()) {
+            if (threshold <= 0 || !state.isLeader()) {
+                return false;
+            }
+            RaftLog logStore = state.getLog();
+            long snapshotIndex = state.getLastApplied();
+            if (snapshotIndex > state.getCommitIndex() || snapshotIndex - logStore.compactedIndex() < threshold) {
+                return false;
+            }
+            long snapshotTerm = logStore.getTerm(snapshotIndex)
+                    .orElseThrow(() -> new IOException("Cannot snapshot missing applied index " + snapshotIndex));
+            byte[] data = stateMachine.takeSnapshot();
+            snapshotStore.save(snapshotIndex, snapshotTerm, data);
+            // Compact only after the complete snapshot and its directory entry are durable.
+            logStore.compactThrough(snapshotIndex, snapshotTerm);
+            log.info("[{}] Created snapshot through index {} term {}", nodeId, snapshotIndex, snapshotTerm);
+            return true;
         }
-        RaftLog logStore = state.getLog();
-        long snapshotIndex = state.getLastApplied();
-        if (snapshotIndex > state.getCommitIndex() || snapshotIndex - logStore.compactedIndex() < threshold) {
-            return false;
-        }
-        long snapshotTerm = logStore.getTerm(snapshotIndex)
-                .orElseThrow(() -> new IOException("Cannot snapshot missing applied index " + snapshotIndex));
-        byte[] data = stateMachine.takeSnapshot();
-        snapshotStore.save(snapshotIndex, snapshotTerm, data);
-        // Compact only after the complete snapshot and its directory entry are durable.
-        logStore.compactThrough(snapshotIndex, snapshotTerm);
-        log.info("[{}] Created snapshot through index {} term {}", nodeId, snapshotIndex, snapshotTerm);
-        return true;
     }
 }

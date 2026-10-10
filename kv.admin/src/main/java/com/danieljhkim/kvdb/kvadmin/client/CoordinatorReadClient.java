@@ -34,7 +34,7 @@ public class CoordinatorReadClient {
     private final Map<String, CoordinatorGrpc.CoordinatorBlockingStub> stubs = new ConcurrentHashMap<>();
     private final CopyOnWriteArrayList<String> coordinatorAddresses;
     private final AtomicReference<String> leaderAddress = new AtomicReference<>();
-    private final long timeoutSeconds;
+    private final long timeoutMillis;
     private final ChannelFactory channelFactory;
 
     public CoordinatorReadClient(String host, int port, long timeout, TimeUnit timeUnit) {
@@ -48,7 +48,7 @@ public class CoordinatorReadClient {
     CoordinatorReadClient(
             List<String> coordinatorAddresses, long timeout, TimeUnit timeUnit, ChannelFactory channelFactory) {
         this.coordinatorAddresses = new CopyOnWriteArrayList<>(coordinatorAddresses);
-        this.timeoutSeconds = timeUnit.toSeconds(timeout);
+        this.timeoutMillis = timeUnit.toMillis(timeout);
         this.channelFactory = channelFactory;
         logger.info("CoordinatorReadClient created for: {}", coordinatorAddresses);
     }
@@ -66,7 +66,7 @@ public class CoordinatorReadClient {
                     });
                     return CoordinatorGrpc.newBlockingStub(channel);
                 })
-                .withDeadlineAfter(timeoutSeconds, TimeUnit.SECONDS);
+                .withDeadlineAfter(timeoutMillis, TimeUnit.MILLISECONDS);
     }
 
     @SuppressWarnings("all")

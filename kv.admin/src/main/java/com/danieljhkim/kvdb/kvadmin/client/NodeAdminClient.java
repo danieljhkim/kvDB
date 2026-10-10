@@ -19,11 +19,22 @@ public class NodeAdminClient {
 
     private static final Logger logger = LoggerFactory.getLogger(NodeAdminClient.class);
 
-    private final long timeoutSeconds;
+    private final long timeoutMillis;
+    private final ChannelFactory channelFactory;
     private final Map<String, ManagedChannel> channels = new ConcurrentHashMap<>();
 
     public NodeAdminClient(long timeout, TimeUnit timeUnit) {
-        this.timeoutSeconds = timeUnit.toSeconds(timeout);
+        this(timeout, timeUnit, InternalAuthChannels::forAddress);
+    }
+
+    NodeAdminClient(long timeout, TimeUnit timeUnit, ChannelFactory channelFactory) {
+        this.timeoutMillis = timeUnit.toMillis(timeout);
+        this.channelFactory = channelFactory;
+    }
+
+    @FunctionalInterface
+    interface ChannelFactory {
+        ManagedChannel create(String host, int port);
     }
 
     /**
@@ -51,14 +62,14 @@ public class NodeAdminClient {
             }
 
             logger.debug("Creating gRPC channel to node: {}", addr);
-            return InternalAuthChannels.forAddress(host, port);
+            return channelFactory.create(host, port);
         });
 
         try {
             KVServiceGrpc.KVServiceBlockingStub stub = KVServiceGrpc.newBlockingStub(channel);
             PingRequest request = PingRequest.newBuilder().build();
             PingResponse response =
-                    stub.withDeadlineAfter(timeoutSeconds, TimeUnit.SECONDS).ping(request);
+                    stub.withDeadlineAfter(timeoutMillis, TimeUnit.MILLISECONDS).ping(request);
             return response != null;
         } catch (StatusRuntimeException e) {
             logger.warn("Failed to ping node: {}", nodeAddress, e);

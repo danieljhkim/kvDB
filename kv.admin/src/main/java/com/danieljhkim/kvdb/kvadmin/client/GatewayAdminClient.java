@@ -17,11 +17,11 @@ public class GatewayAdminClient {
     private static final Logger logger = LoggerFactory.getLogger(GatewayAdminClient.class);
 
     private final ManagedChannel channel;
-    private final long timeoutSeconds;
+    private final long timeoutMillis;
 
     public GatewayAdminClient(String host, int port, long timeout, TimeUnit timeUnit) {
         this.channel = InternalAuthChannels.forAddress(host, port);
-        this.timeoutSeconds = timeUnit.toSeconds(timeout);
+        this.timeoutMillis = timeUnit.toMillis(timeout);
         logger.info("GatewayAdminClient created for {}:{}", host, port);
     }
 

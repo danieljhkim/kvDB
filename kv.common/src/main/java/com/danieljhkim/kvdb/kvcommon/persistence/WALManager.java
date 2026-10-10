@@ -26,8 +26,8 @@ import org.slf4j.LoggerFactory;
  * Synchronous write-ahead log.
  *
  * <p>An append returns only after the complete record has been forced to stable storage. Records are versioned,
- * length-delimited, and protected by CRC32C. A torn final record is ignored during recovery, while corruption before
- * the tail fails recovery closed.
+ * length-delimited, and protected by CRC32C. A torn final record is durably removed during recovery before further
+ * appends, while corruption before the tail fails recovery closed.
  */
 public class WALManager {
 
@@ -38,6 +38,7 @@ public class WALManager {
     enum FaultPoint {
         BEFORE_APPEND,
         BEFORE_SYNC,
+        BEFORE_REPAIR_SYNC,
         BEFORE_ROTATE_MOVE,
         BEFORE_ROTATE_DIRECTORY_SYNC
     }
@@ -137,7 +138,7 @@ public class WALManager {
         return operations;
     }
 
-    /** Replay the binary-safe representation used on disk. */
+    /** Replay the binary-safe representation used on disk, durably truncating any supported torn tail. */
     public synchronized List<WalRecord> replayRecords() {
         List<WalRecord> records = new ArrayList<>();
         if (!Files.exists(walFile)) {
@@ -147,6 +148,7 @@ public class WALManager {
         try (FileChannel readChannel = FileChannel.open(walFile, StandardOpenOption.READ)) {
             long fileSize = readChannel.size();
             long position = 0;
+            long validatedEnd = 0;
             while (position < fileSize) {
                 long recordStart = position;
                 ByteBuffer header = ByteBuffer.allocate(HEADER_SIZE);
@@ -188,19 +190,25 @@ public class WALManager {
                 position += CHECKSUM_SIZE;
 
                 if (storedChecksum != checksum(payload.array())) {
-                    if (position == fileSize) {
+                    if (position == fileSize && !hasValidRecordAfter(readChannel, recordStart + 1, fileSize)) {
                         logger.warn("Ignoring torn final WAL record with invalid checksum at offset {}", recordStart);
                         break;
                     }
                     throw corruption(recordStart, "checksum mismatch");
                 }
                 records.add(decodePayload(payload, recordStart));
+                validatedEnd = position;
+            }
+            if (validatedEnd < fileSize) {
+                repairTail(validatedEnd);
             }
             logger.info("Replayed {} operations from WAL file: {}", records.size(), walFile);
             return records;
         } catch (IOException e) {
+            appendFailure = e;
+            closeChannelQuietly();
             Metrics.increment("kvdb_wal_failures_total", "node", "replay", "error");
-            throw new UncheckedIOException("Failed to read WAL file " + walFile, e);
+            throw new UncheckedIOException("Failed to recover WAL file " + walFile, e);
         }
     }
 
@@ -360,9 +368,21 @@ public class WALManager {
     private void ensureChannelOpen() throws IOException {
         ensureParentDirectoryExists();
         if (channel == null) {
+            // Callers may append without replaying explicitly. Never append behind an unvalidated tail.
+            replayRecords();
             channel = FileChannel.open(
                     walFile, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND);
         }
+    }
+
+    private void repairTail(long validatedEnd) throws IOException {
+        closeChannelForRotation();
+        try (FileChannel repairChannel = FileChannel.open(walFile, StandardOpenOption.WRITE)) {
+            repairChannel.truncate(validatedEnd);
+            faultInjector.trigger(FaultPoint.BEFORE_REPAIR_SYNC);
+            repairChannel.force(true);
+        }
+        logger.warn("Durably truncated torn WAL tail at offset {} in {}", validatedEnd, walFile);
     }
 
     private void setWalFileInternal(String fileName) {

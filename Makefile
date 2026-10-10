@@ -35,9 +35,9 @@ build:
 # -----------------
 clean:
 	@echo "Cleaning Maven build artifacts..."
+	./scripts/run_cluster.sh stop
 	$(MVN) clean
 	rm -rf logs/*
-	./scripts/run_cluster.sh stop
 
 # -----------------
 # cluster commands

@@ -235,10 +235,17 @@ Typical flow:
    ```bash
    make build
    ```
-2. Run a local cluster (coordinator + 2 data nodes + gateway + admin API):
+2. Run a local cluster (coordinator + 2 data nodes + gateway + admin API). The Admin API fails closed
+   without an API key, so export a development key first (`run-cluster` exits before starting any process if it
+   is missing; set `START_ADMIN=false` to skip the Admin API):
    ```bash
+   export KVDB_ADMIN_SECURITY_API_KEY="$(openssl rand -hex 32)"
    make run-cluster
    ```
+   `run-cluster` waits up to `STARTUP_TIMEOUT_SECONDS` (default 60) for each component to open its port and exits
+   nonzero, naming the component and tailing its log, if one dies or never becomes ready. Logs go to `logs/` and
+   state to `data/` under the repository, regardless of the directory you run it from. `make stop` stops only the
+   processes this checkout started (tracked in `data/.run_cluster.pids`).
 3. Boostrap the cluster:
    ```bash
    make bootstrap-cluster

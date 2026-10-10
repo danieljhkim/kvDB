@@ -39,11 +39,21 @@ public class ConfigService {
     }
 
     public Map<String, Object> initShards(Map<String, Object> params) {
-        int numShards = (Integer) params.getOrDefault("num_shards", 8);
-        int replicationFactor = (Integer) params.getOrDefault("replication_factor", 2);
+        int numShards = positiveInteger(params, "num_shards", 8);
+        int replicationFactor = positiveInteger(params, "replication_factor", 2);
 
-        coordinatorAdminClient.initShards(numShards, replicationFactor);
+        if (!coordinatorAdminClient.initShards(numShards, replicationFactor).getSuccess()) {
+            throw new IllegalStateException("Coordinator failed to initialize shards");
+        }
 
         return Map.of("success", true, "num_shards", numShards, "replication_factor", replicationFactor);
+    }
+
+    private static int positiveInteger(Map<String, Object> params, String field, int defaultValue) {
+        Object value = params.getOrDefault(field, defaultValue);
+        if (!(value instanceof Integer number) || number <= 0) {
+            throw new IllegalArgumentException(field + " must be a positive 32-bit integer");
+        }
+        return number;
     }
 }

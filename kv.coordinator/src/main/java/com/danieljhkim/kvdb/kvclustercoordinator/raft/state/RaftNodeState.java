@@ -31,6 +31,7 @@ public class RaftNodeState {
     // Volatile state on all servers
     private final AtomicLong commitIndex;
     private final AtomicLong lastApplied;
+    private final Object applicationLock = new Object();
     private final AtomicReference<RaftRole> currentRole;
     private final AtomicReference<String> currentLeader;
 
@@ -76,6 +77,15 @@ public class RaftNodeState {
 
     public long getCommitIndex() {
         return commitIndex.get();
+    }
+
+    /**
+     * Serializes completed command application (including lastApplied publication) with snapshot capture,
+     * restoration and installation. Acquire before state-machine, snapshot-store or log locks; never wait for
+     * queued application while holding this monitor.
+     */
+    public Object getApplicationLock() {
+        return applicationLock;
     }
 
     public long getLastApplied() {

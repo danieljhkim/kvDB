@@ -103,6 +103,7 @@ public class ClusterState {
         this.replicationFactor = replicationFactor;
 
         List<String> nodeIds = new ArrayList<>(nodes.keySet());
+        nodeIds.sort(String::compareTo);
         List<String> createdShards = new ArrayList<>();
 
         for (int i = 0; i < numShards; i++) {

@@ -15,13 +15,20 @@ import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftPersistent
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftSnapshotStore;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.state.RaftNodeState;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine.RaftStateMachineImpl;
+import com.danieljhkim.kvdb.proto.coordinator.ClusterState;
 import com.danieljhkim.kvdb.proto.raft.AppendEntriesResponse;
 import com.danieljhkim.kvdb.proto.raft.InstallSnapshotRequest;
 import com.danieljhkim.kvdb.proto.raft.InstallSnapshotResponse;
 import com.google.protobuf.ByteString;
+import com.google.protobuf.CodedInputStream;
+import com.google.protobuf.CodedOutputStream;
+import com.google.protobuf.WireFormat;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -37,6 +44,66 @@ class RaftSnapshotIntegrationTest {
 
     @TempDir
     Path tempDir;
+
+    @Test
+    void shardAssignmentsIgnoreProtobufNodeMapOrderOnSnapshotRestore() throws Exception {
+        assertEquals("Aa".hashCode(), "BB".hashCode());
+
+        RaftStateMachineImpl originalMachine = new RaftStateMachineImpl();
+        originalMachine.apply(command("Aa")).join();
+        originalMachine.apply(command("BB")).join();
+        byte[] originalBytes = originalMachine.takeSnapshot();
+        var originalProto = ClusterState.parseFrom(originalBytes);
+        List<Map.Entry<String, byte[]>> nodeEntries = new ArrayList<>();
+        CodedInputStream snapshotInput = CodedInputStream.newInstance(originalBytes);
+        int tag;
+        while ((tag = snapshotInput.readTag()) != 0) {
+            if (WireFormat.getTagFieldNumber(tag) == ClusterState.NODES_FIELD_NUMBER) {
+                assertEquals(WireFormat.WIRETYPE_LENGTH_DELIMITED, WireFormat.getTagWireType(tag));
+                byte[] entryBytes = snapshotInput.readByteArray();
+                nodeEntries.add(Map.entry(nodeMapEntryKey(entryBytes), entryBytes));
+            } else if (!snapshotInput.skipField(tag)) {
+                break;
+            }
+        }
+        nodeEntries.sort((left, right) -> right.getKey().compareTo(left.getKey()));
+        assertEquals(
+                List.of("BB", "Aa"), nodeEntries.stream().map(Map.Entry::getKey).toList());
+
+        ByteArrayOutputStream reorderedOutput = new ByteArrayOutputStream();
+        reorderedOutput.write(originalProto.toBuilder().clearNodes().build().toByteArray());
+        CodedOutputStream snapshotOutput = CodedOutputStream.newInstance(reorderedOutput);
+        for (Map.Entry<String, byte[]> entry : nodeEntries) {
+            snapshotOutput.writeByteArray(ClusterState.NODES_FIELD_NUMBER, entry.getValue());
+        }
+        snapshotOutput.flush();
+        byte[] reorderedBytes = reorderedOutput.toByteArray();
+        var reorderedProto = ClusterState.parseFrom(reorderedBytes);
+        assertEquals(originalProto, reorderedProto);
+        assertFalse(Arrays.equals(originalBytes, reorderedBytes));
+
+        RaftStateMachineImpl restoredMachine = new RaftStateMachineImpl();
+        restoredMachine.installSnapshot(reorderedBytes);
+
+        RaftCommand initShards = new RaftCommand.InitShards(2, 2);
+        originalMachine.apply(initShards).join();
+        restoredMachine.apply(initShards).join();
+
+        var originalSnapshot = originalMachine.getSnapshot();
+        var restoredSnapshot = restoredMachine.getSnapshot();
+        assertEquals(originalSnapshot.getMapVersion(), restoredSnapshot.getMapVersion());
+        assertEquals(
+                originalSnapshot.getShards().keySet(),
+                restoredSnapshot.getShards().keySet());
+        assertEquals(List.of("Aa", "BB"), originalSnapshot.getShard("shard-0").replicas());
+        for (String shardId : originalSnapshot.getShards().keySet()) {
+            var originalShard = originalSnapshot.getShard(shardId);
+            var restoredShard = restoredSnapshot.getShard(shardId);
+            assertEquals(originalShard.replicas(), restoredShard.replicas(), shardId + " replica order");
+            assertEquals(originalShard.leader(), restoredShard.leader(), shardId + " leader");
+            assertEquals(originalShard.epoch(), restoredShard.epoch(), shardId + " epoch");
+        }
+    }
 
     @Test
     void leaderSnapshotsAppliedStateAndRestartRestoresCompactedLog() throws Exception {
@@ -466,6 +533,21 @@ class RaftSnapshotIntegrationTest {
 
     private static RaftCommand command(String id) {
         return new RaftCommand.RegisterNode(id, "127.0.0.1:9000", "zone-a");
+    }
+
+    private static String nodeMapEntryKey(byte[] encodedEntry) throws IOException {
+        CodedInputStream input = CodedInputStream.newInstance(encodedEntry);
+        String nodeId = null;
+        int tag;
+        while ((tag = input.readTag()) != 0) {
+            if (WireFormat.getTagFieldNumber(tag) == 1) {
+                nodeId = input.readString();
+            } else if (!input.skipField(tag)) {
+                break;
+            }
+        }
+        assertNotNull(nodeId, "protobuf node map entry has no key");
+        return nodeId;
     }
 
     private static RaftLogEntry entry(long index, RaftCommand command) {

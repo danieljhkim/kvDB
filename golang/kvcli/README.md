@@ -205,6 +205,7 @@ the proto for application failures, the gRPC code name for transport failures.
 | `3` | Transport failure (for example `DeadlineExceeded`, `Unauthenticated`). |
 | `4` | `NOT_FOUND` — the key does not exist, which is distinct from an empty value. |
 | `5` | `WRITE_OUTCOME_UNKNOWN` — the write may or may not have been applied. |
+| `6` | `OUTPUT`. The RPC completed, but its outcome could not be written. The error includes `version` and `request_id` when the RPC produced them. Writes are not repeated: stored state may already have changed. A get also withholds the value. |
 
 For `batch-get`, a response with any non-OK item status or non-`COMPLETED`
 terminal outcome writes the full JSON document and exits `2`. A top-level
@@ -222,6 +223,10 @@ same identifier so the cluster can de-duplicate it:
 ```bash
 kv put greeting hello --request-id 5b1f6b1e-6d0e-4a54-9c94-1f9a8f4c2f10 --allow-server-replay
 ```
+
+A successful write whose outcome line cannot be written exits `6`, not `5`.
+The mutation may already be stored. The CLI does not repeat it. The error
+includes the applied `version` and `request_id`.
 
 `--allow-server-replay` sets `require_idempotency`, which permits the gateway to
 replay that write under the same request id. It is off by default, so an

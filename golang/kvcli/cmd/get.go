@@ -23,7 +23,8 @@ var getCmd = &cobra.Command{
 The value is written to standard output and the outcome is reported on
 standard error, so redirecting standard output captures exactly the stored
 bytes. A missing key exits 4; a key that holds an empty value exits 0 with no
-output.`,
+output. If the outcome line cannot be written, the command exits 6 and does
+not write the value.`,
 	Example: `  kv get greeting
   kv get --key-file ./binary.key --raw > value.bin
   printf 'k' | kv get --key-file - --output-file value.bin`,
@@ -62,12 +63,20 @@ output.`,
 			return err
 		}
 
-		writeMetadata(cmd.ErrOrStderr(),
+		version := result.Version
+		if err := writeOutcome(cmd.ErrOrStderr(), outcome{
+			op:            "get",
+			version:       &version,
+			requestID:     result.RequestID,
+			valueWithheld: !headOnly,
+		},
 			"status", gateway.Status_OK.String(),
-			"version", strconv.FormatUint(result.Version, 10),
+			"version", strconv.FormatUint(version, 10),
 			"applied_version", strconv.FormatUint(result.AppliedVersion, 10),
 			"value_bytes", valueBytesLabel(result),
-			"request_id", result.RequestID)
+			"request_id", result.RequestID); err != nil {
+			return err
+		}
 
 		if headOnly {
 			return nil

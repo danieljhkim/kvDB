@@ -19,7 +19,10 @@ var putCmd = &cobra.Command{
 
 The write is attempted exactly once. If the outcome is unknown the command
 exits 5 and does not retry; the error line reports the request_id that was sent.
-Rerun it with that --request-id so the cluster can de-duplicate the operation.`,
+Rerun it with that --request-id so the cluster can de-duplicate the operation.
+If the write is applied but its outcome line cannot be written, the command
+exits 6, includes the applied version and request_id in the error, and does
+not retry.`,
 	Example: `  kv put greeting hello
   kv put --key-file ./binary.key --value-file ./binary.value
   cat payload.bin | kv put greeting --value-file -
@@ -60,11 +63,16 @@ Rerun it with that --request-id so the cluster can de-duplicate the operation.`,
 			return err
 		}
 
-		writeMetadata(cmd.OutOrStdout(),
+		version := result.Version
+		return writeOutcome(cmd.OutOrStdout(), outcome{
+			op:        "put",
+			mutated:   true,
+			version:   &version,
+			requestID: result.RequestID,
+		},
 			"status", gateway.Status_OK.String(),
-			"version", strconv.FormatUint(result.Version, 10),
+			"version", strconv.FormatUint(version, 10),
 			"request_id", result.RequestID)
-		return nil
 	},
 }
 

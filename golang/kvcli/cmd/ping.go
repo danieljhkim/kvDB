@@ -19,7 +19,9 @@ var pingCmd = &cobra.Command{
 	Long: `Issue one bounded, head-only Get and report whether the gateway answered.
 
 A missing probe key counts as reachable: the check proves connectivity,
-transport security, and authorization, not the presence of data.`,
+transport security, and authorization, not the presence of data. If that
+outcome line cannot be written, the command exits 6 and does not retry
+the probe.`,
 	Args:          cobra.MaximumNArgs(1),
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -47,11 +49,10 @@ transport security, and authorization, not the presence of data.`,
 			return err
 		}
 
-		writeMetadata(cmd.OutOrStdout(),
+		return writeOutcome(cmd.OutOrStdout(), outcome{op: "ping"},
 			"status", gateway.Status_OK.String(),
 			"endpoint", op.cfg.Address(),
 			"security_mode", string(op.cfg.Security.Mode))
-		return nil
 	},
 }
 

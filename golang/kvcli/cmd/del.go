@@ -15,7 +15,9 @@ var delCmd = &cobra.Command{
 	Long: `Delete one key.
 
 Like put, the delete is attempted exactly once and an unknown outcome exits 5
-without an automatic retry. Failures report the request_id that was sent.`,
+without an automatic retry. Failures report the request_id that was sent.
+A delete that is applied but whose outcome line cannot be written exits 6
+and is not repeated.`,
 	Example: `  kv del greeting
   kv del --key-file ./binary.key`,
 	Args:          cobra.MaximumNArgs(1),
@@ -46,11 +48,16 @@ without an automatic retry. Failures report the request_id that was sent.`,
 			return err
 		}
 
-		writeMetadata(cmd.OutOrStdout(),
+		version := result.Version
+		return writeOutcome(cmd.OutOrStdout(), outcome{
+			op:        "del",
+			mutated:   true,
+			version:   &version,
+			requestID: result.RequestID,
+		},
 			"status", gateway.Status_OK.String(),
-			"version", strconv.FormatUint(result.Version, 10),
+			"version", strconv.FormatUint(version, 10),
 			"request_id", result.RequestID)
-		return nil
 	},
 }
 

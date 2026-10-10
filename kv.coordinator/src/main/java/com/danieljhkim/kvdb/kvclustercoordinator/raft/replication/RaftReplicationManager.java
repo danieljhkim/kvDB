@@ -48,6 +48,19 @@ public class RaftReplicationManager {
     // Track which peers are currently being replicated to (prevent concurrent replication to same peer)
     private final Map<String, CompletableFuture<Void>> activeReplications = new ConcurrentHashMap<>();
 
+    // Guarded by state, like term/role transitions and all replication callbacks.
+    private long generation;
+
+    private record Leadership(long term, long generation) {}
+
+    private boolean isCurrent(Leadership leadership) {
+        return state.isLeader() && state.getCurrentTerm() == leadership.term() && generation == leadership.generation();
+    }
+
+    private <T> CompletableFuture<T> supersededLeadership() {
+        return CompletableFuture.failedFuture(new IllegalStateException("Replication leadership was superseded"));
+    }
+
     public RaftReplicationManager(
             String nodeId,
             RaftConfiguration config,
@@ -89,13 +102,19 @@ public class RaftReplicationManager {
      * @return CompletableFuture that completes when majority has replicated
      */
     public CompletableFuture<Void> replicateToAll() {
+        synchronized (state) {
+            return replicateToAll(new Leadership(state.getCurrentTerm(), generation));
+        }
+    }
+
+    private CompletableFuture<Void> replicateToAll(Leadership leadership) {
         if (!state.isLeader()) {
             return CompletableFuture.failedFuture(new IllegalStateException("Not a leader"));
         }
 
         int quorumSize = config.getQuorumSize();
         if (quorumSize == 1) {
-            updateCommitIndex();
+            updateCommitIndex(leadership);
             return CompletableFuture.completedFuture(null);
         }
 
@@ -104,15 +123,22 @@ public class RaftReplicationManager {
         AtomicInteger failedServers = new AtomicInteger();
 
         for (String peerId : config.getPeers().keySet()) {
-            replicateToPeer(peerId).whenComplete((ignored, error) -> {
-                if (error == null) {
-                    updateCommitIndex();
-                    if (successfulServers.incrementAndGet() >= quorumSize) {
-                        quorumReached.complete(null);
+            replicateToPeer(peerId, leadership).whenComplete((ignored, error) -> {
+                synchronized (state) {
+                    if (!isCurrent(leadership)) {
+                        quorumReached.completeExceptionally(
+                                new IllegalStateException("Replication leadership was superseded"));
+                        return;
                     }
-                } else if (config.getClusterSize() - failedServers.incrementAndGet() < quorumSize) {
-                    quorumReached.completeExceptionally(
-                            new IllegalStateException("Unable to replicate command to a majority", error));
+                    if (error == null) {
+                        updateCommitIndex(leadership);
+                        if (successfulServers.incrementAndGet() >= quorumSize) {
+                            quorumReached.complete(null);
+                        }
+                    } else if (config.getClusterSize() - failedServers.incrementAndGet() < quorumSize) {
+                        quorumReached.completeExceptionally(
+                                new IllegalStateException("Unable to replicate command to a majority", error));
+                    }
                 }
             });
         }
@@ -128,6 +154,15 @@ public class RaftReplicationManager {
      * @return CompletableFuture that completes when replication succeeds
      */
     public CompletableFuture<Void> replicateToPeer(String peerId) {
+        synchronized (state) {
+            return replicateToPeer(peerId, new Leadership(state.getCurrentTerm(), generation));
+        }
+    }
+
+    private CompletableFuture<Void> replicateToPeer(String peerId, Leadership leadership) {
+        if (!isCurrent(leadership)) {
+            return supersededLeadership();
+        }
         // Check if already replicating to this peer
         CompletableFuture<Void> existing = activeReplications.get(peerId);
         if (existing != null && !existing.isDone()) {
@@ -135,11 +170,11 @@ public class RaftReplicationManager {
             return existing;
         }
 
-        CompletableFuture<Void> future = doReplication(peerId);
+        CompletableFuture<Void> future = doReplication(peerId, leadership);
         activeReplications.put(peerId, future);
 
         future.whenComplete((result, error) -> {
-            activeReplications.remove(peerId);
+            activeReplications.remove(peerId, future);
             if (error != null) {
                 log.warn("[{}] Replication to {} failed: {}", nodeId, peerId, error.getMessage());
             }
@@ -151,9 +186,9 @@ public class RaftReplicationManager {
     /**
      * Performs the actual replication to a peer.
      */
-    private CompletableFuture<Void> doReplication(String peerId) {
-        if (!state.isLeader()) {
-            return CompletableFuture.failedFuture(new IllegalStateException("Not a leader"));
+    private CompletableFuture<Void> doReplication(String peerId, Leadership leadership) {
+        if (!isCurrent(leadership)) {
+            return supersededLeadership();
         }
 
         try {
@@ -166,9 +201,9 @@ public class RaftReplicationManager {
 
             RaftLog log = state.getLog();
             if (nextIndex <= log.compactedIndex()) {
-                return sendSnapshot(peerId, 0);
+                return sendSnapshot(peerId, 0, leadership);
             }
-            long currentTerm = state.getCurrentTerm();
+            long currentTerm = leadership.term();
             long commitIndex = state.getCommitIndex();
 
             // Get previous log entry for consistency check
@@ -205,10 +240,11 @@ public class RaftReplicationManager {
                     prevLogIndex,
                     prevLogTerm);
 
-            return rpcClient
-                    .apply(peerId, request)
-                    .thenCompose(
-                            response -> handleReplicationResponse(peerId, nextIndex, entriesToSend.size(), response));
+            return rpcClient.apply(peerId, request).thenCompose(response -> {
+                synchronized (state) {
+                    return handleReplicationResponse(peerId, nextIndex, leadership, response);
+                }
+            });
 
         } catch (Exception e) {
             log.error("[{}] Error replicating to {}: {}", nodeId, peerId, e.getMessage(), e);
@@ -235,13 +271,17 @@ public class RaftReplicationManager {
      * Handles the response from an AppendEntries RPC.
      */
     private CompletableFuture<Void> handleReplicationResponse(
-            String peerId, long nextIndex, int entriesCount, AppendEntriesResponse response) {
+            String peerId, long nextIndex, Leadership leadership, AppendEntriesResponse response) {
 
         // Check for higher term
         if (response.getTerm() > state.getCurrentTerm()) {
             log.warn("[{}] Discovered higher term {} from {}, stepping down", nodeId, response.getTerm(), peerId);
             return stepDownForHigherTerm(
                     response.getTerm(), "Stepped down after discovering higher term " + response.getTerm());
+        }
+
+        if (!isCurrent(leadership) || response.getTerm() != leadership.term()) {
+            return supersededLeadership();
         }
 
         if (response.getSuccess()) {
@@ -254,7 +294,7 @@ public class RaftReplicationManager {
             // Check if there are more entries to replicate
             if (newMatchIndex < state.getLog().lastIndex()) {
                 log.trace("[{}] More entries to replicate to {}, continuing", nodeId, peerId);
-                return doReplication(peerId);
+                return doReplication(peerId, leadership);
             }
 
             return CompletableFuture.completedFuture(null);
@@ -262,7 +302,7 @@ public class RaftReplicationManager {
         } else {
             // Failure - decrement nextIndex and retry
             handleReplicationFailure(peerId, nextIndex, response);
-            return doReplication(peerId); // Retry with updated nextIndex
+            return doReplication(peerId, leadership); // Retry with updated nextIndex
         }
     }
 
@@ -314,7 +354,10 @@ public class RaftReplicationManager {
         state.setNextIndex(peerId, newNextIndex);
     }
 
-    private CompletableFuture<Void> sendSnapshot(String peerId, long offset) {
+    private CompletableFuture<Void> sendSnapshot(String peerId, long offset, Leadership leadership) {
+        if (!isCurrent(leadership)) {
+            return supersededLeadership();
+        }
         if (snapshotStore == null) {
             return CompletableFuture.failedFuture(new IllegalStateException("Snapshot store is not configured"));
         }
@@ -332,7 +375,7 @@ public class RaftReplicationManager {
                     java.util.Arrays.copyOfRange(data, Math.toIntExact(offset), Math.toIntExact(offset) + length);
             long nextOffset = offset + length;
             InstallSnapshotRequest request = InstallSnapshotRequest.newBuilder()
-                    .setTerm(state.getCurrentTerm())
+                    .setTerm(leadership.term())
                     .setLeaderId(nodeId)
                     .setLastIncludedIndex(snapshot.lastIncludedIndex())
                     .setLastIncludedTerm(snapshot.lastIncludedTerm())
@@ -343,22 +386,27 @@ public class RaftReplicationManager {
                     .setTotalSize(data.length)
                     .build();
             return snapshotRpcClient.apply(peerId, request).thenCompose(response -> {
-                if (response.getTerm() > state.getCurrentTerm()) {
-                    return stepDownForHigherTerm(response.getTerm(), "Stepped down during snapshot transfer");
+                synchronized (state) {
+                    if (response.getTerm() > state.getCurrentTerm()) {
+                        return stepDownForHigherTerm(response.getTerm(), "Stepped down during snapshot transfer");
+                    }
+                    if (!isCurrent(leadership) || response.getTerm() != leadership.term()) {
+                        return supersededLeadership();
+                    }
+                    long resumeOffset = response.getNextOffset();
+                    if (resumeOffset < 0 || resumeOffset > data.length) {
+                        return CompletableFuture.failedFuture(
+                                new IOException("Follower returned invalid snapshot resume offset " + resumeOffset));
+                    }
+                    if (!response.getSuccess()) {
+                        return sendSnapshot(peerId, resumeOffset, leadership);
+                    }
+                    if (resumeOffset < data.length) {
+                        return sendSnapshot(peerId, resumeOffset, leadership);
+                    }
+                    state.setMatchIndex(peerId, snapshot.lastIncludedIndex());
+                    return doReplication(peerId, leadership);
                 }
-                long resumeOffset = response.getNextOffset();
-                if (resumeOffset < 0 || resumeOffset > data.length) {
-                    return CompletableFuture.failedFuture(
-                            new IOException("Follower returned invalid snapshot resume offset " + resumeOffset));
-                }
-                if (!response.getSuccess()) {
-                    return sendSnapshot(peerId, resumeOffset);
-                }
-                if (resumeOffset < data.length) {
-                    return sendSnapshot(peerId, resumeOffset);
-                }
-                state.setMatchIndex(peerId, snapshot.lastIncludedIndex());
-                return doReplication(peerId);
             });
         } catch (Exception e) {
             return CompletableFuture.failedFuture(e);
@@ -370,12 +418,12 @@ public class RaftReplicationManager {
      * Raft paper §5.3, §5.4: Leader commits entry when majority has replicated it
      * AND it's from the current term.
      */
-    private void updateCommitIndex() {
-        if (!state.isLeader()) {
+    private void updateCommitIndex(Leadership leadership) {
+        if (!isCurrent(leadership)) {
             return;
         }
 
-        long currentTerm = state.getCurrentTerm();
+        long currentTerm = leadership.term();
         long currentCommitIndex = state.getCommitIndex();
 
         // Find the highest index replicated on a majority
@@ -409,7 +457,10 @@ public class RaftReplicationManager {
      * Should be called when stepping down from leader.
      */
     public void clear() {
-        activeReplications.clear();
-        log.debug("[{}] Cleared replication manager", nodeId);
+        synchronized (state) {
+            generation++;
+            activeReplications.clear();
+            log.debug("[{}] Cleared replication manager", nodeId);
+        }
     }
 }

@@ -5,10 +5,10 @@ import com.danieljhkim.kvdb.proto.coordinator.*;
 import io.grpc.ManagedChannel;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
@@ -26,25 +26,37 @@ public class CoordinatorAdminClient {
 
     private final Map<String, ManagedChannel> channels = new ConcurrentHashMap<>();
     private final Map<String, CoordinatorGrpc.CoordinatorBlockingStub> stubs = new ConcurrentHashMap<>();
-    private final List<String> coordinatorAddresses;
+    private final CopyOnWriteArrayList<String> coordinatorAddresses;
     private final AtomicReference<String> leaderAddress = new AtomicReference<>();
     private final long timeoutSeconds;
+    private final ChannelFactory channelFactory;
 
     public CoordinatorAdminClient(String host, int port, long timeout, TimeUnit timeUnit) {
         this(List.of(host + ":" + port), timeout, timeUnit);
     }
 
     public CoordinatorAdminClient(List<String> coordinatorAddresses, long timeout, TimeUnit timeUnit) {
-        this.coordinatorAddresses = new ArrayList<>(coordinatorAddresses);
+        this(coordinatorAddresses, timeout, timeUnit, InternalAuthChannels::forAddress);
+    }
+
+    CoordinatorAdminClient(
+            List<String> coordinatorAddresses, long timeout, TimeUnit timeUnit, ChannelFactory channelFactory) {
+        this.coordinatorAddresses = new CopyOnWriteArrayList<>(coordinatorAddresses);
         this.timeoutSeconds = timeUnit.toSeconds(timeout);
+        this.channelFactory = channelFactory;
         logger.info("CoordinatorAdminClient created for: {}", coordinatorAddresses);
+    }
+
+    @FunctionalInterface
+    interface ChannelFactory {
+        ManagedChannel create(String host, int port);
     }
 
     private CoordinatorGrpc.CoordinatorBlockingStub getStub(String address) {
         return stubs.computeIfAbsent(address, addr -> {
                     ManagedChannel channel = channels.computeIfAbsent(addr, a -> {
                         String[] parts = a.split(":");
-                        return InternalAuthChannels.forAddress(parts[0], Integer.parseInt(parts[1]));
+                        return channelFactory.create(parts[0], Integer.parseInt(parts[1]));
                     });
                     return CoordinatorGrpc.newBlockingStub(channel);
                 })
@@ -90,9 +102,7 @@ public class CoordinatorAdminClient {
                         if (hintResponse.getIsLeader()) {
                             leaderAddress.set(hint);
                             logger.info("Discovered and verified leader via hint: {}", hint);
-                            if (!coordinatorAddresses.contains(hint)) {
-                                coordinatorAddresses.add(hint);
-                            }
+                            coordinatorAddresses.addIfAbsent(hint);
                             return getStub(hint);
                         }
                     } catch (StatusRuntimeException e) {
@@ -123,9 +133,7 @@ public class CoordinatorAdminClient {
                     if (hint != null) {
                         logger.info("Extracted leader hint from error: {}", hint);
                         leaderAddress.set(hint);
-                        if (!coordinatorAddresses.contains(hint)) {
-                            coordinatorAddresses.add(hint);
-                        }
+                        coordinatorAddresses.addIfAbsent(hint);
                     } else {
                         leaderAddress.set(null); // Clear and rediscover
                     }
@@ -195,6 +203,10 @@ public class CoordinatorAdminClient {
                 .setEpoch(epoch)
                 .setLeaderNodeId(leaderNodeId)
                 .build()));
+    }
+
+    List<String> coordinatorAddresses() {
+        return List.copyOf(coordinatorAddresses);
     }
 
     public String getLeaderAddress() {

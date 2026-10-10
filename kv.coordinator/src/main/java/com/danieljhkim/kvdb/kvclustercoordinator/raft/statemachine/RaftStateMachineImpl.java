@@ -3,6 +3,7 @@ package com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine;
 import com.danieljhkim.kvdb.kvclustercoordinator.converter.ProtoConverter;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftCommand;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ClusterState;
+import com.danieljhkim.kvdb.kvclustercoordinator.state.RejectedMutationException;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapDelta;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
 import java.io.IOException;
@@ -39,6 +40,10 @@ public class RaftStateMachineImpl implements RaftStateMachine {
                 }
                 logger.info("Applied command: {}", command.describe());
                 return CompletableFuture.completedFuture(null);
+            } catch (RejectedMutationException e) {
+                // Validation runs before any mutation, so the state and published snapshot are unchanged.
+                logger.warn("Rejected command: {}: {}", command.describe(), e.getMessage());
+                return CompletableFuture.failedFuture(e);
             } catch (Exception e) {
                 logger.error("Failed to apply command: {}", command.describe(), e);
                 return CompletableFuture.failedFuture(new IllegalStateException("Command application failed", e));

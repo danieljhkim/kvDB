@@ -67,12 +67,17 @@ class RaftNodeCommitIntegrationTest {
 
         try {
             network.block("n1", "n3");
+            // Replica changes are validated against membership, so the storage nodes are registered first.
+            leader.submitCommand(new RaftCommand.RegisterNode("storage-1", "storage-1:9000", "zone-a"))
+                    .get(5, TimeUnit.SECONDS);
+            leader.submitCommand(new RaftCommand.RegisterNode("storage-2", "storage-2:9000", "zone-b"))
+                    .get(5, TimeUnit.SECONDS);
             leader.submitCommand(new RaftCommand.InitShards(1, 1)).get(5, TimeUnit.SECONDS);
 
-            assertEquals(1, leader.getState().getCommitIndex());
-            assertEquals(1, leader.getState().getLastApplied());
+            assertEquals(3, leader.getState().getCommitIndex());
+            assertEquals(3, leader.getState().getLastApplied());
             assertEquals(1, stateMachines.get("n1").getMapVersion());
-            assertEquals(1, network.nodes.get("n2").getState().getLog().size());
+            assertEquals(3, network.nodes.get("n2").getState().getLog().size());
             assertEquals(0, network.nodes.get("n3").getState().getLog().size());
 
             sendCommitHeartbeat(leader, network.nodes.get("n2"));
@@ -84,20 +89,20 @@ class RaftNodeCommitIntegrationTest {
 
             Thread.sleep(100);
             assertFalse(minoritySubmission.isDone(), "A leader isolated from a majority must not acknowledge");
-            assertEquals(1, leader.getState().getCommitIndex());
+            assertEquals(3, leader.getState().getCommitIndex());
             assertEquals(1, stateMachines.get("n1").getMapVersion());
 
             network.unblock("n1", "n3");
             minoritySubmission.get(5, TimeUnit.SECONDS);
-            assertEquals(2, leader.getState().getCommitIndex());
-            assertEquals(2, leader.getState().getLastApplied());
+            assertEquals(4, leader.getState().getCommitIndex());
+            assertEquals(4, leader.getState().getLastApplied());
 
             network.unblock("n1", "n2");
             sendCommitHeartbeat(leader, network.nodes.get("n2"));
             sendCommitHeartbeat(leader, network.nodes.get("n3"));
 
             await(() -> network.nodes.values().stream()
-                    .allMatch(node -> node.getState().getLastApplied() == 2));
+                    .allMatch(node -> node.getState().getLastApplied() == 4));
             assertTrue(stateMachines.values().stream().allMatch(stateMachine -> stateMachine.getMapVersion() == 2));
             assertTrue(stateMachines.values().stream().allMatch(stateMachine -> stateMachine
                     .getSnapshot()

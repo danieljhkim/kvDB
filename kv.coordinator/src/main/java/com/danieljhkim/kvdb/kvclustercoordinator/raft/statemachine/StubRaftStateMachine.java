@@ -2,6 +2,7 @@ package com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine;
 
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftCommand;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ClusterState;
+import com.danieljhkim.kvdb.kvclustercoordinator.state.RejectedMutationException;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapDelta;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
 import java.util.List;
@@ -54,6 +55,9 @@ public class StubRaftStateMachine implements RaftStateMachine {
                     }
                     logger.info("Applied command: {}", command.describe());
                     return null;
+                } catch (RejectedMutationException e) {
+                    logger.warn("Rejected command: {}: {}", command.describe(), e.getMessage());
+                    throw e;
                 } catch (Exception e) {
                     logger.error("Failed to apply command: {}", command.describe(), e);
                     throw new RuntimeException("Command application failed: " + command.describe(), e);

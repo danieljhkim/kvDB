@@ -2,7 +2,10 @@ package com.danieljhkim.kvdb.kvclustercoordinator.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -11,7 +14,12 @@ import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftConfiguration;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftNode;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.FileBasedRaftLog;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftPersistentStateStore;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine.RaftStateMachine;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine.RaftStateMachineImpl;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine.StubRaftStateMachine;
+import com.danieljhkim.kvdb.kvclustercoordinator.state.RejectedMutationException;
+import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
+import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardRecord;
 import com.danieljhkim.kvdb.kvcommon.grpc.GlobalExceptionInterceptor;
 import com.danieljhkim.kvdb.proto.coordinator.CoordinatorGrpc;
 import com.danieljhkim.kvdb.proto.coordinator.InitShardsRequest;
@@ -38,6 +46,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
@@ -174,6 +183,181 @@ class CoordinatorServiceImplTest {
             assertTrue(observer.values.getFirst().getMapVersion() > 0);
         } finally {
             stateMachine.releaseApply();
+            node.stop();
+            log.close();
+        }
+    }
+
+    @Test
+    void invalidShardMapMutationsAreRejectedBeforeReachingTheRaftLog() throws Exception {
+        RaftStateMachineImpl stateMachine = new RaftStateMachineImpl();
+        try (SingleNodeCoordinator coordinator = new SingleNodeCoordinator(tempDir, stateMachine, stateMachine)) {
+            CoordinatorGrpc.CoordinatorBlockingStub stub = coordinator.stub();
+            stub.registerNode(registerNode("node-1", "localhost:8001"));
+            stub.registerNode(registerNode("node-2", "localhost:8002"));
+            stub.initShards(InitShardsRequest.newBuilder()
+                    .setNumShards(2)
+                    .setReplicationFactor(2)
+                    .build());
+            // Registered after shard assignment, so it is a known node outside every replica set.
+            stub.registerNode(registerNode("node-3", "localhost:8003"));
+            ShardMapSnapshot before = stateMachine.getSnapshot();
+            ShardRecord shard = before.getShard("shard-0");
+            long logIndex = coordinator.node.getState().getLog().lastIndex();
+
+            assertInvalidArgument(
+                    () -> stub.setShardLeader(setShardLeader(shard.epoch(), "node-9")), "Node not found: node-9");
+            assertInvalidArgument(
+                    () -> stub.setShardLeader(setShardLeader(shard.epoch(), "node-3")),
+                    "node-3 is not a replica of shard-0");
+            assertInvalidArgument(
+                    () -> stub.setShardLeader(setShardLeader(shard.epoch(), "{\"leader_node_id\":\"node-9\"}")),
+                    "Node not found");
+            assertInvalidArgument(
+                    () -> stub.reportShardLeader(ReportShardLeaderRequest.newBuilder()
+                            .setShardId("shard-0")
+                            .setEpoch(shard.epoch())
+                            .setLeaderNodeId("node-9")
+                            .build()),
+                    "Node not found: node-9");
+            assertInvalidArgument(() -> stub.setShardReplicas(setShardReplicas()), "cannot be empty");
+            assertInvalidArgument(
+                    () -> stub.setShardReplicas(setShardReplicas("node-1", "node-9")), "Node not found: node-9");
+            assertInvalidArgument(
+                    () -> stub.setShardReplicas(setShardReplicas("node-1", "node-1")), "duplicate node node-1");
+            assertInvalidArgument(
+                    () -> stub.registerNode(registerNode("node-x", "nocolon")), "Invalid node address 'nocolon'");
+
+            assertSame(before, stateMachine.getSnapshot());
+            assertEquals(logIndex, coordinator.node.getState().getLog().lastIndex());
+            assertNull(stateMachine.getSnapshot().getNode("node-x"));
+
+            String follower = shard.replicas().getLast();
+            assertTrue(
+                    stub.setShardLeader(setShardLeader(shard.epoch(), follower)).getSuccess());
+            assertEquals(
+                    follower, stateMachine.getSnapshot().getShard("shard-0").leader());
+            assertEquals(before.getMapVersion() + 1, stateMachine.getMapVersion());
+        }
+    }
+
+    @Test
+    void committedCommandRejectedOnApplyReturnsInvalidArgumentAndKeepsTheLeaderServing() throws Exception {
+        RaftStateMachineImpl stateMachine = new RaftStateMachineImpl();
+        // The service validates against a view in which node-9 is a registered replica, standing in for a snapshot
+        // that changes between validation and commit. Only the apply-time check can reject the command.
+        RaftStateMachineImpl staleView = new RaftStateMachineImpl();
+        staleView.applySync(new RaftCommand.RegisterNode("node-1", "localhost:8001", "zone-a"));
+        staleView.applySync(new RaftCommand.RegisterNode("node-9", "localhost:8009", "zone-a"));
+        staleView.applySync(new RaftCommand.InitShards(1, 2));
+        try (SingleNodeCoordinator coordinator = new SingleNodeCoordinator(tempDir, stateMachine, staleView)) {
+            RaftNode node = coordinator.node;
+            node.submitCommand(new RaftCommand.RegisterNode("node-1", "localhost:8001", "zone-a"))
+                    .get(5, TimeUnit.SECONDS);
+            node.submitCommand(new RaftCommand.RegisterNode("node-2", "localhost:8002", "zone-a"))
+                    .get(5, TimeUnit.SECONDS);
+            node.submitCommand(new RaftCommand.InitShards(1, 2)).get(5, TimeUnit.SECONDS);
+            ShardMapSnapshot before = stateMachine.getSnapshot();
+            long logIndex = node.getState().getLog().lastIndex();
+
+            assertInvalidArgument(
+                    () -> coordinator.stub().setShardReplicas(setShardReplicas("node-1", "node-9")),
+                    "Node not found: node-9");
+            ExecutionException direct = assertThrows(ExecutionException.class, () -> node.submitCommand(
+                            new RaftCommand.SetShardLeader("shard-0", 1, "node-9"))
+                    .get(5, TimeUnit.SECONDS));
+            assertInstanceOf(RejectedMutationException.class, direct.getCause());
+
+            assertSame(before, stateMachine.getSnapshot());
+            assertEquals(logIndex + 2, node.getState().getLog().lastIndex());
+            assertEquals(logIndex + 2, node.getState().getLastApplied());
+
+            node.submitCommand(new RaftCommand.SetShardReplicas("shard-0", List.of("node-2", "node-1")))
+                    .get(5, TimeUnit.SECONDS);
+            assertEquals(
+                    List.of("node-2", "node-1"),
+                    stateMachine.getSnapshot().getShard("shard-0").replicas());
+            assertEquals(before.getMapVersion() + 1, stateMachine.getMapVersion());
+        }
+    }
+
+    private static RegisterNodeRequest registerNode(String nodeId, String address) {
+        return RegisterNodeRequest.newBuilder()
+                .setNodeId(nodeId)
+                .setAddress(address)
+                .setZone("zone-a")
+                .build();
+    }
+
+    private static SetShardLeaderRequest setShardLeader(long epoch, String leaderNodeId) {
+        return SetShardLeaderRequest.newBuilder()
+                .setShardId("shard-0")
+                .setEpoch(epoch)
+                .setLeaderNodeId(leaderNodeId)
+                .build();
+    }
+
+    private static SetShardReplicasRequest setShardReplicas(String... replicas) {
+        return SetShardReplicasRequest.newBuilder()
+                .setShardId("shard-0")
+                .addAllReplicas(List.of(replicas))
+                .build();
+    }
+
+    private static void assertInvalidArgument(Executable rpc, String expectedDescription) {
+        StatusRuntimeException e = assertThrows(StatusRuntimeException.class, rpc);
+        assertEquals(
+                Status.Code.INVALID_ARGUMENT,
+                e.getStatus().getCode(),
+                e.getStatus().toString());
+        assertTrue(
+                e.getStatus().getDescription().contains(expectedDescription),
+                e.getStatus().getDescription());
+    }
+
+    /** A single-member coordinator that has elected itself leader, served over gRPC with the production interceptor. */
+    private static final class SingleNodeCoordinator implements AutoCloseable {
+
+        private final FileBasedRaftLog log;
+        private final RaftNode node;
+        private final Server server;
+        private final ManagedChannel channel;
+
+        SingleNodeCoordinator(Path tempDir, RaftStateMachine stateMachine, RaftStateMachine serviceView)
+                throws Exception {
+            RaftConfiguration config =
+                    configuration("leader", Map.of("leader", "localhost:0"), tempDir.resolve("single"));
+            log = new FileBasedRaftLog(tempDir.resolve("single.log"));
+            node = new RaftNode(
+                    "leader",
+                    config,
+                    log,
+                    new RaftPersistentStateStore(tempDir.resolve("single-state").toString()),
+                    stateMachine,
+                    (peer, request) -> CompletableFuture.failedFuture(new AssertionError("unexpected vote RPC")),
+                    (peer, request) -> CompletableFuture.failedFuture(new AssertionError("unexpected append RPC")));
+            node.start();
+            node.getState().becomeCandidate();
+            node.getState().becomeLeader(config.getPeers().keySet());
+            server = NettyServerBuilder.forPort(0)
+                    .addService(ServerInterceptors.intercept(
+                            new CoordinatorServiceImpl(node, serviceView, new WatcherManager()),
+                            new GlobalExceptionInterceptor()))
+                    .build()
+                    .start();
+            channel = NettyChannelBuilder.forAddress("localhost", server.getPort())
+                    .usePlaintext()
+                    .build();
+        }
+
+        CoordinatorGrpc.CoordinatorBlockingStub stub() {
+            return CoordinatorGrpc.newBlockingStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS);
+        }
+
+        @Override
+        public void close() throws Exception {
+            channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+            server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
             node.stop();
             log.close();
         }

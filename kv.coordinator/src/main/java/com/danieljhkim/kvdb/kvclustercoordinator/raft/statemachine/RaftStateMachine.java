@@ -32,6 +32,11 @@ public interface RaftStateMachine {
      * machine; they must not create a second command log. The returned future is the acknowledgement used by the Raft
      * applier, so it must complete successfully only after the mutation has completed.
      *
+     * <p>
+     * A command that is invalid against the current state completes exceptionally with a
+     * {@link com.danieljhkim.kvdb.kvclustercoordinator.state.RejectedMutationException} and leaves the state unchanged.
+     * The applier consumes such an entry as a deterministic no-op; any other failure halts the applier.
+     *
      * @param command the command to apply
      * @return a future that completes when the committed command has been applied
      */

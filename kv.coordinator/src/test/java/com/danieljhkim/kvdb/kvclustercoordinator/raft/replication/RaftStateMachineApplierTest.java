@@ -13,6 +13,7 @@ import com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLogEntry;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.state.RaftNodeState;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine.RaftStateMachine;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine.RaftStateMachineImpl;
+import com.danieljhkim.kvdb.kvclustercoordinator.state.RejectedMutationException;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapDelta;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
 import java.io.IOException;
@@ -82,6 +83,32 @@ class RaftStateMachineApplierTest {
         assertThrows(
                 CompletionException.class, () -> applier.applyCommittedEntries().join());
         assertEquals(List.of(first, failed), attempts);
+    }
+
+    @Test
+    void rejectedEntryIsConsumedAsNoOpAndReportedOnceForItsIndex() {
+        RaftCommand invalidLeader = new RaftCommand.SetShardLeader("shard-0", 1, "node-9");
+        InMemoryRaftLog log = new InMemoryRaftLog(List.of(
+                entry(1, command("node-1")),
+                entry(2, new RaftCommand.InitShards(1, 1)),
+                entry(3, invalidLeader),
+                entry(4, command("node-2"))));
+        RaftNodeState state = committedState(log, 4);
+        RaftStateMachineImpl stateMachine = new RaftStateMachineImpl();
+        RaftStateMachineApplier applier = directApplier(state, stateMachine);
+
+        applier.applyCommittedEntries().join();
+
+        assertEquals(4, state.getLastApplied());
+        assertTrue(applier.isRunning());
+        assertEquals(1, stateMachine.getMapVersion());
+        assertEquals("node-1", stateMachine.getSnapshot().getShard("shard-0").leader());
+        assertTrue(stateMachine.getSnapshot().getNodes().containsKey("node-2"));
+        RejectedMutationException rejection =
+                assertThrows(RejectedMutationException.class, () -> applier.throwIfRejected(3));
+        assertTrue(rejection.getMessage().contains("node-9"));
+        applier.throwIfRejected(3);
+        applier.throwIfRejected(4);
     }
 
     @Test

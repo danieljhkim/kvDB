@@ -20,16 +20,21 @@ public class SystemConfig {
 
     private static SystemConfig INSTANCE;
     private final Properties properties;
+    private final ClassLoader classLoader;
     private String resourcePath = "";
 
     private SystemConfig() {
-        this.properties = new Properties();
-        loadDefaultConfigFile();
-        loadEnvSpecificConfigFile();
+        this("");
     }
 
     private SystemConfig(String resourcePath) {
+        this(resourcePath, SystemConfig.class.getClassLoader());
+    }
+
+    /** Package-private so tests can supply the classloader that serves classpath resources. */
+    SystemConfig(String resourcePath, ClassLoader classLoader) {
         this.resourcePath = resourcePath;
+        this.classLoader = classLoader;
         this.properties = new Properties();
         loadDefaultConfigFile();
         loadEnvSpecificConfigFile();
@@ -60,14 +65,13 @@ public class SystemConfig {
                 logger.warn("Failed to load default configuration from filesystem", e);
             }
         }
-        try (InputStream input =
-                getClass().getClassLoader().getResourceAsStream(resourcePath + "/" + DEFAULT_CONFIG_FILE)) {
+        String resource = resourceName(DEFAULT_CONFIG_FILE);
+        try (InputStream input = classLoader.getResourceAsStream(resource)) {
             if (input != null) {
                 properties.load(input);
-                logger.info("Loaded default configuration from classpath: {}/{}", resourcePath, DEFAULT_CONFIG_FILE);
+                logger.info("Loaded default configuration from classpath: {}", resource);
             } else {
-                logger.warn(
-                        "Default configuration file not found in classpath: {}/{}", resourcePath, DEFAULT_CONFIG_FILE);
+                logger.warn("Default configuration file not found in classpath: {}", resource);
             }
         } catch (IOException e) {
             logger.warn("Failed to load default configuration from classpath", e);
@@ -77,28 +81,34 @@ public class SystemConfig {
     private void loadEnvSpecificConfigFile() {
         String env = System.getProperty("kvdb.env");
         if (env != null && !env.isEmpty()) {
-            String envConfigFile = resourcePath + "/application-" + env + ".properties";
-            Path envPath = Paths.get(envConfigFile);
+            String envFileName = "application-" + env + ".properties";
+            Path envPath = Paths.get(resourcePath, envFileName);
 
             if (Files.exists(envPath)) {
-                try (InputStream input = new FileInputStream(envConfigFile)) {
+                try (InputStream input = new FileInputStream(envPath.toFile())) {
                     properties.load(input);
-                    logger.info("Loaded environment-specific configuration from: {}", envConfigFile);
+                    logger.info("Loaded environment-specific configuration from: {}", envPath);
                 } catch (IOException e) {
-                    logger.warn("Failed to load environment-specific configuration file: {}", envConfigFile, e);
+                    logger.warn("Failed to load environment-specific configuration file: {}", envPath, e);
                 }
             } else {
-                logger.warn("Environment-specific configuration file not found: {}", envConfigFile);
+                logger.warn("Environment-specific configuration file not found: {}", envPath);
             }
-            try (InputStream input = getClass().getClassLoader().getResourceAsStream(envConfigFile)) {
+            String resource = resourceName(envFileName);
+            try (InputStream input = classLoader.getResourceAsStream(resource)) {
                 if (input != null) {
                     properties.load(input);
-                    logger.info("Loaded env configuration from classpath: {}", envConfigFile);
+                    logger.info("Loaded env configuration from classpath: {}", resource);
                 }
             } catch (IOException e) {
                 logger.warn("Failed to load env configuration from classpath", e);
             }
         }
+    }
+
+    /** Classpath names are relative to the root, so an empty resourcePath must not produce a leading slash. */
+    private String resourceName(String fileName) {
+        return resourcePath.isEmpty() ? fileName : resourcePath + "/" + fileName;
     }
 
     public String getProperty(String key, String defaultValue) {

@@ -4,6 +4,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
@@ -255,6 +256,12 @@ func (c *Client) Get(ctx context.Context, key []byte, options ReadOptions) (*Rea
 	}
 
 	kv := response.GetKv()
+	if kv == nil {
+		return nil, malformedResponse("Get", "status OK without a key-value")
+	}
+	if !bytes.Equal(kv.GetKey(), key) {
+		return nil, malformedResponse("Get", "key-value is for a different key than requested")
+	}
 	return &ReadResult{
 		Value:          kv.GetValue(),
 		Version:        kv.GetVersion(),
@@ -303,8 +310,17 @@ func (c *Client) BatchGet(ctx context.Context, keys [][]byte, options ReadOption
 		if item.GetOutcome() == gateway.BatchGetOutcome_BATCH_GET_OUTCOME_UNSPECIFIED {
 			return nil, malformedBatchResponse(fmt.Sprintf("result %d has no terminal outcome", index))
 		}
+		if !bytes.Equal(item.GetKey(), keys[index]) {
+			return nil, malformedBatchResponse(fmt.Sprintf("result %d echoes a different key than requested", index))
+		}
 		status := statusError(item.GetStatus())
 		kv := item.GetKv()
+		if kv != nil && !bytes.Equal(kv.GetKey(), keys[index]) {
+			return nil, malformedBatchResponse(fmt.Sprintf("result %d key-value is for a different key than requested", index))
+		}
+		if kv == nil && status.Code == gateway.Status_OK && item.GetOutcome() == gateway.BatchGetOutcome_COMPLETED {
+			return nil, malformedBatchResponse(fmt.Sprintf("result %d completed with status OK but has no key-value", index))
+		}
 		result.Results[index] = BatchReadItem{
 			Status:         status,
 			Outcome:        item.GetOutcome(),
@@ -323,7 +339,11 @@ func (c *Client) BatchGet(ctx context.Context, keys [][]byte, options ReadOption
 }
 
 func malformedBatchResponse(message string) error {
-	return &StatusError{Code: gateway.Status_INTERNAL, Message: "malformed BatchGet response: " + message}
+	return malformedResponse("BatchGet", message)
+}
+
+func malformedResponse(method, message string) error {
+	return &StatusError{Code: gateway.Status_INTERNAL, Message: "malformed " + method + " response: " + message}
 }
 
 // Put writes one key. The write is attempted exactly once: an ambiguous

@@ -496,3 +496,94 @@ func TestTransportFailuresOnWritesCarryTheRequestIdActuallySent(t *testing.T) {
 		}
 	}
 }
+
+func TestMalformedSuccessfulGetIsRejected(t *testing.T) {
+	cases := map[string]*gateway.GetResponse{
+		"ok without key-value":    {Status: &gateway.Status{Code: gateway.Status_OK}},
+		"key-value for wrong key": {Status: &gateway.Status{Code: gateway.Status_OK}, Kv: &gateway.KeyValue{Key: []byte("other"), Value: []byte("v"), Version: 3}},
+		"key-value without key":   {Status: &gateway.Status{Code: gateway.Status_OK}, Kv: &gateway.KeyValue{Value: []byte("v"), Version: 3}},
+	}
+	for name, response := range cases {
+		t.Run(name, func(t *testing.T) {
+			server := testfixture.Start(t, testfixture.Hooks{
+				Get: func(context.Context, *gateway.GetRequest) (*gateway.GetResponse, error) { return response, nil },
+			}, nil)
+			kv := dial(t, plaintextConfig(server.Address()))
+
+			result, err := kv.Get(context.Background(), []byte("k"), client.ReadOptions{})
+			var statusErr *client.StatusError
+			if !errors.As(err, &statusErr) || statusErr.StatusName() != "INTERNAL" || !strings.Contains(statusErr.Error(), "malformed Get response") {
+				t.Fatalf("expected a malformed-response error, got result=%+v err=%v", result, err)
+			}
+			if result != nil {
+				t.Fatalf("a malformed read must not produce a result: %+v", result)
+			}
+		})
+	}
+}
+
+func TestMalformedSuccessfulBatchGetIsRejected(t *testing.T) {
+	ok := &gateway.Status{Code: gateway.Status_OK}
+	keys := [][]byte{[]byte("k"), binaryKey}
+	good := func(key []byte) *gateway.BatchGetResult {
+		return &gateway.BatchGetResult{Key: key, Status: ok, Kv: &gateway.KeyValue{Key: key, Value: []byte("v"), Version: 1}, Outcome: gateway.BatchGetOutcome_COMPLETED}
+	}
+	cases := map[string][]*gateway.BatchGetResult{
+		"echoed key differs":         {good([]byte("k")), good([]byte("other"))},
+		"echoed key missing":         {good([]byte("k")), {Status: ok, Kv: &gateway.KeyValue{Key: binaryKey}, Outcome: gateway.BatchGetOutcome_COMPLETED}},
+		"results swapped":            {good(binaryKey), good([]byte("k"))},
+		"kv key differs":             {good([]byte("k")), {Key: binaryKey, Status: ok, Kv: &gateway.KeyValue{Key: []byte("wrong-key"), Value: []byte("wrong-value")}, Outcome: gateway.BatchGetOutcome_COMPLETED}},
+		"completed ok without kv":    {good([]byte("k")), {Key: binaryKey, Status: ok, Outcome: gateway.BatchGetOutcome_COMPLETED}},
+		"not found echoes wrong key": {good([]byte("k")), {Key: []byte("other"), Status: &gateway.Status{Code: gateway.Status_NOT_FOUND}, Outcome: gateway.BatchGetOutcome_COMPLETED}},
+	}
+	for name, results := range cases {
+		t.Run(name, func(t *testing.T) {
+			server := testfixture.Start(t, testfixture.Hooks{
+				BatchGet: func(context.Context, *gateway.BatchGetRequest) (*gateway.BatchGetResponse, error) {
+					return &gateway.BatchGetResponse{Status: ok, Results: results}, nil
+				},
+			}, nil)
+			kv := dial(t, plaintextConfig(server.Address()))
+
+			result, err := kv.BatchGet(context.Background(), keys, client.ReadOptions{})
+			var statusErr *client.StatusError
+			if !errors.As(err, &statusErr) || statusErr.StatusName() != "INTERNAL" || !strings.Contains(statusErr.Error(), "malformed BatchGet response") {
+				t.Fatalf("expected a malformed-response error, got result=%+v err=%v", result, err)
+			}
+			if result != nil {
+				t.Fatalf("a malformed batch must not produce a result: %+v", result)
+			}
+		})
+	}
+}
+
+func TestValidBatchGetKeepsDuplicatesEmptyValuesHeadOnlyAndPartialOutcomes(t *testing.T) {
+	ok := &gateway.Status{Code: gateway.Status_OK}
+	keys := [][]byte{binaryKey, []byte("dup"), []byte("dup"), []byte("missing"), []byte("late")}
+	server := testfixture.Start(t, testfixture.Hooks{
+		BatchGet: func(context.Context, *gateway.BatchGetRequest) (*gateway.BatchGetResponse, error) {
+			return &gateway.BatchGetResponse{Status: ok, Results: []*gateway.BatchGetResult{
+				{Key: keys[0], Status: ok, Kv: &gateway.KeyValue{Key: keys[0], Value: []byte{}, Version: 4}, Outcome: gateway.BatchGetOutcome_COMPLETED},
+				{Key: keys[1], Status: ok, Kv: &gateway.KeyValue{Key: keys[1], Version: 5}, Outcome: gateway.BatchGetOutcome_COMPLETED},
+				{Key: keys[2], Status: ok, Kv: &gateway.KeyValue{Key: keys[2], Version: 5}, Outcome: gateway.BatchGetOutcome_COMPLETED},
+				{Key: keys[3], Status: &gateway.Status{Code: gateway.Status_NOT_FOUND}, Outcome: gateway.BatchGetOutcome_COMPLETED},
+				{Key: keys[4], Status: &gateway.Status{Code: gateway.Status_TIMEOUT}, Outcome: gateway.BatchGetOutcome_DEADLINE_EXCEEDED},
+			}}, nil
+		},
+	}, nil)
+	kv := dial(t, plaintextConfig(server.Address()))
+
+	result, err := kv.BatchGet(context.Background(), keys, client.ReadOptions{HeadOnly: true})
+	if err != nil {
+		t.Fatalf("a well-formed batch must succeed: %v", err)
+	}
+	found := []bool{true, true, true, false, false}
+	for index, want := range found {
+		if result.Results[index].Found != want {
+			t.Fatalf("result %d found=%v, want %v", index, result.Results[index].Found, want)
+		}
+	}
+	if result.Results[4].Outcome != gateway.BatchGetOutcome_DEADLINE_EXCEEDED || result.Results[0].Version != 4 {
+		t.Fatalf("partial outcome or version lost: %+v", result.Results)
+	}
+}

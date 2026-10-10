@@ -1,261 +1,120 @@
 # KvDB — Distributed Key-Value Database
 
 ![Java](https://img.shields.io/badge/Java-21+-007396?style=for-the-badge)
-![Distributed Systems](https://img.shields.io/badge/Distributed%20Systems-Architecture-0B3C5D?style=for-the-badge)
 ![gRPC](https://img.shields.io/badge/gRPC-Transport-4285F4?style=for-the-badge)
 ![Control Plane](https://img.shields.io/badge/Control%20Plane-Separated-5C6BC0?style=for-the-badge)
 
+KvDB is a Redis-like distributed key-value store in Java. It separates the **control plane** (cluster metadata, held
+by a Raft group of coordinators) from the **data plane** (storage nodes), and all services talk over gRPC.
 
-KvDB is a Redis-like distributed key-value store implemented in Java, built around a clear separation between the **control plane** (cluster metadata) and the **data plane** (storage nodes). The system uses gRPC for service-to-service communication and is designed to evolve toward production-grade correctness (leader routing, topology epochs, retries, and consistent metadata propagation).
-
-> Note: KvDB exposes a gRPC API. A non-interactive command line client for the
-> gateway data plane ships in [`golang/kvcli`](golang/kvcli/README.md); it
-> supports `get`, ordered `batch-get`, `put`/`set`, `del`/`delete`, and `ping`.
-> There is no
-> interactive shell and no line protocol.
+Clients use the gRPC API or the non-interactive CLI in [`golang/kvcli`](golang/kvcli/README.md). There is no
+interactive shell and no line protocol.
 
 ---
 
 ## Architecture
 
-KvDB is composed of four primary components:
-
-- **Gateway (gRPC)**: Front door for clients. Performs shard routing, retries, and maintains a local shard-map cache.
-- **Admin API (HTTP)**: Control-plane management surface. Bootstraps cluster state (e.g., shard initialization) and manages node membership.
-- **Coordinator (gRPC / control plane)**: Owns the shard map, node records, shard epochs/versions, and streaming shard-map updates.
-- **Storage Nodes (gRPC / data plane)**: Host shard replicas, serve reads, and accept writes only when they are the shard leader (or can provide a leader hint).
+| Component | Protocol | Role |
+|---|---|---|
+| **Gateway** | gRPC | Client front door: shard routing, retries, local shard-map cache. |
+| **Coordinator** | gRPC, Raft group | Owns the shard map, node records, shard epochs, and shard-map watch streams. |
+| **Storage node** | gRPC | Hosts shard replicas, serves reads, and accepts writes only as shard leader. |
+| **Admin API** | HTTP | Operator surface: node registration and shard bootstrap, forwarded to the coordinator. |
 
 ```
-         +-----------------------------+
-         |        Client (gRPC)        |
-         +-------------+---------------+
-                       |
-         +-------------v---------------+
-         |          Gateway            |
-         | - Shard map cache           |
-         | - Routing + retries         |
-         | - Parses routing hints      |
-         +------+------+---------------+
-                |      \
-                |       \  (data plane)
-                v        v
-         +------+-----+  +------+-----+  +------+-----+
-         |  Node A    |  |  Node B    |  |  Node C    |
-         | KV shard(s)|  | KV shard(s)|  | KV shard(s)|
-         +------------+  +------------+  +------------+
-
-                 (control plane / metadata)
-         +--------------------------------------+
-         |     Coordinator (Raft group)         |
-         | - Shard map + epochs/versions        |
-         | - Membership + status                |
-         | - WatchShardMap (deltas)             |
-         +--------------------------------------+
-                 ^                ^
-                 | watch/deltas   | admin mutations
-                 | bootstrap/refresh
-         +-------+----------------+-------+
-         |              Admin API         |
-         |   - node registration          |
-         |   - shard initialization       |
-         +-------------------------------+
-                        ^
-                        | HTTP (local ops)
-                        |
-                    Operator
+ Client ──gRPC──▶ Gateway ──data plane──▶ Node A │ Node B │ Node C
+                     │                       │
+                     ▼ watch / refresh       ▼ shard-map validation
+              Coordinator (Raft group) ◀── admin mutations ── Admin API ◀──HTTP── Operator
 ```
 
----
+### Routing
 
-## Key Concepts
+- Each key maps to a **shard**. A shard has a **replica set** and one **leader**. Writes go to the leader. Reads may
+  go to the leader or a replica, depending on routing policy.
+- The gateway keeps its shard-map cache fresh with **WatchShardMap** delta streams and falls back to polling while
+  the stream is down.
+- Storage nodes check every request against the coordinator's shard map: are they a replica, are they the leader (for
+  writes), and does the request's **epoch** match the current one.
+- On errors, nodes return routing hints in gRPC trailers (`x-leader-hint`, `x-shard-id`, `x-new-node-hint`). The
+  gateway retries once at the hinted leader on `NOT_LEADER`, forces a refresh on `SHARD_MOVED`, and otherwise
+  backs off and refreshes, with throttling.
 
-### Shards, Replicas, and Leaders
-- Keys map to a **shard** (routing is based on the shard map).
-- Each shard has a **replica set** (one or more storage nodes).
-- Writes are routed to the **per-shard leader**.
-- Reads may be served by a leader or a replica, depending on routing policy.
+### Coordinator invariants
 
-### Shard Map Cache (Gateway)
-The Gateway keeps a local shard map cache and keeps it fresh using a streaming watch:
-- **WatchShardMap** provides **delta-based updates** to avoid full refreshes.
-- On stream failures, the Gateway falls back to periodic polling until streaming resumes.
+The coordinator rejects invalid shard-map mutations with `INVALID_ARGUMENT` (HTTP 400 through the Admin API) and
+leaves the shard map unchanged when it does:
 
-### Routing Hints (Fast Recovery)
-Storage nodes return routing hints via **gRPC trailers**, allowing the Gateway to react quickly without global refreshes:
-- `x-leader-hint`: preferred leader address for a shard
-- `x-shard-id`: shard identifier related to the error
-- `x-new-node-hint`: node address hint when shard ownership has moved
+- node addresses are `host:port` (hostname or IPv4, port 1–65535);
+- replica sets are non-empty, have no duplicates, and contain only registered node IDs;
+- a shard leader is a registered member of the shard's current replica set, at its current epoch.
 
-The Gateway uses these hints to:
-- Retry once directly to the hinted leader for `NOT_LEADER`
-- Force a shard-map refresh for `SHARD_MOVED`
-- Otherwise trigger throttled refresh/backoff to avoid thrash
+The leader validates each command before it enters the Raft log, and every coordinator validates again at apply time.
+A command that became invalid in between is applied as a no-op.
 
-### Node-side Validation
-Storage nodes consult the coordinator shard map to validate:
-- Whether they are a **replica** of the shard
-- Whether they are the **leader** for write operations
-- Whether the provided **epoch** matches the shard’s current epoch (to prevent stale routing)
+New nodes register as `ALIVE`, because a node registers only once it is serving. The health checker moves an
+unreachable node to `SUSPECT` and then to `DEAD` after consecutive failed probes. The gateway routes only to `ALIVE`
+nodes.
 
 ---
 
 ## APIs
 
-### Client → Gateway (gRPC)
-Core operations:
-- `Get`
-- `BatchGet`
-- `Put`
-- `Delete`
-
-The Gateway is responsible for:
-- Resolving the shard for a key
-- Routing reads/writes to appropriate nodes
-- Retrying with backoff where safe
-- Interpreting routing hints from trailers
-
-#### BatchGet semantics and limits
-
-`BatchGet` accepts binary `keys`, shared `ReadOptions`, and a shared optional
-`head_only` flag. For every accepted request, `results` contains exactly one
-entry per input key in input order. Duplicate keys remain duplicate results.
-Each result echoes its binary key and carries the same status, value/version
-metadata, and serving-node `applied_version` as unary `Get`.
-
-**There is no cross-key snapshot or atomic-read guarantee.** Each key is routed
-and read independently. `STRONG`, `EVENTUAL`, and `head_only` therefore have
-exactly the unary `Get` semantics for that item; results from different keys
-may reflect different instants or shard versions.
-
-Example request (protobuf text notation):
-
-```protobuf
-keys: "\000customer-1"
-keys: "\377customer-2"
-keys: "\000customer-1"  // intentionally repeated
-options { consistency: STRONG }
-head_only: false
-ctx { request_id: "read-set-42" }
-```
-
-The default gateway bounds are configured under `limits`:
-
-- `maxBatchEntries: 128`
-- `maxBatchAggregateKeyBytes: 65536`
-- `maxBatchGetConcurrency: 16`
-- `maxBatchGetResponseBytes: 2097152`
-
-Key-count, aggregate-key-size, individual-key, option, and inbound-message
-violations fail request-wide validation before any storage read is dispatched.
-After dispatch, found, not-found, and unavailable results can coexist. Deadline
-and cancellation outcomes explicitly mark every remaining key. If a successful
-item would exceed the response budget, it and all remaining items are returned
-as `RESPONSE_BUDGET_EXHAUSTED`; the serialized response remains within the
-configured budget. The budget must be large enough to encode one termination
-outcome per admitted key, or the request is rejected before dispatch.
-
-### Gateway/Nodes → Coordinator (gRPC)
-Metadata and control plane operations:
-- Shard map snapshot reads
-- Shard map watch (delta streaming)
-- Node/shard admin mutations (e.g., register node, init shards, set node status, set shard replicas/leader)
-
-### Client → Gateway (command line)
-
-`golang/kvcli` is a non-interactive client for the gateway data plane. It uses
-the generated bindings for `kv.proto/src/main/proto/kvgateway.proto`; run
-`make proto-go` to regenerate them with the pinned plugin versions.
+- **Client → Gateway (gRPC):** `Get`, `BatchGet`, `Put`, `Delete`.
+  - `BatchGet` returns exactly one result per input key, in input order.
+  - It gives **no cross-key snapshot**: each key is read independently.
+  - Its limits and full semantics are in [docs/api-compatibility.md](docs/api-compatibility.md#batchget-semantics-and-limits).
+- **Gateway/Nodes → Coordinator (gRPC):** shard-map snapshots, delta watches, and membership and shard mutations.
+- **Admin API (HTTP):**
+  - `POST /admin/nodes` registers or updates a node.
+  - `POST /admin/config/shard-init` bootstraps the shard map.
+- **CLI ([`golang/kvcli`](golang/kvcli/README.md)):**
+  - Commands are `get`, `batch-get`, `put`/`set`, `del`/`delete` and `ping`.
+  - It is binary-safe (`--key-file`, `--value-file`, `--output-file`), deadline-bounded, and exits with stable
+    status codes.
+  - It reports an ambiguous write outcome instead of retrying it.
 
 ```bash
 make go-build                       # builds golang/kvcli/kv
-kv put greeting hello               # writes, prints status and version
+kv put greeting hello
 kv get greeting --raw > value.bin   # stdout receives exactly the stored bytes
 printf '["Z3JlZXRpbmc="]' | kv batch-get --input -
 kv del greeting
-kv ping                             # bounded head-only reachability probe
+kv ping
 ```
 
-Supported commands are `get`, ordered `batch-get`, `put` (alias `set`), `del`
-(alias `delete`), and `ping`. Keys and values are byte strings: `--key-file`, `--value-file`, and
-`--output-file` (with `-` for standard input) move arbitrary binary data,
-including zero bytes and data that is not valid UTF-8. The removed interactive
-line protocol is rejected explicitly: `kv connect` and `kv --interactive`
-fail with an explanation rather than opening a session.
+The CLI uses the cluster's transport policy:
 
-The client uses the same transport policy as the cluster
-(`KVDB_GRPC_SECURITY_MODE`): mutual TLS by default, and `development-plaintext`
-only when `KVDB_ENV` is `dev`, `development`, `local`, or `test`. Client
-credentials come from `KVDB_CLIENT_TLS_TRUST_BUNDLE`,
-`KVDB_CLIENT_TLS_CERT_CHAIN`, and `KVDB_CLIENT_TLS_PRIVATE_KEY` (or the
-matching flags). Local plaintext also requires `KVDB_CLIENT_TENANT_ID` and
-`KVDB_CLIENT_PRINCIPAL` (or `--tenant` and `--principal`); it sends the
-development-only `client/<tenant>/<principal>` identity required by the local
-gateway. Every RPC is deadline-bounded, non-OK application and
-transport statuses exit nonzero with stable status names, and an ambiguous
-write outcome is reported rather than retried. See
-[golang/kvcli/README.md](golang/kvcli/README.md).
+- mutual TLS by default;
+- `development-plaintext` only when `KVDB_ENV` is `local`, `dev`, `development` or `test`.
 
-### Admin API (HTTP)
-The Admin API provides a control-plane management surface intended for local operations and cluster bootstrapping:
-- `POST /admin/nodes` — register or update a node (membership)
-- `POST /admin/config/shard-init` — initialize the shard map (bootstrap)
-
-Note: the Admin API forwards mutations to the Coordinator (Raft-backed state machine) to keep cluster metadata consistent.
-
-The Coordinator validates shard-map mutations against cluster membership and rejects invalid ones with
-`INVALID_ARGUMENT` (HTTP 400 through the Admin API) without changing the shard map:
-- a node address must be `host:port` (hostname or IPv4 host, port 1-65535);
-- a shard's replica set must be non-empty, without duplicates, and contain only registered node IDs;
-- a shard leader must be a registered node in the shard's current replica set, at the shard's current epoch.
-
-The leader checks a request before it enters the Raft log, and every coordinator repeats the check when it applies a
-committed command, so a command that became invalid in between is applied as a no-op rather than corrupting state.
-
-A newly registered node starts `ALIVE` instead of waiting for its first health probe: registration happens once the
-node is serving, and the gateway only routes to `ALIVE` nodes. The coordinator's health checker marks an unreachable
-node `SUSPECT` and then `DEAD` on consecutive failed probes.
-
+Its README covers credentials, flags and exit codes. To regenerate the Go bindings, run `make proto-go`.
 
 ---
 
 ## Running Locally
 
-Consult the `Makefile` for common developer commands.
+Normal deployments use mutually authenticated workload certificates for internal gRPC. `make run-cluster` selects
+`development-plaintext` with development-only identities, so it requires `KVDB_ENV` to be `local`, `dev`,
+`development` or `test`. See [SECURITY.md](SECURITY.md); the `Makefile` lists the other developer commands.
 
-Internal gRPC uses mutually authenticated workload certificates in normal
-deployments. `make run-cluster` explicitly selects the fail-closed
-`development-plaintext` mode and supplies development-only identities; that mode
-is refused unless `KVDB_ENV` is `local`, `dev`, `development`, or `test`. Local
-processes and Docker Compose use the same coordinator seed endpoints (`localhost:9001` through
-`localhost:9003`). Compose publishes them on loopback only; storage-node ports
-remain private. See [SECURITY.md](SECURITY.md).
+```bash
+make build
+export KVDB_ADMIN_SECURITY_API_KEY="$(openssl rand -hex 32)"   # Admin API fails closed without it
+make run-cluster        # 3 coordinators, 2 storage nodes, gateway, Admin API
+make bootstrap-cluster
+make smoke-test
+make stop               # stops only the processes this checkout started
+```
 
-Typical flow:
-1. Build:
-   ```bash
-   make build
-   ```
-2. Run a local cluster (coordinator + 2 data nodes + gateway + admin API). The Admin API fails closed
-   without an API key, so export a development key first (`run-cluster` exits before starting any process if it
-   is missing; set `START_ADMIN=false` to skip the Admin API):
-   ```bash
-   export KVDB_ADMIN_SECURITY_API_KEY="$(openssl rand -hex 32)"
-   make run-cluster
-   ```
-   `run-cluster` waits up to `STARTUP_TIMEOUT_SECONDS` (default 60) for each component to open its port and exits
-   nonzero, naming the component and tailing its log, if one dies or never becomes ready. Logs go to `logs/` and
-   state to `data/` under the repository, regardless of the directory you run it from. `make stop` stops only the
-   processes this checkout started (tracked in `data/.run_cluster.pids`).
-3. Boostrap the cluster:
-   ```bash
-   make bootstrap-cluster
-   ```
-4. Smoke test the cluster:
-   ```bash
-   make smoke-test
-   ```
+How `run-cluster` behaves:
 
-For the durable three-coordinator Docker deployment:
+- It exits before starting anything if the API key is missing. Set `START_ADMIN=false` to skip the Admin API instead.
+- It waits up to `STARTUP_TIMEOUT_SECONDS` (default 60) for each component to open its port.
+- If a component dies or never becomes ready, it exits nonzero, names the component, and tails its log.
+- Logs go to `logs/` and state to `data/` under the repository.
+
+### Docker (durable three-coordinator cluster)
 
 ```bash
 export KVDB_ADMIN_SECURITY_API_KEY="$(openssl rand -hex 32)"
@@ -267,67 +126,28 @@ STORAGE_NODE_ADDRS=node1:8001,node2:8002 make smoke-test
 docker compose down
 ```
 
-Coordinator and storage-node state files live in named volumes. Use rolling
-restarts to keep quorum available without re-bootstrap, and use
-`docker compose down --volumes` only for an intentional wipe. The automated
-failover, rolling-restart, persistence, and wipe check is:
+- Compose publishes the coordinator seeds on loopback only (`localhost:9001`–`9003`, the same as local processes).
+  Storage-node ports stay private.
+- State lives in named volumes. Use rolling restarts to keep quorum without re-bootstrapping.
+- `docker compose down --volumes` wipes all state, so run it only when you mean to.
+- `./scripts/docker_failover_test.sh` checks failover, rolling restarts, persistence and wipe.
 
-```bash
-./scripts/docker_failover_test.sh
-```
+Coordinator durability (record format, snapshots, fsync boundary, supported filesystems) is documented in
+[docs/raft-persistence.md](docs/raft-persistence.md).
 
-### Raft persistence and snapshots
-
-Coordinator Raft logs, term/vote state, and snapshots use versioned, bounded, CRC32C-protected records. Existing
-length-prefixed logs and properties state files remain readable during rolling upgrades and are rewritten in the new
-format on their next mutation. Any truncated, oversized, malformed, or checksum-invalid safety-critical file stops
-the coordinator; an existing unreadable file is never interpreted as a new node.
-
-`raft.snapshotThreshold` controls how many newly applied entries a leader retains before snapshotting (`10000` by
-default, `0` disables automatic snapshots). The snapshot file is forced before the live log is compacted. Followers
-receive snapshots in bounded chunks and persist a restartable installation file before atomically replacing the live
-snapshot.
-
-The stable-storage boundary is `write temporary -> fsync(file) -> atomic rename -> fsync(parent directory)`.
-Append-only log records are forced before an RPC or command can acknowledge them. kvDB treats failure or lack of
-support for file forcing, atomic rename, or directory forcing as a failed Raft write. The supported deployment
-filesystems are local Linux and macOS filesystems that implement those operations; network filesystems require
-independent crash-consistency qualification.
 ---
 
 ## Benchmarking
 
-Detailed benchmark results and analysis are documented in [docs/performance.md](docs/performance.md).
+Results, and the BatchGet fixed-fixture baseline, are in [docs/performance.md](docs/performance.md).
 
-### BatchGet fixed-fixture baseline
-
-`KvGatewayContractTest.fixedMultiShardBaselineShowsOneClientRpcWithEqualBackendReadsAndBoundedFanout`
-is a reproducible comparison using eight one-byte keys spread across four
-shards, a deterministic 15 ms storage-call fixture, and BatchGet concurrency of
-four. One run on 2026-09-04 produced:
-
-| Path | Client RPCs | Elapsed | Backend reads | Max active reads |
-|---|---:|---:|---:|---:|
-| 8 sequential unary `Get`s | 8 | 152 ms | 8 | 1 |
-| 1 `BatchGet` | 1 | 45 ms | 8 | 4 |
-
-This controlled baseline demonstrates the saved client round trips and bounded
-fanout. It does **not** show fewer backend reads: both paths issued eight. The
-elapsed values are test-fixture observations, not production latency claims;
-rerun the named test on the target hardware for a local baseline.
-
-Gateway (gRPC)
 ```bash
-make k6-gateway-bench
+make k6-gateway-bench     # Gateway (gRPC)
 make ghz-gateway-bench
-```
-
-Admin API (HTTP)
-```bash
-make k6-admin-bench
+make k6-admin-bench       # Admin API (HTTP)
 make vegeta-admin-bench
 ```
 
 ## License
 
-This project is licensed under the MIT License.
+MIT.

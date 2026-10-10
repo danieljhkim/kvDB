@@ -552,6 +552,27 @@ func TestInvalidConfigurationIsRejectedBeforeAnyRpc(t *testing.T) {
 	}
 }
 
+func TestMalformedConfigurationIsRejectedBeforeAnyRpc(t *testing.T) {
+	server, connection := localGateway(t, testfixture.Hooks{})
+	malformed := filepath.Join(t.TempDir(), "kvcli.yaml")
+	if err := os.WriteFile(malformed, []byte("server: [unterminated\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// connection begins with "--config <path>"; point it at the malformed file
+	// and keep the valid gateway flags, which would otherwise succeed.
+	flags := append([]string{"--config", malformed}, connection[2:]...)
+
+	for _, args := range [][]string{{"ping"}, {"get", "k"}} {
+		_, stderr, code := run(t, withArgs(flags, args...)...)
+		if code != ExitUsage || !strings.Contains(stderr, "cannot load configuration") {
+			t.Fatalf("%v: malformed config must exit %d as a configuration error, got %d %q", args, ExitUsage, code, stderr)
+		}
+	}
+	if len(server.Calls()) != 0 {
+		t.Fatalf("malformed configuration must not reach the gateway: %+v", server.Calls())
+	}
+}
+
 func TestPlaintextOutsideDevelopmentIsRefused(t *testing.T) {
 	_, connection := localGateway(t, testfixture.Hooks{})
 	t.Setenv("KVDB_ENV", "production")

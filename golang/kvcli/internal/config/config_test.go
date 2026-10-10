@@ -48,6 +48,83 @@ func TestLoadFallsBackToSafeLocalDefaults(t *testing.T) {
 	}
 }
 
+// isolateDiscovery points the working directory and HOME at empty temporary
+// directories so no real config.yaml or ~/.kvcli/config.yaml can affect a test.
+func isolateDiscovery(t *testing.T) (workdir, home string) {
+	t.Helper()
+	home = t.TempDir()
+	workdir = t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(workdir)
+	return workdir, home
+}
+
+func TestAbsentDiscoveredConfigUsesDefaults(t *testing.T) {
+	isolateDiscovery(t)
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("an absent optional config must fall back to defaults: %v", err)
+	}
+	if cfg.Server.Host != "localhost" || cfg.Server.Port != 7000 {
+		t.Fatalf("unexpected defaults: %+v", cfg.Server)
+	}
+}
+
+func TestMalformedExplicitConfigIsRejected(t *testing.T) {
+	path := writeConfig(t, "server: [unterminated\n")
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("a malformed explicit config must not fall back to defaults")
+	}
+}
+
+func TestUnreadableExplicitConfigIsRejected(t *testing.T) {
+	// A directory exists at the path but cannot be read as a config file.
+	if _, err := Load(t.TempDir()); err == nil {
+		t.Fatal("an unreadable explicit config must not fall back to defaults")
+	}
+
+	if os.Geteuid() == 0 {
+		t.Skip("file permissions do not restrict root")
+	}
+	path := writeConfig(t, "server:\n  port: 7443\n")
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("a permission-denied explicit config must not fall back to defaults")
+	}
+}
+
+func TestMalformedDiscoveredConfigIsRejected(t *testing.T) {
+	workdir, _ := isolateDiscovery(t)
+	writeFile(t, filepath.Join(workdir, "config.yaml"), "server: [unterminated\n")
+
+	if _, err := Load(""); err == nil {
+		t.Fatal("a malformed ./config.yaml must not fall back to defaults")
+	}
+}
+
+func TestMalformedHomeConfigIsRejected(t *testing.T) {
+	_, home := isolateDiscovery(t)
+	if err := os.Mkdir(filepath.Join(home, ".kvcli"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(home, ".kvcli", "config.yaml"), "security: [unterminated\n")
+
+	if _, err := Load(""); err == nil {
+		t.Fatal("a malformed ~/.kvcli/config.yaml must not fall back to defaults")
+	}
+}
+
+func writeFile(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSecurityIsConfiguredWithServerEnvironmentVariables(t *testing.T) {
 	directory := t.TempDir()
 	certificate := filepath.Join(directory, "client.crt")

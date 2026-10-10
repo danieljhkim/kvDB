@@ -111,13 +111,27 @@ type StatusError struct {
 	LeaderHint   string
 	ShardID      string
 	RetryAfterMs uint64
+	// RequestID is the identifier actually sent with a failed Put or Delete, so
+	// an ambiguous write can be retried deliberately under the same identity.
+	// It is empty for operations that do not carry a write identity.
+	RequestID string
 }
 
 func (e *StatusError) Error() string {
-	if e.Message == "" {
-		return fmt.Sprintf("gateway status %s", e.Code)
+	message := fmt.Sprintf("gateway status %s", e.Code)
+	if e.Message != "" {
+		message = fmt.Sprintf("gateway status %s: %s", e.Code, e.Message)
 	}
-	return fmt.Sprintf("gateway status %s: %s", e.Code, e.Message)
+	return message + requestIDSuffix(e.RequestID)
+}
+
+// requestIDSuffix renders the attempted write identity for error text without
+// implying the write did or did not take effect.
+func requestIDSuffix(requestID string) string {
+	if requestID == "" {
+		return ""
+	}
+	return " (request_id=" + requestID + ")"
 }
 
 // StatusName returns the stable protocol name of an application status.
@@ -132,10 +146,14 @@ func IsStatus(err error, code gateway.Status_Code) bool {
 // TransportError is a non-OK gRPC status, i.e. the call itself failed.
 type TransportError struct {
 	Err error
+	// RequestID is the identifier attempted by a failed Put or Delete; the
+	// write may or may not have been applied. Empty for other operations.
+	RequestID string
 }
 
 func (e *TransportError) Error() string {
-	return fmt.Sprintf("gateway transport %s: %s", e.StatusName(), grpcstatus.Convert(e.Err).Message())
+	return fmt.Sprintf("gateway transport %s: %s%s",
+		e.StatusName(), grpcstatus.Convert(e.Err).Message(), requestIDSuffix(e.RequestID))
 }
 
 func (e *TransportError) Unwrap() error { return e.Err }
@@ -323,10 +341,10 @@ func (c *Client) Put(ctx context.Context, key, value []byte, options WriteOption
 		Options: writeOptions,
 	})
 	if err != nil {
-		return nil, &TransportError{Err: err}
+		return nil, &TransportError{Err: err, RequestID: requestID}
 	}
 	if err := applicationError(response.GetStatus()); err != nil {
-		return nil, err
+		return nil, withRequestID(err, requestID)
 	}
 	return &WriteResult{Version: response.GetVersion(), RequestID: requestID}, nil
 }
@@ -350,10 +368,10 @@ func (c *Client) Delete(ctx context.Context, key []byte, options WriteOptions) (
 		Options: writeOptions,
 	})
 	if err != nil {
-		return nil, &TransportError{Err: err}
+		return nil, &TransportError{Err: err, RequestID: requestID}
 	}
 	if err := applicationError(response.GetStatus()); err != nil {
-		return nil, err
+		return nil, withRequestID(err, requestID)
 	}
 	return &WriteResult{Version: response.GetVersion(), RequestID: requestID}, nil
 }
@@ -399,6 +417,15 @@ func applicationError(status *gateway.Status) error {
 		return nil
 	}
 	return statusError(status)
+}
+
+// withRequestID records the attempted write identity on an application error.
+func withRequestID(err error, requestID string) error {
+	var statusErr *StatusError
+	if errors.As(err, &statusErr) {
+		statusErr.RequestID = requestID
+	}
+	return err
 }
 
 func statusError(status *gateway.Status) *StatusError {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -430,5 +431,68 @@ func TestUnknownWriteOutcomeIsSurfacedWithoutRetrying(t *testing.T) {
 	}
 	if len(server.Calls()) != 1 {
 		t.Fatalf("ambiguous write produced %d requests", len(server.Calls()))
+	}
+}
+
+func TestFailedWritesCarryTheRequestIdActuallySent(t *testing.T) {
+	unknown := &gateway.Status{Code: gateway.Status_WRITE_OUTCOME_UNKNOWN, Message: "ambiguous"}
+	server := testfixture.Start(t, testfixture.Hooks{
+		Put: func(context.Context, *gateway.PutRequest) (*gateway.PutResponse, error) {
+			return &gateway.PutResponse{Status: unknown}, nil
+		},
+		Delete: func(context.Context, *gateway.DeleteRequest) (*gateway.DeleteResponse, error) {
+			return &gateway.DeleteResponse{Status: unknown}, nil
+		},
+	}, nil)
+	kv := dial(t, plaintextConfig(server.Address()))
+
+	_, putErr := kv.Put(context.Background(), []byte("k"), []byte("v"), client.WriteOptions{})
+	_, delErr := kv.Delete(context.Background(), []byte("k"), client.WriteOptions{RequestID: "explicit-id"})
+	calls := server.Calls()
+	if len(calls) != 2 {
+		t.Fatalf("expected exactly two attempts, saw %d", len(calls))
+	}
+	for index, err := range []error{putErr, delErr} {
+		var statusErr *client.StatusError
+		if !errors.As(err, &statusErr) || statusErr.Code != gateway.Status_WRITE_OUTCOME_UNKNOWN {
+			t.Fatalf("call %d: expected WRITE_OUTCOME_UNKNOWN, got %v", index, err)
+		}
+		if calls[index].RequestID == "" || statusErr.RequestID != calls[index].RequestID {
+			t.Fatalf("call %d: reported %q, sent %q", index, statusErr.RequestID, calls[index].RequestID)
+		}
+		if !strings.Contains(err.Error(), "request_id="+calls[index].RequestID) {
+			t.Fatalf("call %d: error text omits the request id: %v", index, err)
+		}
+	}
+	if calls[1].RequestID != "explicit-id" {
+		t.Fatalf("explicit request id was not sent: %q", calls[1].RequestID)
+	}
+}
+
+func TestTransportFailuresOnWritesCarryTheRequestIdActuallySent(t *testing.T) {
+	server := testfixture.Start(t, testfixture.Hooks{
+		Put: func(context.Context, *gateway.PutRequest) (*gateway.PutResponse, error) {
+			return nil, grpcstatus.Error(grpccodes.Unavailable, "connection lost")
+		},
+		Delete: func(context.Context, *gateway.DeleteRequest) (*gateway.DeleteResponse, error) {
+			return nil, grpcstatus.Error(grpccodes.Unavailable, "connection lost")
+		},
+	}, nil)
+	kv := dial(t, plaintextConfig(server.Address()))
+
+	_, putErr := kv.Put(context.Background(), []byte("k"), []byte("v"), client.WriteOptions{})
+	_, delErr := kv.Delete(context.Background(), []byte("k"), client.WriteOptions{})
+	calls := server.Calls()
+	if len(calls) != 2 {
+		t.Fatalf("expected exactly two attempts, saw %d", len(calls))
+	}
+	for index, err := range []error{putErr, delErr} {
+		var transportErr *client.TransportError
+		if !errors.As(err, &transportErr) {
+			t.Fatalf("call %d: expected a transport error, got %v", index, err)
+		}
+		if calls[index].RequestID == "" || transportErr.RequestID != calls[index].RequestID {
+			t.Fatalf("call %d: reported %q, sent %q", index, transportErr.RequestID, calls[index].RequestID)
+		}
 	}
 }

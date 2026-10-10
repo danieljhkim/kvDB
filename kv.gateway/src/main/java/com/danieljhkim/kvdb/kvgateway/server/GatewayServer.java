@@ -81,7 +81,7 @@ public class GatewayServer {
                 gatewayService,
                 new CorrelationIdInterceptor(),
                 new AdmissionControlInterceptor(lifecycle),
-                new RequestMetricsInterceptor("gateway", lifecycle),
+                new RequestMetricsInterceptor("gateway"),
                 new InternalAuthServerInterceptor(gatewaySecurity),
                 new GlobalExceptionInterceptor());
 

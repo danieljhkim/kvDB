@@ -91,7 +91,7 @@ public class NodeServer {
                 kvService,
                 new CorrelationIdInterceptor(),
                 new AdmissionControlInterceptor(lifecycle),
-                new RequestMetricsInterceptor("node", lifecycle),
+                new RequestMetricsInterceptor("node"),
                 new InternalAuthServerInterceptor(grpcSecurity),
                 new GlobalExceptionInterceptor());
 

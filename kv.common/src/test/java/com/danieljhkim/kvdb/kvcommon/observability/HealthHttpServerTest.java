@@ -2,6 +2,7 @@ package com.danieljhkim.kvdb.kvcommon.observability;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.danieljhkim.kvdb.kvcommon.grpc.GrpcIdentity;
@@ -15,6 +16,11 @@ import com.kvdb.proto.kvstore.PingResponse;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.ServerCall;
+import io.grpc.ServerCallHandler;
+import io.grpc.ServerInterceptor;
+import io.grpc.ServerInterceptors;
+import io.grpc.ServerMethodDefinition;
+import io.grpc.ServerServiceDefinition;
 import io.grpc.Status;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -106,9 +112,8 @@ class HealthHttpServerTest {
     @Test
     void metricsEndpointUsesValidLatencyNamesAfterCompletedRpcOutcomes() throws Exception {
         ServiceLifecycle lifecycle = new ServiceLifecycle();
-        RequestMetricsInterceptor interceptor = new RequestMetricsInterceptor("metrics-test", lifecycle);
-        completeRpc(interceptor, lifecycle, Status.OK);
-        completeRpc(interceptor, lifecycle, Status.INVALID_ARGUMENT);
+        completeRpc("metrics-test", lifecycle, Status.OK);
+        completeRpc("metrics-test", lifecycle, Status.INVALID_ARGUMENT);
 
         try (HealthHttpServer server = new HealthHttpServer(0, lifecycle, () -> true)) {
             server.start();
@@ -136,8 +141,7 @@ class HealthHttpServerTest {
     void cancelledUnaryRpcRecordsOutcomeAndAllowsImmediateDrain() throws Exception {
         String service = "cancelled-unary-test";
         ServiceLifecycle lifecycle = new ServiceLifecycle();
-        RequestMetricsInterceptor interceptor = new RequestMetricsInterceptor(service, lifecycle);
-        CapturedRpc<PingRequest, PingResponse> rpc = admitRpc(interceptor, lifecycle, KVServiceGrpc.getPingMethod());
+        CapturedRpc<PingRequest, PingResponse> rpc = startRpc(service, lifecycle, KVServiceGrpc.getPingMethod());
 
         rpc.listener().onCancel();
 
@@ -152,9 +156,8 @@ class HealthHttpServerTest {
     void cancelledStreamingRpcRecordsOutcomeAndAllowsImmediateDrain() throws Exception {
         String service = "cancelled-streaming-test";
         ServiceLifecycle lifecycle = new ServiceLifecycle();
-        RequestMetricsInterceptor interceptor = new RequestMetricsInterceptor(service, lifecycle);
         CapturedRpc<WatchShardMapRequest, ShardMapDelta> rpc =
-                admitRpc(interceptor, lifecycle, CoordinatorGrpc.getWatchShardMapMethod());
+                startRpc(service, lifecycle, CoordinatorGrpc.getWatchShardMapMethod());
 
         rpc.listener().onCancel();
 
@@ -169,8 +172,7 @@ class HealthHttpServerTest {
     void cancellationRacingNormalCloseCompletesExactlyOnce() throws Exception {
         String service = "cancel-close-race-test";
         ServiceLifecycle lifecycle = new ServiceLifecycle();
-        RequestMetricsInterceptor interceptor = new RequestMetricsInterceptor(service, lifecycle);
-        CapturedRpc<PingRequest, PingResponse> rpc = admitRpc(interceptor, lifecycle, KVServiceGrpc.getPingMethod());
+        CapturedRpc<PingRequest, PingResponse> rpc = startRpc(service, lifecycle, KVServiceGrpc.getPingMethod());
         CyclicBarrier start = new CyclicBarrier(3);
 
         try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
@@ -192,6 +194,61 @@ class HealthHttpServerTest {
         assertEquals(0, lifecycle.inFlight());
         assertEquals(1, rpcOutcomeCount(service, "Ping", "cancelled") + rpcOutcomeCount(service, "Ping", "ok"));
         assertEquals(1, rpcDurationCount(service, "Ping"));
+    }
+
+    @Test
+    void rejectedCallLeavesInFlightAtZero() throws Exception {
+        ServiceLifecycle lifecycle = new ServiceLifecycle();
+        lifecycle.beginDrain();
+
+        CapturedRpc<PingRequest, PingResponse> rpc =
+                startRpc("rejected-test", lifecycle, KVServiceGrpc.getPingMethod());
+
+        assertNull(rpc.call());
+        assertEquals(Status.Code.UNAVAILABLE, rpc.transport().closedStatus.getCode());
+        assertEquals(0, lifecycle.inFlight());
+        assertTrue(lifecycle.awaitDrain(Duration.ZERO));
+        assertEquals(1, rpcOutcomeCount("rejected-test", "Ping", "unavailable"));
+    }
+
+    @Test
+    void unadmittedRaftCompletionDoesNotReleaseAdmittedCall() throws Exception {
+        ServiceLifecycle lifecycle = new ServiceLifecycle();
+        CapturedRpc<PingRequest, PingResponse> admitted =
+                startRpc("admitted-app-test", lifecycle, KVServiceGrpc.getPingMethod());
+        assertEquals(1, lifecycle.inFlight());
+
+        for (int index = 0; index < 3; index++) {
+            CapturedRpc<PingRequest, PingResponse> raft =
+                    startRpc(KVServiceGrpc.getPingMethod(), new RequestMetricsInterceptor("raft-test"));
+            raft.call().close(Status.OK, new Metadata());
+        }
+
+        assertEquals(1, lifecycle.inFlight());
+        lifecycle.beginDrain();
+        assertFalse(lifecycle.awaitDrain(Duration.ofMillis(1)));
+        admitted.call().close(Status.OK, new Metadata());
+        assertEquals(0, lifecycle.inFlight());
+        assertTrue(lifecycle.awaitDrain(Duration.ofMillis(1)));
+        assertEquals(3, rpcOutcomeCount("raft-test", "Ping", "ok"));
+    }
+
+    @Test
+    void admittedCallReleasesExactlyOnceAcrossCloseAndCancel() {
+        ServiceLifecycle lifecycle = new ServiceLifecycle();
+        CapturedRpc<PingRequest, PingResponse> first =
+                startRpc("release-once-test", lifecycle, KVServiceGrpc.getPingMethod());
+        CapturedRpc<PingRequest, PingResponse> second =
+                startRpc("release-once-test", lifecycle, KVServiceGrpc.getPingMethod());
+        assertEquals(2, lifecycle.inFlight());
+
+        first.call().close(Status.OK, new Metadata());
+        first.listener().onCancel();
+        first.call().close(Status.OK, new Metadata());
+
+        assertEquals(1, lifecycle.inFlight());
+        second.listener().onCancel();
+        assertEquals(0, lifecycle.inFlight());
     }
 
     @Test
@@ -227,21 +284,32 @@ class HealthHttpServerTest {
         return URI.create("http://localhost:" + server.getPort() + "/metrics");
     }
 
-    private static void completeRpc(RequestMetricsInterceptor interceptor, ServiceLifecycle lifecycle, Status status) {
-        CapturedRpc<PingRequest, PingResponse> rpc = admitRpc(interceptor, lifecycle, KVServiceGrpc.getPingMethod());
+    private static void completeRpc(String service, ServiceLifecycle lifecycle, Status status) {
+        CapturedRpc<PingRequest, PingResponse> rpc = startRpc(service, lifecycle, KVServiceGrpc.getPingMethod());
         rpc.call().close(status, new Metadata());
     }
 
-    private static <ReqT, RespT> CapturedRpc<ReqT, RespT> admitRpc(
-            RequestMetricsInterceptor interceptor, ServiceLifecycle lifecycle, MethodDescriptor<ReqT, RespT> method) {
-        assertTrue(lifecycle.tryAdmit());
-        AtomicReference<ServerCall<ReqT, RespT>> measuredCall = new AtomicReference<>();
-        ServerCall.Listener<ReqT> listener =
-                interceptor.interceptCall(new RecordingCall<>(method), new Metadata(), (call, headers) -> {
-                    measuredCall.set(call);
+    /** Starts a call through the production chain: admission and metrics listed in {@code GatewayServer} order. */
+    private static <ReqT, RespT> CapturedRpc<ReqT, RespT> startRpc(
+            String service, ServiceLifecycle lifecycle, MethodDescriptor<ReqT, RespT> method) {
+        return startRpc(method, new AdmissionControlInterceptor(lifecycle), new RequestMetricsInterceptor(service));
+    }
+
+    private static <ReqT, RespT> CapturedRpc<ReqT, RespT> startRpc(
+            MethodDescriptor<ReqT, RespT> method, ServerInterceptor... interceptors) {
+        AtomicReference<ServerCall<ReqT, RespT>> handledCall = new AtomicReference<>();
+        ServerServiceDefinition definition = ServerServiceDefinition.builder(method.getServiceName())
+                .addMethod(method, (ServerCallHandler<ReqT, RespT>) (call, headers) -> {
+                    handledCall.set(call);
                     return new ServerCall.Listener<>() {};
-                });
-        return new CapturedRpc<>(measuredCall.get(), listener);
+                })
+                .build();
+        @SuppressWarnings("unchecked")
+        ServerMethodDefinition<ReqT, RespT> intercepted = (ServerMethodDefinition<ReqT, RespT>)
+                ServerInterceptors.intercept(definition, interceptors).getMethod(method.getFullMethodName());
+        RecordingCall<ReqT, RespT> recording = new RecordingCall<>(method);
+        ServerCall.Listener<ReqT> listener = intercepted.getServerCallHandler().startCall(recording, new Metadata());
+        return new CapturedRpc<>(handledCall.get(), listener, recording);
     }
 
     private static long rpcOutcomeCount(String service, String method, String outcome) {
@@ -273,6 +341,7 @@ class HealthHttpServerTest {
 
     private static final class RecordingCall<ReqT, RespT> extends ServerCall<ReqT, RespT> {
         private final MethodDescriptor<ReqT, RespT> method;
+        private Status closedStatus;
 
         private RecordingCall(MethodDescriptor<ReqT, RespT> method) {
             this.method = method;
@@ -288,7 +357,9 @@ class HealthHttpServerTest {
         public void sendMessage(RespT message) {}
 
         @Override
-        public void close(Status status, Metadata trailers) {}
+        public void close(Status status, Metadata trailers) {
+            closedStatus = status;
+        }
 
         @Override
         public boolean isCancelled() {
@@ -301,5 +372,6 @@ class HealthHttpServerTest {
         }
     }
 
-    private record CapturedRpc<ReqT, RespT>(ServerCall<ReqT, RespT> call, ServerCall.Listener<ReqT> listener) {}
+    private record CapturedRpc<ReqT, RespT>(
+            ServerCall<ReqT, RespT> call, ServerCall.Listener<ReqT> listener, RecordingCall<ReqT, RespT> transport) {}
 }

@@ -283,21 +283,12 @@ public class CoordinatorReadClient {
     }
 
     private ShardDto convertShard(ShardRecord shard) {
-        KeyRangeDto keyRange = null;
-        if (shard.hasKeyRange()) {
-            keyRange = KeyRangeDto.builder()
-                    .startKey(shard.getKeyRange().getStartKey().toByteArray())
-                    .endKey(shard.getKeyRange().getEndKey().toByteArray())
-                    .build();
-        }
-
         return ShardDto.builder()
                 .shardId(shard.getShardId())
                 .epoch(shard.getEpoch())
                 .replicas(shard.getReplicasList())
                 .leader(shard.getLeader())
                 .configState(shard.getConfigState().name())
-                .keyRange(keyRange)
                 .build();
     }
 

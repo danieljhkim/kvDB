@@ -87,7 +87,9 @@ message ShardRecord {
   repeated string replicas = 3;  // node_ids
   string leader = 4;              // current leader hint (node_id)
   ShardConfigState config_state = 5;
-  KeyRange key_range = 6;        // or hash_range
+  // Deprecated: no longer populated. Keys map to shards by modulo hashing (see kv.common ShardKeyMapper), which
+  // is not a contiguous range partition. Kept so snapshots written by older coordinators still parse.
+  KeyRange key_range = 6;
 }
 
 enum ShardConfigState {

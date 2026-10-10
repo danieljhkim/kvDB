@@ -107,7 +107,7 @@ public class ClusterState {
         for (int i = 0; i < numShards; i++) {
             String shardId = "shard-" + i;
             List<String> replicas = assignReplicas(i, nodeIds, replicationFactor);
-            ShardRecord shard = ShardRecord.create(shardId, replicas, i, numShards);
+            ShardRecord shard = ShardRecord.create(shardId, replicas);
             shards.put(shardId, shard);
             createdShards.add(shardId);
         }

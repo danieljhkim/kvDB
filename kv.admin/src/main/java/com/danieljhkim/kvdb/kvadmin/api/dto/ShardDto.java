@@ -20,5 +20,4 @@ public class ShardDto {
     private List<String> replicas; // node IDs
     private String leader; // node ID
     private String configState; // STABLE, MOVING
-    private KeyRangeDto keyRange;
 }

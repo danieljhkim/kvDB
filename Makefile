@@ -21,7 +21,7 @@ GO_GATEWAY_OUT := $(GOCLI)/internal/gen/kvdb/gateway
 # Targets
 # -----------------------------------
 
-all: clean build run_cluster
+all: clean build run-cluster
 
 # -----------------
 # Build Java: uses Maven only

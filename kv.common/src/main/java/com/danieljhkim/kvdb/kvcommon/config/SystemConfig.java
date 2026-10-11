@@ -8,8 +8,10 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.Properties;
 import java.util.Set;
+import java.util.function.Function;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -21,6 +23,7 @@ public class SystemConfig {
     private static SystemConfig INSTANCE;
     private final Properties properties;
     private final ClassLoader classLoader;
+    private final Function<String, String> environment;
     private String resourcePath = "";
 
     private SystemConfig() {
@@ -33,8 +36,14 @@ public class SystemConfig {
 
     /** Package-private so tests can supply the classloader that serves classpath resources. */
     SystemConfig(String resourcePath, ClassLoader classLoader) {
+        this(resourcePath, classLoader, System::getenv);
+    }
+
+    /** Package-private so tests can isolate environment overrides without changing the process environment. */
+    SystemConfig(String resourcePath, ClassLoader classLoader, Function<String, String> environment) {
         this.resourcePath = resourcePath;
         this.classLoader = classLoader;
+        this.environment = environment;
         this.properties = new Properties();
         loadDefaultConfigFile();
         loadEnvSpecificConfigFile();
@@ -112,16 +121,17 @@ public class SystemConfig {
     }
 
     public String getProperty(String key, String defaultValue) {
-        String value = System.getProperty("kvdb." + key);
+        String qualifiedKey = key.startsWith("kvdb.") ? key : "kvdb." + key;
+        String value = System.getProperty(qualifiedKey);
         if (value != null && !value.isEmpty()) {
             return value;
         }
-        String envKey = "KVDB_" + key.toUpperCase().replace('.', '_');
-        value = System.getenv(envKey);
+        String envKey = qualifiedKey.toUpperCase(Locale.ROOT).replace('.', '_');
+        value = environment.apply(envKey);
         if (value != null && !value.isEmpty()) {
             return value;
         }
-        return properties.getProperty(key, defaultValue);
+        return properties.getProperty(qualifiedKey, properties.getProperty(key, defaultValue));
     }
 
     public String getProperty(String key) {

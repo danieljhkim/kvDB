@@ -1,20 +1,21 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+set -euo pipefail
 
 # run_server.sh - Script to start a single KV Node Server
 
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-PROJECT_DIR="$( cd "$SCRIPT_DIR/.." && pwd )/kv.server"
-CLIENT_JAR="$PROJECT_DIR/target/kv-node.jar"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+BASE_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+NODE_JAR="$BASE_DIR/kv.node/target/kv-node.jar"
+LOG_DIR="${LOG_DIR:-$BASE_DIR/logs}"
 
-# Check if jar exists
-if [ ! -f "$CLIENT_JAR" ]; then
-  echo "Client JAR not found: $CLIENT_JAR"
-  echo "Please build the client first using: mvn package -f $PROJECT_DIR/pom.xml"
+if [[ ! -f "$NODE_JAR" ]]; then
+  echo "Node JAR not found: $NODE_JAR" >&2
+  echo "Build it from the checkout root with: mvn -f $BASE_DIR/pom.xml -pl kv.node -am package" >&2
   exit 1
 fi
 
-# Start server in foreground
-echo "Starting KV Server..."
+mkdir -p -- "$LOG_DIR"
 
-nohup java -jar "$CLIENT_JAR" \
-  > "$LOG_DIR/node.log" 2>&1 &
+echo "Starting KV Server..."
+exec java -jar "$NODE_JAR" > "$LOG_DIR/node.log" 2>&1

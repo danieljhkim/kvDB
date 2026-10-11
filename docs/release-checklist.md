@@ -115,29 +115,47 @@ for service in kv.node kv.coordinator kv.admin kv.gateway; do
     .
 done
 
+# Persistence fixtures live on the host, outside every Compose volume under
+# test, so wiping or restoring volumes cannot also erase the expectations.
+export SMOKE_FIXTURE_FILE="$(pwd)/release-evidence/${RELEASE_TAG}/fixtures/persistence.tsv"
+
 export KVDB_IMAGE_TAG="$PREVIOUS_TAG"
 docker compose -f docker-compose.yml -f /tmp/kvdb-release-images.yml \
   pull --quiet
 docker compose -f docker-compose.yml -f /tmp/kvdb-release-images.yml \
   up --detach --no-build --wait --wait-timeout 180
 ./scripts/bootstrap_cluster.sh
-STORAGE_NODE_ADDRS=node1:8001,node2:8002 ./scripts/smoke_test.sh
+# Create the acknowledged values on the previous release and record their
+# expected key/value/version in the fixture file.
+STORAGE_NODE_ADDRS=node1:8001,node2:8002 ./scripts/smoke_test.sh seed
+shasum -a 256 "$SMOKE_FIXTURE_FILE" >"${SMOKE_FIXTURE_FILE}.sha256"
 
 export KVDB_IMAGE_TAG="$RELEASE_TAG"
 docker compose -f docker-compose.yml -f /tmp/kvdb-release-images.yml \
   up --detach --no-build --wait --wait-timeout 180
-STORAGE_NODE_ADDRS=node1:8001,node2:8002 ./scripts/smoke_test.sh
+# Read-only: first command after the upgrade. No bootstrap, no Put.
+STORAGE_NODE_ADDRS=node1:8001,node2:8002 ./scripts/smoke_test.sh verify
 ```
 
-Record the old and new image digests and attach logs proving the candidate read
-data written by the previous release. Stop the release if any persisted Raft,
-snapshot, WAL, or shard file is silently reinitialized.
+`smoke_test.sh verify` reads every fixture key and requires the recorded value
+and version; it never bootstraps or writes, so reinitialized or lost state
+fails instead of being recreated. Do not run `bootstrap_cluster.sh` or any
+write before a verify step has passed. Only after it passes may you run
+`./scripts/smoke_test.sh write` (bootstrap plus a fresh Put/Get) to cover new
+writes on the candidate; that result is smoke coverage, not persistence
+evidence.
+
+Record the old and new image digests and attach the fixture file, its checksum,
+and the `verify` log proving the candidate read data written by the previous
+release. Stop the release if any persisted Raft, snapshot, WAL, or shard file is
+silently reinitialized.
 
 ## 5. Verify backup and restore
 
 Back up every labeled volume after the forward-migration rehearsal, wipe the
-isolated project, restore the archives into newly created volumes, then rerun
-the smoke test:
+isolated project, restore the archives into newly created volumes, then run
+the read-only verification against the fixture file from section 4 (still on
+the host, outside the wiped volumes):
 
 ```bash
 export BACKUP_DIR="$(pwd)/release-evidence/${RELEASE_TAG}/backup"
@@ -165,10 +183,11 @@ for archive in "$BACKUP_DIR"/*.tgz; do
 done
 docker compose -f docker-compose.yml -f /tmp/kvdb-release-images.yml \
   up --detach --no-build --wait --wait-timeout 180
-STORAGE_NODE_ADDRS=node1:8001,node2:8002 ./scripts/smoke_test.sh
+# Read-only, before any bootstrap or write that could rebuild state.
+STORAGE_NODE_ADDRS=node1:8001,node2:8002 ./scripts/smoke_test.sh verify
 ```
 
-Attach `SHA256SUMS`, the restore log, and the post-restore read results. Backups
+Attach `SHA256SUMS`, the restore log, the fixture file and checksum, and the `verify` output. Backups
 are not verified until a fresh volume set has served the acknowledged values.
 
 ## 6. Prove rollback
@@ -181,12 +200,13 @@ before starting the previous release.
 export KVDB_IMAGE_TAG="$PREVIOUS_TAG"
 docker compose -f docker-compose.yml -f /tmp/kvdb-release-images.yml \
   up --detach --no-build --wait --wait-timeout 180
-STORAGE_NODE_ADDRS=node1:8001,node2:8002 ./scripts/smoke_test.sh
+# Read-only, before any bootstrap or write.
+STORAGE_NODE_ADDRS=node1:8001,node2:8002 ./scripts/smoke_test.sh verify
 ```
 
 Record whether rollback was in-place or restore-based, the exact image digests,
 the backup checksum used, the recovery-point objective, elapsed recovery time,
-and successful reads after rollback. Do not publish if neither rollback path
+and the `verify` output showing the fixture values and versions after rollback. Do not publish if neither rollback path
 works.
 
 ## 7. Publish and verify immutable artifacts

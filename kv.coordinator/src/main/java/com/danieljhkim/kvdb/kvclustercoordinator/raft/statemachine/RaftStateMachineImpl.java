@@ -8,9 +8,11 @@ import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapDelta;
 import com.danieljhkim.kvdb.kvclustercoordinator.state.ShardMapSnapshot;
 import java.io.IOException;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,6 +25,12 @@ public class RaftStateMachineImpl implements RaftStateMachine {
     private final AtomicReference<ShardMapSnapshot> snapshotRef;
     private final List<Consumer<ShardMapDelta>> watchers;
     private final Object writeLock = new Object();
+
+    /**
+     * Unbound machines report leadership so direct single-node callers keep the historical stub behavior.
+     * {@code CoordinatorServer} binds the live Raft role after the node that applies through this machine exists.
+     */
+    private volatile BooleanSupplier leadership = () -> true;
 
     public RaftStateMachineImpl() {
         this.state = new ClusterState();
@@ -167,10 +175,17 @@ public class RaftStateMachineImpl implements RaftStateMachine {
         return removed;
     }
 
+    /**
+     * Binds the live Raft leadership view. Health probes call {@link #isLeader()} and must follow this node, not the
+     * unbound single-node default.
+     */
+    public void bindLeadership(BooleanSupplier leadership) {
+        this.leadership = Objects.requireNonNull(leadership, "leadership");
+    }
+
     @Override
     public boolean isLeader() {
-        // Stub is always the leader (single-node mode)
-        return true;
+        return leadership.getAsBoolean();
     }
 
     /**

@@ -15,7 +15,7 @@ set -euo pipefail
 #                    version. Never bootstraps, registers nodes, or issues Put,
 #                    so lost or reinitialized state cannot be recreated by it.
 #
-# Requires: grpcurl
+# Requires: grpcurl, python3 (for parsing gateway JSON responses)
 #
 # Transport follows KVDB_GRPC_SECURITY_MODE (default mtls) as described in
 # scripts/cluster_helpers.sh: gateway calls present the client certificate,
@@ -80,6 +80,56 @@ gateway_get() {
     kvdb.gateway.KvGateway/Get
 }
 
+# Validate the structured grpcurl JSON before accepting an application-level
+# success. Proto JSON renders Status.Code as either its enum name or number;
+# this API defines OK as 1. GetResponse carries the returned key/value under
+# `kv`, while PutResponse carries the committed version.
+validate_gateway_response() {
+  local operation="$1" response="$2" expected_key="${3:-}" expected_value="${4:-}"
+  SMOKE_RESPONSE_JSON="$response" python3 - "$operation" "$expected_key" "$expected_value" <<'PY'
+import json
+import os
+import sys
+
+operation, expected_key, expected_value = sys.argv[1:]
+
+def fail(message):
+    print(f"❌ {operation} response invalid: {message}", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    response = json.loads(os.environ["SMOKE_RESPONSE_JSON"])
+except (KeyError, json.JSONDecodeError) as error:
+    fail(f"malformed JSON ({error})")
+
+if not isinstance(response, dict):
+    fail("expected a JSON object")
+status = response.get("status")
+if not isinstance(status, dict):
+    fail("missing status object")
+code = status.get("code")
+if not (code == "OK" or (type(code) is int and code == 1)):
+    fail(f"status.code is not OK ({code!r})")
+
+if operation == "Put":
+    version = response.get("version")
+    if isinstance(version, str) and version.isdecimal():
+        version = int(version)
+    if type(version) is not int or version <= 0:
+        fail("missing positive version")
+elif operation == "Get":
+    kv = response.get("kv")
+    if not isinstance(kv, dict):
+        fail("missing kv object")
+    if kv.get("key") != expected_key:
+        fail(f"kv.key does not match the requested key ({kv.get('key')!r})")
+    if kv.get("value") != expected_value:
+        fail("kv.value does not match the expected value")
+else:
+    fail(f"unknown operation {operation!r}")
+PY
+}
+
 # Extracts the numeric "version" from a Get response (proto3 JSON renders uint64
 # as a string; a zero version is omitted).
 response_version() {
@@ -101,17 +151,19 @@ run_write() {
 
   put_resp="$(gateway_put smoke-put-1 "${key_b64}" "${val_b64}")"
   echo "PutResponse: ${put_resp}"
+  if ! validate_gateway_response Put "$put_resp"; then
+    echo "❌ Smoke test failed: Put did not return a successful response" >&2
+    return 1
+  fi
 
   get_resp="$(gateway_get smoke-get-1 "${key_b64}")"
   echo "GetResponse: ${get_resp}"
-
-  # Minimal assertion without jq: ensure base64 value appears in response JSON.
-  if echo "${get_resp}" | grep -q "\"value\": *\"${val_b64}\""; then
-    echo "✅ Smoke test passed (value round-tripped)"
+  if validate_gateway_response Get "$get_resp" "$key_b64" "$val_b64"; then
+    echo "✅ Smoke test passed (Put succeeded and key/value round-tripped)"
     return 0
   fi
 
-  echo "❌ Smoke test failed: expected value base64 ${val_b64} not found in GetResponse"
+  echo "❌ Smoke test failed: Get did not return the expected key/value with OK status" >&2
   return 1
 }
 
@@ -134,7 +186,7 @@ run_seed() {
   fi
 
   echo "== Seeding ${SMOKE_FIXTURE_KEYS} persistence fixture key(s) =="
-  local nonce i key_b64 val_b64 get_resp version tmp
+  local nonce i key_b64 val_b64 put_resp get_resp version tmp
   nonce="$(date -u +%Y%m%dT%H%M%SZ)-$$"
   mkdir -p "$(dirname "$SMOKE_FIXTURE_FILE")"
   tmp="${SMOKE_FIXTURE_FILE}.tmp.$$"
@@ -142,9 +194,18 @@ run_seed() {
   for ((i=1; i<=SMOKE_FIXTURE_KEYS; i++)); do
     key_b64="$(b64 "persist-key-${i}")"
     val_b64="$(b64 "persist-value-${i}-${nonce}")"
-    gateway_put "seed-put-${nonce}-${i}" "${key_b64}" "${val_b64}" >/dev/null
+    if ! put_resp="$(gateway_put "seed-put-${nonce}-${i}" "${key_b64}" "${val_b64}")"; then
+      echo "❌ Seed failed: Put transport failed for persist-key-${i}" >&2
+      rm -f "$tmp"
+      return 1
+    fi
+    if ! validate_gateway_response Put "$put_resp"; then
+      echo "❌ Seed failed: Put did not succeed for persist-key-${i}: ${put_resp}" >&2
+      rm -f "$tmp"
+      return 1
+    fi
     get_resp="$(gateway_get "seed-get-${nonce}-${i}" "${key_b64}")"
-    if ! grep -Eq "\"value\"[[:space:]]*:[[:space:]]*\"${val_b64}\"" <<< "${get_resp}"; then
+    if ! validate_gateway_response Get "$get_resp" "$key_b64" "$val_b64"; then
       echo "❌ Seed failed: persist-key-${i} did not read back after Put: ${get_resp}" >&2
       rm -f "$tmp"
       return 1
@@ -173,8 +234,8 @@ run_verify() {
       failed=$((failed + 1))
       continue
     fi
-    if ! grep -Eq "\"value\"[[:space:]]*:[[:space:]]*\"${val_b64}\"" <<< "${get_resp}"; then
-      echo "❌ Fixture key #${checked}: acknowledged value missing: ${get_resp}" >&2
+    if ! validate_gateway_response Get "$get_resp" "$key_b64" "$val_b64"; then
+      echo "❌ Fixture key #${checked}: successful Get response did not match the recorded key/value: ${get_resp}" >&2
       failed=$((failed + 1))
       continue
     fi
@@ -196,6 +257,10 @@ run_verify() {
 
 case "$SMOKE_MODE" in
   write|seed|verify)
+    if ! command -v python3 >/dev/null 2>&1; then
+      echo "python3 is required to validate gateway JSON responses." >&2
+      exit 1
+    fi
     # Refuse an unusable gateway transport before bootstrapping or reading fixtures.
     grpc_transport_args client "client/local/smoke-test" || exit 1
     ;;

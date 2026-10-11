@@ -54,6 +54,9 @@ with open(os.environ["RUNNER_LAUNCH_LOG"], "a", encoding="utf-8") as log:
         env["CONCURRENCY"] = "1"
         env["TARGET"] = "127.0.0.1:1"
         env["ADMIN_BASE_URL"] = "http://127.0.0.1:1"
+        # Gateway runners fail closed without an explicit transport security selection.
+        env["KVDB_GRPC_SECURITY_MODE"] = "development-plaintext"
+        env["KVDB_ENV"] = "test"
         return env
 
     def launch(self, relative_runner):

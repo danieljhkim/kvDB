@@ -148,6 +148,18 @@ make k6-admin-bench       # Admin API (HTTP)
 make vegeta-admin-bench
 ```
 
+The gateway runners (`k6-gateway-bench`, `ghz-gateway-bench`) authenticate like `kv`: mTLS is the default and fails closed
+unless `KVDB_CLIENT_TLS_TRUST_BUNDLE`, `KVDB_CLIENT_TLS_CERT_CHAIN` and `KVDB_CLIENT_TLS_PRIVATE_KEY` name readable files
+(ghz also honours `KVDB_CLIENT_TLS_SERVER_NAME`). Against `make run-cluster`, opt in to the development gateway explicitly:
+
+```bash
+KVDB_GRPC_SECURITY_MODE=development-plaintext KVDB_ENV=local make ghz-gateway-bench
+```
+
+That mode sends `x-kvdb-development-identity: client/<tenant>/<principal>` and the same tenant/principal in the request
+context (`KVDB_CLIENT_TENANT_ID` / `KVDB_CLIENT_PRINCIPAL`, defaulting to `dev`/`k6` and `dev`/`ghz`). Test the runners'
+auth wiring without load: `node --test benchmark/tests/`.
+
 ## License
 
 MIT.

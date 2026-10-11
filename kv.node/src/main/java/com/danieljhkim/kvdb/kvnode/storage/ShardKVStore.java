@@ -1,6 +1,7 @@
 package com.danieljhkim.kvdb.kvnode.storage;
 
 import com.danieljhkim.kvdb.kvcommon.annotations.Timer;
+import com.danieljhkim.kvdb.kvcommon.exception.NodeUnavailableException;
 import com.danieljhkim.kvdb.kvcommon.exception.RequestIdConflictException;
 import com.danieljhkim.kvdb.kvcommon.observability.Metrics;
 import com.danieljhkim.kvdb.kvcommon.persistence.WALManager;
@@ -21,15 +22,18 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
 import java.util.Objects;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -38,6 +42,10 @@ import org.slf4j.LoggerFactory;
  *
  * <p>
  * Persistence layout is controlled by the provided snapshot + WAL file paths.
+ *
+ * <p>
+ * Request identities that no longer describe current state are retained according to a {@link WriteHistoryPolicy},
+ * and the replication journal is periodically rewritten to the retained state so neither grows with total writes.
  */
 public class ShardKVStore {
 
@@ -46,6 +54,8 @@ public class ShardKVStore {
     private static final String NIL_RESPONSE = "(nil)";
     private static final String SNAPSHOT_KEY_PREFIX = "kvdb-binary-key-v1:";
     private static final String SNAPSHOT_VALUE_PREFIX = "kvdb-entry-v1:";
+    private static final String STANDALONE_ORIGIN = "standalone";
+    private static final byte[] CHECKPOINT_KEY = "replication-checkpoint-v1".getBytes(StandardCharsets.UTF_8);
 
     private final String shardId;
     private final int flushInterval;
@@ -63,19 +73,40 @@ public class ShardKVStore {
     private final Map<String, MutationState> mutationStates = new HashMap<>();
     private final NavigableMap<Long, String> requestByVersion = new TreeMap<>();
     private final Map<ByteString, ReplicatedMutation> committedByKey = new HashMap<>();
+    /** Prepared request ids, so a commit scans only pending mutations for superseded prepares. */
+    private final Set<String> preparedRequests = new HashSet<>();
+    /** Superseded committed and aborted identities in eviction order, with their retained serialized size. */
+    private final NavigableMap<HistoryKey, Integer> historyIdentities = new TreeMap<>();
+
+    private final WriteHistoryPolicy historyPolicy;
+    private final LongSupplier clock;
+    private long historyBytes;
+    private long replicationJournalRecords;
     private long shardEpoch;
     private long highestVersion;
     private long committedVersion;
 
     public ShardKVStore(
             String shardId, String snapshotFilePath, String walFilePath, int flushInterval, boolean enableAutoFlush) {
+        this(shardId, snapshotFilePath, walFilePath, flushInterval, enableAutoFlush, WriteHistoryPolicy.DEFAULT);
+    }
+
+    public ShardKVStore(
+            String shardId,
+            String snapshotFilePath,
+            String walFilePath,
+            int flushInterval,
+            boolean enableAutoFlush,
+            WriteHistoryPolicy historyPolicy) {
         this(
                 shardId,
                 flushInterval,
                 enableAutoFlush,
                 new FilePersistenceManager<>(snapshotFilePath, new TypeReference<Map<String, String>>() {}),
                 new WALManager(walFilePath),
-                new WALManager(walFilePath + ".replication"));
+                new WALManager(walFilePath + ".replication"),
+                historyPolicy,
+                System::currentTimeMillis);
     }
 
     ShardKVStore(
@@ -84,22 +115,34 @@ public class ShardKVStore {
             boolean enableAutoFlush,
             PersistenceManager<Map<String, String>> persistenceManager,
             WALManager walManager) {
-        this(shardId, flushInterval, enableAutoFlush, persistenceManager, walManager, null);
+        this(
+                shardId,
+                flushInterval,
+                enableAutoFlush,
+                persistenceManager,
+                walManager,
+                null,
+                WriteHistoryPolicy.DEFAULT,
+                System::currentTimeMillis);
     }
 
-    private ShardKVStore(
+    ShardKVStore(
             String shardId,
             int flushInterval,
             boolean enableAutoFlush,
             PersistenceManager<Map<String, String>> persistenceManager,
             WALManager walManager,
-            WALManager replicationWalManager) {
+            WALManager replicationWalManager,
+            WriteHistoryPolicy historyPolicy,
+            LongSupplier clock) {
         this.shardId = Objects.requireNonNull(shardId, "shardId");
         this.flushInterval = flushInterval;
         this.enableAutoFlush = enableAutoFlush;
         this.persistenceManager = Objects.requireNonNull(persistenceManager, "persistenceManager");
         this.walManager = Objects.requireNonNull(walManager, "walManager");
         this.replicationWalManager = replicationWalManager;
+        this.historyPolicy = Objects.requireNonNull(historyPolicy, "historyPolicy");
+        this.clock = Objects.requireNonNull(clock, "clock");
 
         loadFromDisk();
         recoverFromWal();
@@ -189,6 +232,7 @@ public class ShardKVStore {
                     if (!prepared.success()) {
                         throw new IllegalStateException(prepared.message());
                     }
+                    maintainHistoryLocked();
                 }
                 return existing;
             }
@@ -236,22 +280,39 @@ public class ShardKVStore {
                     .setExpireTimeMs(expireTimeMs);
             expectedVersion.ifPresent(mutation::setIfVersionEquals);
             ReplicatedMutation builtMutation = mutation.build();
+            if (!hasHistoryCapacityLocked(builtMutation, nowMs)) {
+                Metrics.increment("kvdb_write_history_admission_total", "node", "prepare", "rejected");
+                throw NodeUnavailableException.rejectedBeforeMutation(
+                        "Write history budget is exhausted for shard " + shardId + "; retry later", shardId);
+            }
             MutationStatus prepared = prepareMutationLocked(builtMutation);
             if (!prepared.success()) {
                 throw new IllegalStateException(prepared.message());
             }
+            maintainHistoryLocked();
             return builtMutation;
         } finally {
             stateLock.unlock();
         }
     }
 
-    /** Durably records a hidden follower prepare. Duplicate delivery is idempotent. */
+    /**
+     * Durably records a hidden follower prepare. Duplicate delivery is idempotent. A new mutation that the write history
+     * budget cannot hold is rejected before it is staged.
+     */
     public MutationStatus prepareMutation(ReplicatedMutation mutation) {
         stateLock.lock();
         try {
             requireReplicationJournal();
-            return prepareMutationLocked(mutation);
+            if (validateMutation(mutation) == null
+                    && !mutationsByRequest.containsKey(mutation.getRequestId())
+                    && !hasHistoryCapacityLocked(mutation, clock.getAsLong())) {
+                Metrics.increment("kvdb_write_history_admission_total", "node", "replica_prepare", "rejected");
+                return rejected("write history budget is exhausted");
+            }
+            MutationStatus status = prepareMutationLocked(mutation);
+            maintainHistoryLocked();
+            return status;
         } finally {
             stateLock.unlock();
         }
@@ -283,9 +344,10 @@ public class ShardKVStore {
             }
 
             abortSupersededPreparesLocked(mutation);
-            replicationWalManager.log("COMMIT", mutation.getRequestId().getBytes(StandardCharsets.UTF_8), null);
+            journalLocked("COMMIT", mutation.getRequestId(), null);
             applyVisibleLocked(mutation);
             markCommitted(mutation);
+            maintainHistoryLocked();
             return accepted("committed");
         } finally {
             stateLock.unlock();
@@ -309,8 +371,8 @@ public class ShardKVStore {
                 return rejected("committed mutation cannot be aborted");
             }
             if (state != MutationState.ABORTED) {
-                replicationWalManager.log("ABORT", mutation.getRequestId().getBytes(StandardCharsets.UTF_8), null);
-                mutationStates.put(mutation.getRequestId(), MutationState.ABORTED);
+                abortPreparedLocked(mutation);
+                maintainHistoryLocked();
             }
             return accepted("aborted");
         } finally {
@@ -330,16 +392,15 @@ public class ShardKVStore {
             ReplicatedMutation current = committedByKey.get(mutation.getKey());
             if (current != null && current.getVersion() >= mutation.getVersion()) {
                 recordSupersededLocked(mutation);
+                maintainHistoryLocked();
                 return accepted("repair entry is already superseded");
             }
 
             abortSupersededPreparesLocked(mutation);
-            replicationWalManager.log(
-                    "REPAIR", mutation.getRequestId().getBytes(StandardCharsets.UTF_8), mutation.toByteArray());
+            journalLocked("REPAIR", mutation.getRequestId(), mutation.toByteArray());
             applyVisibleLocked(mutation);
-            mutationsByRequest.put(mutation.getRequestId(), mutation);
-            requestByVersion.put(mutation.getVersion(), mutation.getRequestId());
             markCommitted(mutation);
+            maintainHistoryLocked();
             return accepted("repaired");
         } finally {
             stateLock.unlock();
@@ -359,7 +420,9 @@ public class ShardKVStore {
             if (conflict != null) {
                 return rejected(conflict);
             }
-            return recordSupersededLocked(mutation);
+            MutationStatus status = recordSupersededLocked(mutation);
+            maintainHistoryLocked();
+            return status;
         } finally {
             stateLock.unlock();
         }
@@ -441,6 +504,16 @@ public class ShardKVStore {
         stateLock.lock();
         try {
             return shardEpoch;
+        } finally {
+            stateLock.unlock();
+        }
+    }
+
+    /** Number of request identities held in memory: current state plus the bounded history window. */
+    int retainedIdentityCount() {
+        stateLock.lock();
+        try {
+            return mutationsByRequest.size();
         } finally {
             stateLock.unlock();
         }
@@ -587,12 +660,16 @@ public class ShardKVStore {
     }
 
     /**
-     * Force persistence immediately (snapshot + WAL clear), regardless of the auto-flush counter.
+     * Force persistence immediately (snapshot + WAL clear + replication journal compaction), regardless of the
+     * auto-flush counter.
      */
     public void persistNow() {
         stateLock.lock();
         try {
             snapshotAndRotateWal();
+            if (replicationWalManager != null) {
+                compactReplicationJournalLocked();
+            }
         } finally {
             stateLock.unlock();
         }
@@ -683,6 +760,7 @@ public class ShardKVStore {
                 .build();
         applyVisibleLocked(mutation);
         markCommitted(mutation);
+        pruneHistoryLocked(clock.getAsLong(), 0, 0);
     }
 
     private void expireIfNeededLocked(ByteString key, long nowMs) {
@@ -718,9 +796,8 @@ public class ShardKVStore {
                 if (mutation.getEpoch() < shardEpoch || mutation.getVersion() <= committedVersion) {
                     return rejected("aborted mutation is now stale");
                 }
-                replicationWalManager.log(
-                        "PREPARE", mutation.getRequestId().getBytes(StandardCharsets.UTF_8), mutation.toByteArray());
-                mutationStates.put(mutation.getRequestId(), MutationState.PREPARED);
+                journalLocked("PREPARE", mutation.getRequestId(), mutation.toByteArray());
+                setStateLocked(mutation.getRequestId(), MutationState.PREPARED);
                 return accepted("prepared again");
             }
             return accepted(state == MutationState.COMMITTED ? "already committed" : "already prepared");
@@ -743,13 +820,8 @@ public class ShardKVStore {
             }
         }
 
-        replicationWalManager.log(
-                "PREPARE", mutation.getRequestId().getBytes(StandardCharsets.UTF_8), mutation.toByteArray());
-        mutationsByRequest.put(mutation.getRequestId(), mutation);
-        mutationStates.put(mutation.getRequestId(), MutationState.PREPARED);
-        requestByVersion.put(mutation.getVersion(), mutation.getRequestId());
-        shardEpoch = Math.max(shardEpoch, mutation.getEpoch());
-        highestVersion = Math.max(highestVersion, mutation.getVersion());
+        journalLocked("PREPARE", mutation.getRequestId(), mutation.toByteArray());
+        recordPreparedLocked(mutation);
         return accepted("prepared");
     }
 
@@ -759,8 +831,8 @@ public class ShardKVStore {
      * the ordering obstruction.
      */
     private void abortSupersededPreparesLocked(ReplicatedMutation committed) {
-        List<ReplicatedMutation> superseded = mutationsByRequest.values().stream()
-                .filter(candidate -> mutationStates.get(candidate.getRequestId()) == MutationState.PREPARED)
+        List<ReplicatedMutation> superseded = preparedRequests.stream()
+                .map(mutationsByRequest::get)
                 .filter(candidate -> candidate.getEpoch() <= committed.getEpoch())
                 .filter(candidate -> candidate.getVersion() < committed.getVersion())
                 .toList();
@@ -768,8 +840,8 @@ public class ShardKVStore {
     }
 
     private void abortPreparedLocked(ReplicatedMutation mutation) {
-        replicationWalManager.log("ABORT", mutation.getRequestId().getBytes(StandardCharsets.UTF_8), null);
-        mutationStates.put(mutation.getRequestId(), MutationState.ABORTED);
+        journalLocked("ABORT", mutation.getRequestId(), null);
+        setStateLocked(mutation.getRequestId(), MutationState.ABORTED);
     }
 
     /**
@@ -813,8 +885,7 @@ public class ShardKVStore {
             return accepted("already committed");
         }
         abortSupersededPreparesLocked(mutation);
-        replicationWalManager.log(
-                "SUPERSEDED", mutation.getRequestId().getBytes(StandardCharsets.UTF_8), mutation.toByteArray());
+        journalLocked("SUPERSEDED", mutation.getRequestId(), mutation.toByteArray());
         recordCommittedIdentity(mutation);
         return accepted("superseded identity recorded");
     }
@@ -862,38 +933,213 @@ public class ShardKVStore {
     }
 
     private void markCommitted(ReplicatedMutation mutation) {
-        recordCommittedIdentity(mutation);
         ReplicatedMutation current = committedByKey.get(mutation.getKey());
-        if (current == null || current.getVersion() < mutation.getVersion()) {
+        boolean newest = current == null || current.getVersion() < mutation.getVersion();
+        if (newest) {
             committedByKey.put(mutation.getKey(), mutation);
+        }
+        recordCommittedIdentity(mutation);
+        if (newest && current != null && !current.getRequestId().equals(mutation.getRequestId())) {
+            // The replaced mutation now only identifies a request and joins the bounded history.
+            refreshHistoryLocked(current.getRequestId());
         }
     }
 
     /** Records a committed request identity without changing which mutation is visible for its key. */
     private void recordCommittedIdentity(ReplicatedMutation mutation) {
         mutationsByRequest.put(mutation.getRequestId(), mutation);
-        mutationStates.put(mutation.getRequestId(), MutationState.COMMITTED);
         requestByVersion.put(mutation.getVersion(), mutation.getRequestId());
         shardEpoch = Math.max(shardEpoch, mutation.getEpoch());
         highestVersion = Math.max(highestVersion, mutation.getVersion());
         committedVersion = Math.max(committedVersion, mutation.getVersion());
+        setStateLocked(mutation.getRequestId(), MutationState.COMMITTED);
+    }
+
+    private void recordPreparedLocked(ReplicatedMutation mutation) {
+        mutationsByRequest.put(mutation.getRequestId(), mutation);
+        requestByVersion.put(mutation.getVersion(), mutation.getRequestId());
+        shardEpoch = Math.max(shardEpoch, mutation.getEpoch());
+        highestVersion = Math.max(highestVersion, mutation.getVersion());
+        setStateLocked(mutation.getRequestId(), MutationState.PREPARED);
+    }
+
+    private void setStateLocked(String requestId, MutationState state) {
+        mutationStates.put(requestId, state);
+        if (state == MutationState.PREPARED) {
+            preparedRequests.add(requestId);
+        } else {
+            preparedRequests.remove(requestId);
+        }
+        refreshHistoryLocked(requestId);
+    }
+
+    /**
+     * Classifies one identity. Superseded committed and aborted identities are history; the newest committed mutation
+     * of a key and pending prepares are current state. A superseded standalone write has no client request id to
+     * deduplicate, so it is dropped immediately.
+     */
+    private void refreshHistoryLocked(String requestId) {
+        ReplicatedMutation mutation = mutationsByRequest.get(requestId);
+        if (mutation == null) {
+            return;
+        }
+        MutationState state = mutationStates.get(requestId);
+        ReplicatedMutation newest = committedByKey.get(mutation.getKey());
+        boolean history = state == MutationState.ABORTED
+                || (state == MutationState.COMMITTED
+                        && (newest == null || !newest.getRequestId().equals(requestId)));
+        HistoryKey key = new HistoryKey(mutation.getVersion(), requestId);
+        if (history && STANDALONE_ORIGIN.equals(mutation.getOriginNodeId())) {
+            forgetIdentityLocked(mutation);
+        } else if (history) {
+            if (!historyIdentities.containsKey(key)) {
+                int size = mutation.getSerializedSize();
+                historyIdentities.put(key, size);
+                historyBytes += size;
+            }
+        } else {
+            Integer size = historyIdentities.remove(key);
+            if (size != null) {
+                historyBytes -= size;
+            }
+        }
+    }
+
+    private void forgetIdentityLocked(ReplicatedMutation mutation) {
+        String requestId = mutation.getRequestId();
+        mutationsByRequest.remove(requestId);
+        mutationStates.remove(requestId);
+        preparedRequests.remove(requestId);
+        requestByVersion.remove(mutation.getVersion(), requestId);
+        Integer size = historyIdentities.remove(new HistoryKey(mutation.getVersion(), requestId));
+        if (size != null) {
+            historyBytes -= size;
+        }
+    }
+
+    /**
+     * Makes room for the history a new mutation can leave behind: itself if it is aborted, or the key's previous newest
+     * mutation once it commits. Returns false when that would require evicting an identity still inside the retention
+     * window.
+     */
+    private boolean hasHistoryCapacityLocked(ReplicatedMutation mutation, long nowMs) {
+        ReplicatedMutation predecessor = committedByKey.get(mutation.getKey());
+        long reserveBytes =
+                Math.max(mutation.getSerializedSize(), predecessor == null ? 0 : predecessor.getSerializedSize());
+        pruneHistoryLocked(nowMs, 1, reserveBytes);
+        return !exceedsHistoryBudget(1, reserveBytes);
+    }
+
+    /** A single identity larger than the byte budget is allowed, so an oversized-but-valid mutation stays writable. */
+    private boolean exceedsHistoryBudget(int reserveEntries, long reserveBytes) {
+        long entries = (long) historyIdentities.size() + reserveEntries;
+        return entries > historyPolicy.maxEntries()
+                || (entries > 1 && historyBytes + reserveBytes > historyPolicy.maxBytes());
+    }
+
+    /**
+     * Evicts the oldest history identities while the budget is exceeded. Eviction stops at the first identity that is
+     * still inside the retention window or above the committed version: an aborted owner there still fences a reused
+     * version, while every version at or below the committed version is already rejected as stale.
+     */
+    private void pruneHistoryLocked(long nowMs, int reserveEntries, long reserveBytes) {
+        int evicted = 0;
+        while (!historyIdentities.isEmpty() && exceedsHistoryBudget(reserveEntries, reserveBytes)) {
+            HistoryKey oldest = historyIdentities.firstKey();
+            ReplicatedMutation mutation = mutationsByRequest.get(oldest.requestId());
+            if (oldest.version() > committedVersion
+                    || nowMs - mutation.getUpdateTimeMs() < historyPolicy.minRetentionMs()) {
+                break;
+            }
+            forgetIdentityLocked(mutation);
+            evicted++;
+        }
+        if (evicted > 0) {
+            Metrics.increment("kvdb_write_history_evictions_total", "node", "prune", "evicted");
+            logger.debug("Evicted {} expired write history identities for shardId={}", evicted, shardId);
+        }
+    }
+
+    private void journalLocked(String operation, String requestId, byte[] payload) {
+        replicationWalManager.log(operation, requestId.getBytes(StandardCharsets.UTF_8), payload);
+        replicationJournalRecords++;
+    }
+
+    /** Prunes history and, once enough superseded records accumulate, rewrites the replication journal. */
+    private void maintainHistoryLocked() {
+        pruneHistoryLocked(clock.getAsLong(), 0, 0);
+        // A rewrite emits one checkpoint plus at most two records per identity; only aborted history needs two.
+        long retainedRecords = 1L + mutationsByRequest.size() + historyIdentities.size();
+        if (replicationJournalRecords <= Math.max(historyPolicy.journalCompactionMinRecords(), 2 * retainedRecords)) {
+            return;
+        }
+        try {
+            compactReplicationJournalLocked();
+        } catch (RuntimeException e) {
+            // The previous journal stays complete; the next mutation retries the rewrite.
+            Metrics.increment("kvdb_replication_journal_compactions_total", "node", "compact", "error");
+            logger.warn("Replication journal compaction failed for shardId={}", shardId, e);
+        }
+    }
+
+    /**
+     * Atomically replaces the replication journal with records that rebuild exactly the retained state: the version
+     * cursors, every pending prepare, every retained aborted identity, the newest committed mutation of each key
+     * (including delete tombstones), and the retained superseded identities. Standalone writes are never journaled.
+     */
+    private void compactReplicationJournalLocked() {
+        pruneHistoryLocked(clock.getAsLong(), 0, 0);
+        List<WALManager.WalRecord> records = new ArrayList<>();
+        records.add(new WALManager.WalRecord(
+                "CHECKPOINT",
+                CHECKPOINT_KEY,
+                ByteBuffer.allocate(3 * Long.BYTES)
+                        .putLong(shardEpoch)
+                        .putLong(highestVersion)
+                        .putLong(committedVersion)
+                        .array()));
+        List<ReplicatedMutation> retained = new ArrayList<>(mutationsByRequest.values());
+        // Replay leaves the last identity written at a version as its owner, so write the current owner last.
+        retained.sort(Comparator.comparingLong(ReplicatedMutation::getVersion)
+                .thenComparing(mutation -> mutation.getRequestId().equals(requestByVersion.get(mutation.getVersion())))
+                .thenComparingLong(ReplicatedMutation::getEpoch));
+        for (ReplicatedMutation mutation : retained) {
+            if (STANDALONE_ORIGIN.equals(mutation.getOriginNodeId())) {
+                continue;
+            }
+            byte[] requestId = mutation.getRequestId().getBytes(StandardCharsets.UTF_8);
+            switch (mutationStates.get(mutation.getRequestId())) {
+                case PREPARED -> records.add(new WALManager.WalRecord("PREPARE", requestId, mutation.toByteArray()));
+                case ABORTED -> {
+                    records.add(new WALManager.WalRecord("PREPARE", requestId, mutation.toByteArray()));
+                    records.add(new WALManager.WalRecord("ABORT", requestId, null));
+                }
+                case COMMITTED -> {
+                    ReplicatedMutation newest = committedByKey.get(mutation.getKey());
+                    String operation = newest != null && newest.getRequestId().equals(mutation.getRequestId())
+                            ? "REPAIR"
+                            : "SUPERSEDED";
+                    records.add(new WALManager.WalRecord(operation, requestId, mutation.toByteArray()));
+                }
+            }
+        }
+        replicationWalManager.rewrite(records);
+        replicationJournalRecords = records.size();
+        Metrics.increment("kvdb_replication_journal_compactions_total", "node", "compact", "ok");
+        logger.debug("Compacted replication journal to {} records for shardId={}", records.size(), shardId);
     }
 
     private void recoverReplicationState() {
         if (replicationWalManager == null) {
             return;
         }
-        for (WALManager.WalRecord record : replicationWalManager.replayRecords()) {
+        List<WALManager.WalRecord> journal = replicationWalManager.replayRecords();
+        replicationJournalRecords = journal.size();
+        for (WALManager.WalRecord record : journal) {
             String requestId = new String(record.key(), StandardCharsets.UTF_8);
             switch (record.operation()) {
-                case "PREPARE" -> {
-                    ReplicatedMutation mutation = parseMutation(record.value());
-                    mutationsByRequest.put(requestId, mutation);
-                    mutationStates.put(requestId, MutationState.PREPARED);
-                    requestByVersion.put(mutation.getVersion(), requestId);
-                    shardEpoch = Math.max(shardEpoch, mutation.getEpoch());
-                    highestVersion = Math.max(highestVersion, mutation.getVersion());
-                }
+                case "CHECKPOINT" -> recoverCheckpoint(record.value());
+                case "PREPARE" -> recordPreparedLocked(parseMutation(record.value()));
                 case "COMMIT" -> {
                     ReplicatedMutation mutation = mutationsByRequest.get(requestId);
                     if (mutation == null) {
@@ -903,7 +1149,7 @@ public class ShardKVStore {
                 }
                 case "ABORT" -> {
                     if (mutationsByRequest.containsKey(requestId)) {
-                        mutationStates.put(requestId, MutationState.ABORTED);
+                        setStateLocked(requestId, MutationState.ABORTED);
                     }
                 }
                 case "REPAIR" -> {
@@ -927,6 +1173,17 @@ public class ShardKVStore {
                 applyVisibleLocked(mutation);
             }
         }
+        pruneHistoryLocked(clock.getAsLong(), 0, 0);
+    }
+
+    private void recoverCheckpoint(byte[] value) {
+        if (value == null || value.length != 3 * Long.BYTES) {
+            throw new WALManager.WALCorruptionException("Replication WAL checkpoint payload is malformed");
+        }
+        ByteBuffer buffer = ByteBuffer.wrap(value);
+        shardEpoch = Math.max(shardEpoch, buffer.getLong());
+        highestVersion = Math.max(highestVersion, buffer.getLong());
+        committedVersion = Math.max(committedVersion, buffer.getLong());
     }
 
     private static ReplicatedMutation parseMutation(byte[] value) {
@@ -1106,6 +1363,14 @@ public class ShardKVStore {
             ByteString value, long version, long createTimeMs, long updateTimeMs, long expireTimeMs) {}
 
     private record DecodedSnapshotEntry(ByteString key, StoredValue value) {}
+
+    private record HistoryKey(long version, String requestId) implements Comparable<HistoryKey> {
+        @Override
+        public int compareTo(HistoryKey other) {
+            int byVersion = Long.compare(version, other.version);
+            return byVersion != 0 ? byVersion : requestId.compareTo(other.requestId);
+        }
+    }
 
     private enum MutationState {
         PREPARED,

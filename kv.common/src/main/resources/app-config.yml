@@ -37,6 +37,10 @@ persistence:
   autoFlushIntervalMs: 2000
   snapshotFileName: "kvstore.dat"
   walFileName: "kvstore.wal"
+  # Per-shard write deduplication window (see docs/api-compatibility.md)
+  writeHistoryMinRetentionMs: 30000
+  writeHistoryMaxEntries: 200000
+  writeHistoryMaxBytes: 134217728
 
 # Replication configuration
 replication:

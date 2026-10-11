@@ -222,25 +222,50 @@ public class WALManager {
 
     /** Atomically replace the current WAL with an empty, synced WAL. */
     public synchronized void clear() {
+        replaceContents(List.of());
+        logger.info("WAL atomically rotated: {}", walFile);
+    }
+
+    /**
+     * Atomically replace the current WAL with exactly {@code records}, written and synced before the rename. A crash or
+     * failure at any point leaves either the complete previous WAL or the complete replacement.
+     */
+    public synchronized void rewrite(List<WalRecord> records) {
+        replaceContents(List.copyOf(records));
+        logger.info("WAL atomically rewritten with {} records: {}", records.size(), walFile);
+    }
+
+    private void replaceContents(List<WalRecord> records) {
         closeChannelForRotation();
         Path parent = parentDirectory();
         Path tempFile = null;
+        boolean replaced = false;
         try {
             Files.createDirectories(parent);
             tempFile = Files.createTempFile(parent, walFile.getFileName().toString(), ".next");
-            try (FileChannel empty = FileChannel.open(tempFile, StandardOpenOption.WRITE)) {
-                empty.force(true);
+            try (FileChannel replacement = FileChannel.open(tempFile, StandardOpenOption.WRITE)) {
+                for (WalRecord record : records) {
+                    ByteBuffer buffer = ByteBuffer.wrap(encodeRecord(record.operation(), record.key(), record.value()));
+                    while (buffer.hasRemaining()) {
+                        replacement.write(buffer);
+                    }
+                }
+                replacement.force(true);
             }
             faultInjector.trigger(FaultPoint.BEFORE_ROTATE_MOVE);
             Files.move(tempFile, walFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
             tempFile = null;
+            replaced = true;
             faultInjector.trigger(FaultPoint.BEFORE_ROTATE_DIRECTORY_SYNC);
             forceDirectory(parent);
             appendFailure = null;
-            logger.info("WAL atomically rotated: {}", walFile);
         } catch (AtomicMoveNotSupportedException e) {
             throw recordRotationFailure(new IOException("Atomic WAL rotation is not supported", e));
         } catch (IOException e) {
+            if (replaced) {
+                // The rename may not survive a crash, so an append to the replacement cannot be acknowledged.
+                appendFailure = e;
+            }
             throw recordRotationFailure(e);
         } finally {
             if (tempFile != null) {

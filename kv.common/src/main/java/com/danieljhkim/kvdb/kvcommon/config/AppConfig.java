@@ -72,6 +72,12 @@ public class AppConfig {
         private int autoFlushIntervalMs = 2000;
         private String snapshotFileName = "kvstore.dat";
         private String walFileName = "kvstore.wal";
+        /** Minimum time a superseded or aborted write identity stays in a shard's deduplication window. */
+        private long writeHistoryMinRetentionMs = 30_000;
+        /** Maximum superseded or aborted write identities per shard before new writes are refused. */
+        private int writeHistoryMaxEntries = 200_000;
+        /** Maximum serialized bytes of superseded or aborted write identities per shard. */
+        private long writeHistoryMaxBytes = 128L * 1024 * 1024;
 
         @Override
         public String toString() {
@@ -79,7 +85,10 @@ public class AppConfig {
                     + enableAutoFlush + ", autoFlushIntervalMs="
                     + autoFlushIntervalMs + ", snapshotFileName='"
                     + snapshotFileName + '\'' + ", walFileName='"
-                    + walFileName + '\'' + '}';
+                    + walFileName + '\'' + ", writeHistoryMinRetentionMs="
+                    + writeHistoryMinRetentionMs + ", writeHistoryMaxEntries="
+                    + writeHistoryMaxEntries + ", writeHistoryMaxBytes="
+                    + writeHistoryMaxBytes + '}';
         }
     }
 

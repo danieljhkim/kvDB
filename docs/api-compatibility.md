@@ -24,7 +24,8 @@ Current option behavior is:
   `QUORUM_SYNC` is a quorum fsync, and `WAL_ASYNC` is rejected;
 - TTL is supported for puts and rejected for deletes;
 - create-only and CAS are serialized with mutation admission; retries with the
-  same request ID return the original committed version;
+  same request ID return the original committed version while the shard retains
+  that identity (see [Write history retention](#write-history-retention));
 - head-only reads return existence and metadata with an empty value field;
 - max-staleness bounds are rejected; read-your-writes requires strong
   consistency and low-latency mode requires eventual consistency.
@@ -72,6 +73,57 @@ connection. The transport rejects oversized frames with gRPC
 `RESOURCE_EXHAUSTED`; gateway field validation returns application code
 `PAYLOAD_TOO_LARGE`. Storage-node validation also maps through
 `RESOURCE_EXHAUSTED`.
+
+## Write history retention
+
+The deduplication journal is a bounded window, not a permanent record. Each
+storage shard always keeps the newest committed mutation of every key,
+including delete tombstones, every pending (prepared) mutation, and every
+aborted mutation above the shard's committed version. The remaining
+identities are history: committed mutations that a newer write of the same
+key replaced, and aborted mutations. History is bounded by these `persistence`
+settings:
+
+- `writeHistoryMinRetentionMs` (default `30000`): an identity is never evicted
+  before this long after its mutation's `update_time_ms`, measured against the
+  local clock;
+- `writeHistoryMaxEntries` (default `200000`): the most history identities a
+  shard keeps;
+- `writeHistoryMaxBytes` (default `134217728`): the most serialized bytes those
+  identities occupy. A single identity larger than this budget is still kept.
+
+Once a shard exceeds a limit, it evicts its oldest history identities, but only
+those past the retention window and at or below the committed version. When a
+new write cannot fit without evicting a younger identity, the node refuses it
+before preparing anything. It returns gRPC `UNAVAILABLE` with the
+`x-write-outcome: not-applied` trailer, and a replica refuses the matching
+`PREPARE`. Identical retries of retained identities are always answered,
+including while new writes are refused. Leaders and replicas apply the same
+policy.
+
+A retry inside the retention window therefore returns the original version, or
+`INVALID_ARGUMENT` for a conflicting reuse. A request ID evicted after the
+window is unknown to the shard. Reusing it starts a new mutation with a new
+version. A CAS retry then fails its version check, and a create-only retry
+fails while the key still exists. Clients must finish retrying a write within
+the retention window.
+Eviction also limits state transfer: a lagging replica receives only the
+superseded identities the sender still keeps. Every key's newest value or
+tombstone always transfers.
+
+Each shard's replication journal (`<wal>.replication`) is rewritten
+atomically to exactly the retained state: a version checkpoint, the pending
+and retained aborted mutations, each key's newest committed mutation, and the
+retained superseded identities. This happens on `persistNow`. It also happens
+whenever the journal's record count exceeds both 1024 and twice the size limit
+of a rewritten journal: one checkpoint plus at most two records per retained
+identity. The journal therefore stays within a fixed multiple of the retained
+state. The journal is written to a temporary file, synced, renamed over the old
+journal, and its directory is synced. A crash at any point leaves either the
+complete old journal or the complete new one. Startup replay therefore reads
+an amount proportional to retained state, not to total writes. The checkpoint
+uses a new replication-WAL record, so a node whose journal has been compacted
+cannot be downgraded to a build that does not recognize it.
 
 ## BatchGet semantics and limits
 

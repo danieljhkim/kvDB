@@ -92,6 +92,7 @@ public class ClusterAdminService {
      * Gets the shard map version, using cache if available.
      *
      * @return The map version number
+     * @throws IllegalStateException if the coordinator shard map cannot be fetched
      */
     public long getShardMapVersion() {
         // Check cache first
@@ -102,12 +103,11 @@ public class ClusterAdminService {
 
         // Cache miss or expired - fetch from coordinator
         ShardMapSnapshotDto shardMap = coordinatorReadClient.getShardMap();
-        if (shardMap != null) {
-            shardMapCache.put(shardMap);
-            return shardMap.getMapVersion();
+        if (shardMap == null) {
+            // Do not report 0 here: it is also the version of a brand-new coordinator state
+            throw new IllegalStateException("Shard map not available: cannot get shard map version");
         }
-
-        // Fallback: return 0 if coordinator unavailable
-        return 0;
+        shardMapCache.put(shardMap);
+        return shardMap.getMapVersion();
     }
 }

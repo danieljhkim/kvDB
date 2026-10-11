@@ -133,6 +133,13 @@ public class StubRaftStateMachine implements RaftStateMachine {
     }
 
     @Override
+    public void registerWatch(Consumer<ShardMapSnapshot> registration) {
+        synchronized (writeLock) {
+            registration.accept(snapshotRef.get());
+        }
+    }
+
+    @Override
     public void addWatcher(Consumer<ShardMapDelta> watcher) {
         if (watcher != null) {
             watchers.add(watcher);

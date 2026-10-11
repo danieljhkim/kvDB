@@ -101,7 +101,9 @@ public class WatcherManager implements Consumer<ShardMapDelta> {
     }
 
     /**
-     * Registers a new watcher and sends the initial state if newer than fromVersion.
+     * Registers a new watcher and sends the initial state if newer than fromVersion. Call through
+     * {@link com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine.RaftStateMachine#registerWatch(Consumer)}
+     * so snapshot capture, activation and initial delivery are serialized with state-machine publication.
      *
      * @param observer the gRPC stream observer
      * @param fromVersion the client's current version (0 for full state)

@@ -49,6 +49,21 @@ public interface RaftStateMachine {
      */
     ShardMapSnapshot getSnapshot();
 
+    /**
+     * Captures the current snapshot and activates a watch while excluding mutation and snapshot-install publication.
+     * The callback must register the observer and deliver any initial state synchronously before returning, so later
+     * deltas cannot overtake that initial state. It must not wait for another state-machine mutation to complete.
+     *
+     * <p>
+     * Implementations supporting WatchShardMap must override this operation using their publication lock. The default
+     * fails closed rather than exposing a snapshot-to-subscription gap in other implementations.
+     *
+     * @param registration the callback that activates the watch using the captured snapshot
+     */
+    default void registerWatch(Consumer<ShardMapSnapshot> registration) {
+        throw new UnsupportedOperationException("Atomic watch registration is not supported");
+    }
+
     /** Serializes a point-in-time state suitable for a durable Raft snapshot. */
     default byte[] takeSnapshot() throws IOException {
         throw new UnsupportedOperationException("State-machine snapshots are not supported");

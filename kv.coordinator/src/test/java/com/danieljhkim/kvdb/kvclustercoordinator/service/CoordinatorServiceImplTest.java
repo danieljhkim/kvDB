@@ -43,6 +43,8 @@ import com.danieljhkim.kvdb.proto.coordinator.ReportShardLeaderRequest;
 import com.danieljhkim.kvdb.proto.coordinator.SetNodeStatusRequest;
 import com.danieljhkim.kvdb.proto.coordinator.SetShardLeaderRequest;
 import com.danieljhkim.kvdb.proto.coordinator.SetShardReplicasRequest;
+import com.danieljhkim.kvdb.proto.coordinator.ShardMapDelta;
+import com.danieljhkim.kvdb.proto.coordinator.WatchShardMapRequest;
 import io.grpc.Context;
 import io.grpc.ManagedChannel;
 import io.grpc.Metadata;
@@ -54,6 +56,7 @@ import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.MetadataUtils;
 import io.grpc.stub.StreamObserver;
+import java.lang.management.ManagementFactory;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -75,6 +78,129 @@ class CoordinatorServiceImplTest {
 
     @TempDir
     Path tempDir;
+
+    @Test
+    void watchRegistrationGapDeliversMutationWithoutAnyLaterMutation() throws Exception {
+        assertWatchRegistrationGap(new RaftStateMachineImpl(), false);
+    }
+
+    @Test
+    void watchRegistrationKeepsInitialStateBeforeConcurrentDelta() throws Exception {
+        assertWatchRegistrationGap(new RaftStateMachineImpl(), true);
+    }
+
+    @Test
+    void stubWatchRegistrationGapDeliversMutationWithoutAnyLaterMutation() throws Exception {
+        assertWatchRegistrationGap(new StubRaftStateMachine(), false);
+    }
+
+    @Test
+    void stubWatchRegistrationKeepsInitialStateBeforeConcurrentDelta() throws Exception {
+        assertWatchRegistrationGap(new StubRaftStateMachine(), true);
+    }
+
+    private void assertWatchRegistrationGap(RaftStateMachine stateMachine, boolean requestInitialState)
+            throws Exception {
+        stateMachine
+                .apply(new RaftCommand.RegisterNode("node-1", "localhost:8001", "zone-a"))
+                .join();
+        stateMachine.apply(new RaftCommand.InitShards(1, 1)).join();
+        stateMachine
+                .apply(new RaftCommand.SetShardReplicas("shard-0", List.of("node-1")))
+                .join();
+        ShardMapSnapshot oldSnapshot = stateMachine.getSnapshot();
+        long oldVersion = oldSnapshot.getMapVersion();
+        long epoch = oldSnapshot.getShard("shard-0").epoch();
+        RecordingObserver<ShardMapDelta> observer = new RecordingObserver<>();
+        CompletableFuture<Void> mutationFinished = new CompletableFuture<>();
+        Thread mutation = new Thread(
+                () -> {
+                    try {
+                        stateMachine
+                                .apply(new RaftCommand.SetShardLeader("shard-0", epoch, "node-1"))
+                                .join();
+                        mutationFinished.complete(null);
+                    } catch (Throwable error) {
+                        mutationFinished.completeExceptionally(error);
+                    }
+                },
+                "watch-registration-gap");
+        WatcherManager watcherManager = new WatcherManager() {
+            @Override
+            public void registerWatcher(
+                    StreamObserver<ShardMapDelta> target, long fromVersion, ShardMapSnapshot snapshot) {
+                assertEquals(oldVersion, snapshot.getMapVersion());
+                assertEquals(requestInitialState ? 0 : oldVersion, fromVersion);
+                // Schedule a real mutation after capture but before the observer enters the manager.
+                mutation.start();
+                awaitMutationBlockedOrFinished(mutation, mutationFinished);
+                super.registerWatcher(target, fromVersion, snapshot);
+            }
+        };
+        stateMachine.addWatcher(watcherManager);
+        try (SingleNodeCoordinator coordinator = new SingleNodeCoordinator(tempDir, stateMachine, stateMachine)) {
+            new CoordinatorServiceImpl(coordinator.node, stateMachine, watcherManager)
+                    .watchShardMap(
+                            WatchShardMapRequest.newBuilder()
+                                    .setFromVersion(requestInitialState ? 0 : oldVersion)
+                                    .build(),
+                            observer);
+            mutationFinished.get(5, TimeUnit.SECONDS);
+
+            assertNull(observer.error);
+            assertFalse(observer.completed);
+            assertEquals(oldVersion + 1, stateMachine.getMapVersion());
+            assertEquals(
+                    requestInitialState ? List.of(oldVersion, oldVersion + 1) : List.of(oldVersion + 1),
+                    observer.values.stream()
+                            .map(ShardMapDelta::getNewMapVersion)
+                            .toList());
+            if (requestInitialState) {
+                assertTrue(observer.values.getFirst().hasFullState());
+                assertEquals(
+                        oldVersion, observer.values.getFirst().getFullState().getMapVersion());
+            }
+            ShardMapDelta delivered = observer.values.getLast();
+            assertEquals(List.of("shard-0"), delivered.getChangedShardsList());
+            assertTrue(delivered.hasFullState());
+            assertEquals(
+                    "node-1",
+                    delivered.getFullState().getShardsMap().get("shard-0").getLeader());
+        } finally {
+            mutation.join(TimeUnit.SECONDS.toMillis(5));
+            assertFalse(mutation.isAlive(), "registration mutation did not finish");
+            stateMachine.removeWatcher(watcherManager);
+            watcherManager.stop();
+        }
+    }
+
+    private static void awaitMutationBlockedOrFinished(Thread mutation, CompletableFuture<Void> finished) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        try {
+            while (System.nanoTime() < deadline) {
+                if (finished.isDone()) {
+                    finished.join();
+                    return;
+                }
+                // A fixed registration holds the publication monitor. Wait for that observed state,
+                // not a sleep-based assumption that the mutation had enough time to run.
+                var threads = ManagementFactory.getThreadMXBean().dumpAllThreads(false, false);
+                for (var thread : threads) {
+                    if (thread.getThreadState() == Thread.State.BLOCKED
+                            && thread.getLockOwnerId() == Thread.currentThread().threadId()
+                            && (thread.getThreadId() == mutation.threadId()
+                                    || thread.getThreadName().startsWith("ForkJoinPool.commonPool-worker-"))) {
+                        return;
+                    }
+                }
+                Thread.sleep(10);
+            }
+            fail("Mutation neither completed nor blocked behind atomic watch registration");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError(e);
+        }
+    }
 
     @Test
     void productionMutationRpcsOnlySubmitThroughRaft() throws Exception {

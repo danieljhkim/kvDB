@@ -131,6 +131,21 @@ mounts the directory read-only. Each process receives:
 - Gateway only: the corresponding `KVDB_GATEWAY_TLS_*` server/client-boundary
   files
 
+`scripts/bootstrap_cluster.sh` and `scripts/smoke_test.sh` follow the same
+policy as the servers: mTLS unless `development-plaintext` is selected
+explicitly with a development `KVDB_ENV`. They read host-only credentials from
+`KVDB_OPERATOR_TLS_DIR`, which must not be mounted into containers:
+
+- Coordinator calls present an operator certificate with an admin URI SAN
+  (`spiffe://kvdb/admin/<principal>`). Only admins may initialize shards or
+  register arbitrary nodes.
+- Gateway calls present a client certificate
+  (`spiffe://kvdb/client/<tenant>/<principal>`). It is issued by the gateway
+  client CA, so internal listeners reject it.
+
+`scripts/generate_tls.sh` writes both directories for local and rehearsal
+clusters. The script variables are documented in `scripts/cluster_helpers.sh`.
+
 Never commit private keys, certificate bundles containing keys, or revocation
 operational data. Configuration errors name paths but credentials and
 certificate contents are never logged.
@@ -161,7 +176,9 @@ revocation files with the same operational controls as trust bundles.
 ### Explicit local-development mode
 
 `scripts/run_cluster.sh` sets `KVDB_GRPC_SECURITY_MODE=development-plaintext`
-and supplies role/principal headers for local smoke tests. The process refuses
+and supplies role/principal headers. The bootstrap and smoke scripts send
+development identities only when the same mode and a development `KVDB_ENV`
+are exported in their shell. Every server process refuses
 that mode unless `KVDB_ENV` is exactly `local`, `dev`, `development`, or `test`;
 the default mode is `mtls`, so a missing or mistyped production configuration
 fails closed. Development identities are forgeable and must never be exposed on

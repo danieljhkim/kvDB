@@ -1,5 +1,7 @@
 # Durable local cluster: three Raft coordinators, two storage nodes, gateway,
-# and admin API. TLS material is mounted read-only from KVDB_TLS_DIR.
+# and admin API. TLS material is mounted read-only from KVDB_TLS_DIR;
+# scripts/generate_tls.sh can issue it, along with the host-only operator and
+# client credentials the bootstrap and smoke scripts use.
 
 x-coordinator-common: &coordinator-common
   build:

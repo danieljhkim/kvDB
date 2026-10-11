@@ -17,6 +17,11 @@ set -euo pipefail
 #
 # Requires: grpcurl
 #
+# Transport follows KVDB_GRPC_SECURITY_MODE (default mtls) as described in
+# scripts/cluster_helpers.sh: gateway calls present the client certificate,
+# and bootstrap presents the operator certificate. Plaintext with development
+# identities is used only for development-plaintext with a development KVDB_ENV.
+#
 # Usage:
 #   ./scripts/run_cluster.sh
 #   ./scripts/smoke_test.sh [write]
@@ -33,6 +38,7 @@ set -euo pipefail
 #   SMOKE_FIXTURE_FILE=<path>      required for seed and verify; keep it outside
 #                                  every Docker volume under test
 #   SMOKE_FIXTURE_KEYS=3           number of keys written by seed
+#   KVDB_OPERATOR_TLS_DIR=<path>   operator and client mTLS credentials
 #
 
 BASE_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/.."
@@ -46,6 +52,7 @@ SMOKE_FIXTURE_FILE="${SMOKE_FIXTURE_FILE:-}"
 SMOKE_FIXTURE_KEYS="${SMOKE_FIXTURE_KEYS:-3}"
 
 PROTO_DIR="$BASE_DIR/kv.proto/src/main/proto"
+source "$BASE_DIR/scripts/cluster_helpers.sh"
 
 b64() {
   printf "%s" "$1" | base64 | tr -d '\n'
@@ -53,8 +60,8 @@ b64() {
 
 gateway_put() {
   local request_id="$1" key_b64="$2" val_b64="$3"
-  grpcurl -plaintext \
-    -H "x-kvdb-development-identity: client/local/smoke-test" \
+  grpc_transport_args client "client/local/smoke-test" || return 1
+  grpcurl "${GRPC_TRANSPORT_ARGS[@]}" \
     -import-path "${PROTO_DIR}" \
     -proto kvgateway.proto \
     -d "{\"ctx\":{\"request_id\":\"${request_id}\"},\"key\":\"${key_b64}\",\"value\":\"${val_b64}\",\"options\":{}}" \
@@ -64,8 +71,8 @@ gateway_put() {
 
 gateway_get() {
   local request_id="$1" key_b64="$2"
-  grpcurl -plaintext \
-    -H "x-kvdb-development-identity: client/local/smoke-test" \
+  grpc_transport_args client "client/local/smoke-test" || return 1
+  grpcurl "${GRPC_TRANSPORT_ARGS[@]}" \
     -import-path "${PROTO_DIR}" \
     -proto kvgateway.proto \
     -d "{\"ctx\":{\"request_id\":\"${request_id}\"},\"key\":\"${key_b64}\",\"options\":{\"consistency\":\"STRONG\"}}" \
@@ -186,6 +193,13 @@ run_verify() {
   fi
   echo "✅ Persistence verified (${checked} key(s) match recorded value and version)"
 }
+
+case "$SMOKE_MODE" in
+  write|seed|verify)
+    # Refuse an unusable gateway transport before bootstrapping or reading fixtures.
+    grpc_transport_args client "client/local/smoke-test" || exit 1
+    ;;
+esac
 
 case "$SMOKE_MODE" in
   write) run_write ;;

@@ -4,6 +4,8 @@ set -euo pipefail
 # Idempotently registers storage nodes and initializes shards through the
 # elected coordinator. Both local and Docker deployments expose the same
 # loopback seed endpoints: localhost:9001, localhost:9002, localhost:9003.
+# Calls present the operator certificate in mTLS mode (the default); see
+# scripts/cluster_helpers.sh for the credential settings.
 
 BASE_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/.."
 PROTO_DIR="$BASE_DIR/kv.proto/src/main/proto"

@@ -101,11 +101,15 @@ Normal deployments use mutually authenticated workload certificates for internal
 ```bash
 make build
 export KVDB_ADMIN_SECURITY_API_KEY="$(openssl rand -hex 32)"   # Admin API fails closed without it
+export KVDB_ENV=local KVDB_GRPC_SECURITY_MODE=development-plaintext
 make run-cluster        # 3 coordinators, 2 storage nodes, gateway, Admin API
 make bootstrap-cluster
 make smoke-test
 make stop               # stops only the processes this checkout started
 ```
+
+`bootstrap-cluster` and `smoke-test` default to mTLS like the servers do. They use plaintext development identities
+only when `KVDB_GRPC_SECURITY_MODE=development-plaintext` is exported and `KVDB_ENV` is a development value, as above.
 
 How `run-cluster` behaves:
 
@@ -117,8 +121,11 @@ How `run-cluster` behaves:
 ### Docker (durable three-coordinator cluster)
 
 ```bash
+unset KVDB_ENV KVDB_GRPC_SECURITY_MODE    # keep the mTLS defaults; drop any development settings
 export KVDB_ADMIN_SECURITY_API_KEY="$(openssl rand -hex 32)"
-export KVDB_TLS_DIR=/absolute/path/to/kvdb-tls
+export KVDB_TLS_DIR=/absolute/path/to/kvdb-tls                  # workload credentials, mounted into containers
+export KVDB_OPERATOR_TLS_DIR=/absolute/path/to/kvdb-operator-tls # operator/client credentials, host only
+./scripts/generate_tls.sh       # once; refuses to overwrite existing credentials
 docker compose up --build --detach
 STORAGE_NODE_ADDRS=node1:8001,node2:8002 make bootstrap-cluster
 docker compose up --detach --wait --wait-timeout 180
@@ -126,6 +133,20 @@ STORAGE_NODE_ADDRS=node1:8001,node2:8002 make smoke-test
 docker compose down
 ```
 
+- Compose runs mutual TLS by default, so the bootstrap and smoke scripts do too. `make bootstrap-cluster` registers
+  nodes and initializes shards with the operator certificate (`spiffe://kvdb/admin/operator`). `make smoke-test`
+  writes and reads a gateway value with the client certificate (`spiffe://kvdb/client/smoke/smoke-test`), which
+  can call only the gateway data API.
+- `scripts/generate_tls.sh` issues a throwaway CA set for local and rehearsal clusters and discards the CA keys.
+  To use your own PKI instead, fill `KVDB_TLS_DIR` with the files `docker-compose.yml` mounts. Then point
+  `KVDB_OPERATOR_TLS_DIR` at `internal-ca-bundle.pem`, `operator/tls.{crt,key}`, `gateway-ca-bundle.pem` and
+  `client/tls.{crt,key}`, or set the individual `KVDB_OPERATOR_TLS_*` and `KVDB_CLIENT_TLS_*` paths listed in
+  [`scripts/cluster_helpers.sh`](scripts/cluster_helpers.sh).
+- The scripts verify server certificates against the address they dial (`localhost`), so coordinator and gateway
+  certificates need a `localhost` SAN. If they lack one, set `KVDB_OPERATOR_TLS_SERVER_NAME` or
+  `KVDB_CLIENT_TLS_SERVER_NAME` to a name they do carry.
+- Missing credentials, an unknown `KVDB_GRPC_SECURITY_MODE`, or plaintext without a development `KVDB_ENV` stop the
+  scripts before they connect.
 - Compose publishes the coordinator seeds on loopback only (`localhost:9001`–`9003`, the same as local processes).
   Storage-node ports stay private.
 - State lives in named volumes. Use rolling restarts to keep quorum without re-bootstrapping.

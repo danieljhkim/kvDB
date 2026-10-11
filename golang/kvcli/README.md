@@ -122,8 +122,9 @@ kv --security-mode development-plaintext --address 127.0.0.1:7000 ping
 
 ### Local cluster smoke path
 
-After `make go-build`, `make run-cluster`, and `make bootstrap-cluster`, use
-the development-only identity above with the built `./kv` binary. These commands
+After `make go-build`, `make run-cluster`, and `make bootstrap-cluster` (run
+with the development settings from the repository README), use the
+development-only identity above with the built `./kv` binary. These commands
 exercise every supported data-plane operation against the local gateway:
 
 ```bash

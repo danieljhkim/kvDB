@@ -160,10 +160,7 @@ class CoordinatorAdminClientConcurrencyTest {
 
     private static CoordinatorAdminClient newClient(String... addresses) {
         return new CoordinatorAdminClient(
-                List.of(addresses),
-                5,
-                TimeUnit.SECONDS,
-                (host, port) -> NettyChannelBuilder.forAddress(host, port)
+                List.of(addresses), 5, TimeUnit.SECONDS, (host, port) -> NettyChannelBuilder.forAddress(host, port)
                         .usePlaintext()
                         .build());
     }

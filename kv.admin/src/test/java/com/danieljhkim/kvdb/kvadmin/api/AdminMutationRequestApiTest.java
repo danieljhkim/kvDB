@@ -86,21 +86,13 @@ class AdminMutationRequestApiTest {
             assertFalse(rebalance.body().contains("target_nodes"));
             assertEquals(1, ops.triggerCalls.get());
 
-            HttpResponse<String> shardRebalance = post(
-                    http,
-                    port,
-                    "/admin/shards/rebalance",
-                    json(),
-                    "{\"target_nodes\":[\"node-1\"]}");
+            HttpResponse<String> shardRebalance =
+                    post(http, port, "/admin/shards/rebalance", json(), "{\"target_nodes\":[\"node-1\"]}");
             assertClientError(shardRebalance, 501, "NOT_IMPLEMENTED");
             assertFalse(shardRebalance.body().contains("target_nodes"));
 
-            HttpResponse<String> config = post(
-                    http,
-                    port,
-                    "/admin/config",
-                    json(),
-                    "{\"replication_factor\":3,\"secret\":\"do-not-echo\"}");
+            HttpResponse<String> config =
+                    post(http, port, "/admin/config", json(), "{\"replication_factor\":3,\"secret\":\"do-not-echo\"}");
             assertClientError(config, 501, "NOT_IMPLEMENTED");
             assertFalse(config.body().contains("replication_factor"));
             assertFalse(config.body().contains("do-not-echo"));

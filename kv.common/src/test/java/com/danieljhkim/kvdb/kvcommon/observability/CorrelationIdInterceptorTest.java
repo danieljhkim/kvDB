@@ -12,7 +12,6 @@ import io.grpc.ServerCallHandler;
 import io.grpc.Status;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
@@ -163,8 +162,7 @@ class CorrelationIdInterceptorTest {
         };
 
         assertThrows(
-                IllegalStateException.class,
-                () -> interceptor.interceptCall(new StubCall(), new Metadata(), failing));
+                IllegalStateException.class, () -> interceptor.interceptCall(new StubCall(), new Metadata(), failing));
         assertOuterState();
     }
 
@@ -175,8 +173,7 @@ class CorrelationIdInterceptorTest {
         };
 
         assertThrows(
-                IllegalStateException.class,
-                () -> interceptor.interceptCall(new StubCall(), new Metadata(), failing));
+                IllegalStateException.class, () -> interceptor.interceptCall(new StubCall(), new Metadata(), failing));
         assertNull(MDC.get(MDC_KEY));
         assertNull(CorrelationIds.current());
     }
@@ -187,8 +184,7 @@ class CorrelationIdInterceptorTest {
         headers.put(CorrelationIdInterceptor.HEADER, "not-a-uuid\nforged");
         Probe probe = new Probe();
 
-        ServerCall.Listener<String> listener =
-                interceptor.interceptCall(new StubCall(), headers, (call, h) -> probe);
+        ServerCall.Listener<String> listener = interceptor.interceptCall(new StubCall(), headers, (call, h) -> probe);
         listener.onHalfClose();
 
         assertNotEquals("not-a-uuid\nforged", probe.halfCloseMdc);

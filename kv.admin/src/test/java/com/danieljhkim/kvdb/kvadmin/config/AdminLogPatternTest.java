@@ -8,8 +8,8 @@ import java.io.Serializable;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
-import org.apache.logging.log4j.core.LoggerContext;
 import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
 import org.apache.logging.log4j.core.appender.AbstractAppender;
 import org.apache.logging.log4j.core.config.Configuration;
 import org.apache.logging.log4j.core.config.ConfigurationFactory;
@@ -26,7 +26,11 @@ class AdminLogPatternTest {
 
         LoggerContext context = new LoggerContext("AdminLogPatternTest");
         Configuration configuration = ConfigurationFactory.getInstance()
-                .getConfiguration(context, "admin-log-pattern-test", configUrl.toURI(), getClass().getClassLoader());
+                .getConfiguration(
+                        context,
+                        "admin-log-pattern-test",
+                        configUrl.toURI(),
+                        getClass().getClassLoader());
         context.start(configuration);
 
         try {
@@ -49,11 +53,13 @@ class AdminLogPatternTest {
             assertEquals(2, capture.events.size());
             String first = capture.events.get(0);
             String second = capture.events.get(1);
-            assertTrue(first.matches(
-                    "(?s)^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}(?:Z|[+-]\\d{2}:\\d{2}) \\[.*\\] INFO  .*AdminLogPatternTest - first-event\\R$"),
+            assertTrue(
+                    first.matches(
+                            "(?s)^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}(?:Z|[+-]\\d{2}:\\d{2}) \\[.*\\] INFO  .*AdminLogPatternTest - first-event\\R$"),
                     first);
-            assertTrue(second.matches(
-                    "(?s)^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}(?:Z|[+-]\\d{2}:\\d{2}) \\[.*\\] ERROR .*AdminLogPatternTest - second-event\\R.*"),
+            assertTrue(
+                    second.matches(
+                            "(?s)^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}(?:Z|[+-]\\d{2}:\\d{2}) \\[.*\\] ERROR .*AdminLogPatternTest - second-event\\R.*"),
                     second);
             assertTrue(second.contains("java.lang.IllegalStateException: expected throwable text"), second);
         } finally {

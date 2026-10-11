@@ -9,6 +9,7 @@ import com.danieljhkim.kvdb.kvcommon.cache.ShardMapCache;
 import com.danieljhkim.kvdb.kvcommon.config.AppConfig;
 import com.danieljhkim.kvdb.kvcommon.exception.NodeUnavailableException;
 import com.danieljhkim.kvdb.kvcommon.exception.RequestIdConflictException;
+import com.danieljhkim.kvdb.kvcommon.exception.ShardMovedException;
 import com.danieljhkim.kvdb.kvcommon.grpc.GrpcIdentity;
 import com.danieljhkim.kvdb.kvcommon.grpc.GrpcPeerIdentity;
 import com.danieljhkim.kvdb.kvcommon.limits.KvRequestLimits;
@@ -47,6 +48,8 @@ import java.util.function.BiConsumer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class ReplicationManagerTest {
 
@@ -417,8 +420,9 @@ class ReplicationManagerTest {
         }
     }
 
-    @Test
-    void promotedReplicaReconcilesConflictingOrphanAndPreservesCommittedStateAcrossRestart() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void promotedReplicaReconcilesConflictingOrphanAndPreservesCommittedStateAcrossRestart(boolean aborted) {
         ShardRecord promotedShard = promotedShard();
         ShardKVStore promotedStore = newStore("orphan-promoted");
         ReplicatedMutation orphan = mutation(1, MutationKind.SET, "aborted", "hidden");
@@ -428,6 +432,11 @@ class ReplicationManagerTest {
                 .setValue(ByteString.copyFromUtf8("committed"))
                 .build();
         assertTrue(promotedStore.prepareMutation(orphan).success());
+        if (aborted) {
+            assertTrue(promotedStore.abortMutation(orphan).success());
+            promotedStore.shutdown();
+            promotedStore = newStore("orphan-promoted");
+        }
 
         ShardKVStore peer1 = newStore("orphan-peer-1");
         ShardKVStore peer2 = newStore("orphan-peer-2");
@@ -441,7 +450,7 @@ class ReplicationManagerTest {
                 cache(promotedShard),
                 new FixedRegistry(tempDir.resolve("orphan-promoted-registry"), promotedStore),
                 promotedClient,
-                Duration.ofMillis(40));
+                Duration.ofSeconds(5));
 
         manager.ensureLeaderReconciled("shard-0", promotedShard);
         assertEquals("(nil)", promotedStore.get("aborted"));
@@ -464,14 +473,20 @@ class ReplicationManagerTest {
         peer2.shutdown();
     }
 
-    @Test
-    void promotedLeaderCompletesAllSyncWithFollowerOnlyOlderEpochPrepareAndStableRetry() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void promotedLeaderCompletesAllSyncWithFollowerOnlyOlderEpochPrepareAndStableRetry(boolean aborted) {
         ShardRecord promotedShard = promotedShard();
         ShardKVStore promotedStore = newStore("promoted-empty");
         ShardKVStore emptyPeer = newStore("promoted-empty-peer");
         ShardKVStore orphanPeer = newStore("promoted-orphan-peer");
         ReplicatedMutation orphan = mutation(1, MutationKind.SET, "orphan", "hidden");
         assertTrue(orphanPeer.prepareMutation(orphan).success());
+        if (aborted) {
+            assertTrue(orphanPeer.abortMutation(orphan).success());
+            orphanPeer.shutdown();
+            orphanPeer = newStore("promoted-orphan-peer");
+        }
 
         FakeReplicaClient promotedClient = new FakeReplicaClient(Map.of(
                 "node-1:9000", emptyPeer,
@@ -481,7 +496,7 @@ class ReplicationManagerTest {
                 cache(promotedShard),
                 new FixedRegistry(tempDir.resolve("promoted-empty-registry"), promotedStore),
                 promotedClient,
-                Duration.ofMillis(40));
+                Duration.ofSeconds(5));
 
         manager.ensureLeaderReconciled("shard-0", promotedShard);
         assertEquals("(nil)", promotedStore.get("orphan"));
@@ -511,6 +526,80 @@ class ReplicationManagerTest {
         assertEquals("visible", restartedOrphanPeer.get("successor"));
         assertFalse(restartedOrphanPeer.commitMutation(orphan).success());
         restartedOrphanPeer.shutdown();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void promotedLeaderReclaimsAbortedFollowerThroughAuthorizedReplicationAndRepair(boolean repairOnly) {
+        ShardRecord shard = promotedShard();
+        ShardStoreRegistry leader = registry("aborted-service-leader");
+        ShardStoreRegistry emptyPeer = registry("aborted-service-empty-peer");
+        ShardStoreRegistry abortedPeer = registry("aborted-service-peer");
+        ReplicatedMutation aborted = mutation(1, MutationKind.SET, "orphan", "hidden");
+        ShardKVStore follower = abortedPeer.getOrCreate("shard-0");
+        assertTrue(follower.prepareMutation(aborted).success());
+        assertTrue(follower.abortMutation(aborted).success());
+        abortedPeer.shutdown();
+        abortedPeer = registry("aborted-service-peer");
+        AppConfig.LimitsConfig limits = new AppConfig.LimitsConfig();
+        Map<String, KVServiceImpl> peers = Map.of(
+                "node-1:9000",
+                        new KVServiceImpl("node-1", cache(shard), emptyPeer, null, Duration.ofSeconds(5), limits),
+                "node-2:9000",
+                        new KVServiceImpl("node-2", cache(shard), abortedPeer, null, Duration.ofSeconds(5), limits));
+        PeerServiceReplicaClient client = new PeerServiceReplicaClient("node-3", peers);
+        manager = new ReplicationManager("node-3", cache(shard), leader, client, Duration.ofSeconds(5));
+        try {
+            // Reconciliation sees committed history only, so the new leader legitimately allocates version 1.
+            ReplicationManager.MutationResult result = manager.replicateSet(
+                    "shard-0",
+                    shard,
+                    "successor",
+                    "visible",
+                    "replacement",
+                    repairOnly ? WriteDurability.LOCAL_SYNC : WriteDurability.ALL_SYNC);
+            assertEquals(1, result.version());
+            if (repairOnly) {
+                manager.repairReplicas("shard-0", shard);
+                assertTrue(manager.repairProgress("node-2:9000", "shard-0").complete());
+            } else {
+                assertEquals(3, result.durableAcks());
+            }
+            for (ShardStoreRegistry registry : List.of(leader, emptyPeer, abortedPeer)) {
+                ShardKVStore store = registry.getOrCreate("shard-0");
+                assertEquals("visible", store.get("successor"));
+                assertEquals("(nil)", store.get("orphan"));
+                assertFalse(store.prepareMutation(aborted).success());
+                assertFalse(store.commitMutation(aborted).success());
+            }
+            for (ReplicationPhase phase : List.of(ReplicationPhase.PREPARE, ReplicationPhase.COMMIT)) {
+                ReplicateMutationRequest delayed = ReplicateMutationRequest.newBuilder()
+                        .setMutation(aborted)
+                        .setPhase(phase)
+                        .build();
+                assertThrows(
+                        ShardMovedException.class,
+                        () -> asPeer("node-1", () -> peers.get("node-2:9000")
+                                .replicateMutation(delayed, new CapturingObserver<>())));
+            }
+        } finally {
+            manager.close();
+            manager = null;
+            peers.values().forEach(KVServiceImpl::shutdownReplication);
+            leader.shutdown();
+            emptyPeer.shutdown();
+            abortedPeer.shutdown();
+        }
+        ShardStoreRegistry restarted = registry("aborted-service-peer");
+        try {
+            ShardKVStore recovered = restarted.getOrCreate("shard-0");
+            assertEquals("visible", recovered.get("successor"));
+            assertEquals("(nil)", recovered.get("orphan"));
+            assertFalse(recovered.prepareMutation(aborted).success());
+            assertFalse(recovered.commitMutation(aborted).success());
+        } finally {
+            restarted.shutdown();
+        }
     }
 
     @Test
@@ -901,7 +990,8 @@ class ReplicationManagerTest {
                 "node-2:9000", newStore("follower-2"),
                 "node-3:9000", newStore("follower-3"));
         FakeReplicaClient client = new FakeReplicaClient(followers);
-        manager = new ReplicationManager("node-1", cache, leader, client, Duration.ofMillis(40));
+        // Latches force the stalled-peer cases; allow healthy WAL fsyncs a generous window on shared hosts.
+        manager = new ReplicationManager("node-1", cache, leader, client, Duration.ofSeconds(5));
         return new Fixture(shard, leader, followers, client);
     }
 

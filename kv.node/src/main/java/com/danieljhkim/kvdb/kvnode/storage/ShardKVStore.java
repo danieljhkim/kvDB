@@ -732,14 +732,15 @@ public class ShardKVStore {
         if (versionOwner != null && !versionOwner.equals(mutation.getRequestId())) {
             ReplicatedMutation existingOwner = mutationsByRequest.get(versionOwner);
             if (existingOwner == null
-                    || mutationStates.get(versionOwner) != MutationState.PREPARED
+                    || !isUncommittedOwner(versionOwner)
                     || mutation.getEpoch() <= existingOwner.getEpoch()) {
                 return rejected("version conflicts with a different mutation");
             }
-            // A newer leader can reclaim a version held only by an older prepared mutation. Persist the abort before
-            // recording its PREPARE so a restart cannot resurrect the orphan as the version owner.
-            abortPreparedLocked(existingOwner);
-            requestByVersion.remove(mutation.getVersion(), versionOwner);
+            // Keep aborted ownership until a strictly newer leader replaces it, so same-epoch conflicts stay fenced.
+            // The replacement PREPARE restores its ownership on replay; retain the old request's aborted identity.
+            if (mutationStates.get(versionOwner) == MutationState.PREPARED) {
+                abortPreparedLocked(existingOwner);
+            }
         }
 
         replicationWalManager.log(
@@ -774,7 +775,7 @@ public class ShardKVStore {
     /**
      * Checks a committed state-transfer entry against local identities. The transfer RPC's current epoch is fenced by
      * the service. Its payload can legitimately contain a committed mutation from an older epoch, which takes
-     * precedence over an uncommitted local prepare of the same version.
+     * precedence over an uncommitted local prepare or aborted owner of the same version.
      */
     private String admitTransferredMutationLocked(ReplicatedMutation mutation) {
         String validation = validateMutation(mutation);
@@ -787,14 +788,20 @@ public class ShardKVStore {
         }
         String versionOwner = requestByVersion.get(mutation.getVersion());
         if (versionOwner != null && !versionOwner.equals(mutation.getRequestId())) {
-            ReplicatedMutation preparedOwner = mutationsByRequest.get(versionOwner);
-            if (preparedOwner == null || mutationStates.get(versionOwner) != MutationState.PREPARED) {
+            ReplicatedMutation existingOwner = mutationsByRequest.get(versionOwner);
+            if (existingOwner == null || !isUncommittedOwner(versionOwner)) {
                 return "version conflicts with a different mutation";
             }
-            abortPreparedLocked(preparedOwner);
-            requestByVersion.remove(mutation.getVersion(), versionOwner);
+            if (mutationStates.get(versionOwner) == MutationState.PREPARED) {
+                abortPreparedLocked(existingOwner);
+            }
         }
         return null;
+    }
+
+    private boolean isUncommittedOwner(String requestId) {
+        MutationState state = mutationStates.get(requestId);
+        return state == MutationState.PREPARED || state == MutationState.ABORTED;
     }
 
     /**

@@ -21,6 +21,9 @@ export GATEWAY_ADDR="stub-gateway:7000"
 export COORDINATOR_ADDRS="stub-coordinator:9001"
 export LEADER_DISCOVERY_TIMEOUT_SECONDS=2
 export N_NODES=2
+# The release rehearsal runs the plaintext Compose model; transport selection is covered by cluster_transport_test.sh.
+export KVDB_ENV=test
+export KVDB_GRPC_SECURITY_MODE=development-plaintext
 
 cat > "$work/bin/grpcurl" <<'STUB'
 #!/usr/bin/env bash

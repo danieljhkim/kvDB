@@ -60,6 +60,8 @@ const AUTH = resolveClientAuth(__ENV, { tenant: "dev", principal: "k6" }, open);
 
 // Custom failure metric (k6 versions differ on built-in gRPC failure metric availability)
 const grpc_failures = new Rate("grpc_failures");
+// Expected missing-key responses are tolerated for reads/deletes and reported separately.
+const tolerated_not_found = new Rate("tolerated_not_found");
 
 // --------------------
 // Enum numeric values (from proto)
@@ -96,6 +98,17 @@ function statusMessage(res) {
   const raw = st?.code;
   const norm = normalizeStatusCode(raw);
   return `raw=${raw} (${typeof raw}) norm=${norm} msg=${st?.message} leader=${st?.leader_hint} shard=${st?.shard_id} retryAfterMs=${st?.retry_after_ms}`;
+}
+
+function recordOperationOutcome(operation, res) {
+  const code = normalizeStatusCode(res?.message?.status?.code);
+  const transportOk = res && res.status === grpc.StatusOK;
+  const notFoundIsTolerated = transportOk && code === StatusCode.NOT_FOUND &&
+    (operation === "GET" || operation === "DELETE");
+  const operationOk = transportOk && code === StatusCode.OK;
+
+  grpc_failures.add(!(operationOk || notFoundIsTolerated));
+  tolerated_not_found.add(notFoundIsTolerated);
 }
 
 // --------------------
@@ -252,15 +265,7 @@ export default function () {
       },
     });
 
-    const putCode = normalizeStatusCode(res?.message?.status?.code);
-    const putOk = res && res.status === grpc.StatusOK && (
-      putCode === StatusCode.OK ||
-      putCode === StatusCode.NOT_LEADER ||
-      putCode === StatusCode.SHARD_MOVED ||
-      putCode === StatusCode.UNAVAILABLE ||
-      putCode === StatusCode.TIMEOUT
-    );
-    grpc_failures.add(!putOk);
+    recordOperationOutcome("PUT", res);
 
   } else if (DELETE_PCT > 0 && roll < WRITE_PCT + DELETE_PCT) {
     const res = client.invoke(`${SERVICE}/Delete`, {
@@ -284,16 +289,7 @@ export default function () {
       },
     });
 
-    const delCode = normalizeStatusCode(res?.message?.status?.code);
-    const delOk = res && res.status === grpc.StatusOK && (
-      delCode === StatusCode.OK ||
-      delCode === StatusCode.NOT_FOUND ||
-      delCode === StatusCode.NOT_LEADER ||
-      delCode === StatusCode.SHARD_MOVED ||
-      delCode === StatusCode.UNAVAILABLE ||
-      delCode === StatusCode.TIMEOUT
-    );
-    grpc_failures.add(!delOk);
+    recordOperationOutcome("DELETE", res);
 
   } else {
     const res = client.invoke(`${SERVICE}/Get`, buildGetPayload(
@@ -317,16 +313,7 @@ export default function () {
       },
     });
 
-    const getCode = normalizeStatusCode(res?.message?.status?.code);
-    const getOk = res && res.status === grpc.StatusOK && (
-      getCode === StatusCode.OK ||
-      getCode === StatusCode.NOT_FOUND ||
-      getCode === StatusCode.NOT_LEADER ||
-      getCode === StatusCode.SHARD_MOVED ||
-      getCode === StatusCode.UNAVAILABLE ||
-      getCode === StatusCode.TIMEOUT
-    );
-    grpc_failures.add(!getOk);
+    recordOperationOutcome("GET", res);
   }
 
   sleep(SLEEP_MS / 1000.0);

@@ -1,36 +1,56 @@
 package com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftCommand;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.RaftConfiguration;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.election.RaftElectionManager;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.election.RaftElectionTimer;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.election.RaftVoteHandler;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.replication.RaftAppendEntriesHandler;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.replication.RaftHeartbeatManager;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.replication.RaftInstallSnapshotHandler;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.replication.RaftReplicationManager;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.state.RaftNodeState;
 import com.danieljhkim.kvdb.kvclustercoordinator.raft.state.RaftRole;
+import com.danieljhkim.kvdb.kvclustercoordinator.raft.statemachine.StubRaftStateMachine;
+import com.danieljhkim.kvdb.proto.raft.AppendEntriesRequest;
 import com.danieljhkim.kvdb.proto.raft.AppendEntriesResponse;
+import com.danieljhkim.kvdb.proto.raft.InstallSnapshotRequest;
 import com.danieljhkim.kvdb.proto.raft.InstallSnapshotResponse;
+import com.danieljhkim.kvdb.proto.raft.RequestVoteRequest;
+import com.danieljhkim.kvdb.proto.raft.RequestVoteResponse;
 import java.io.BufferedOutputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadInfo;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Properties;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 class RaftPersistenceTest {
 
@@ -254,6 +274,358 @@ class RaftPersistenceTest {
                     CompletionException.class,
                     () -> snapshotManager.replicateToPeer("follower").join());
             assertLeaderAtDurableTerm(fixture, stateDir);
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(IncomingRpc.class)
+    void incomingTermSaveCannotEraseConcurrentVoteAfterRestart(IncomingRpc rpc) throws Exception {
+        try (FollowerFixture fixture = new FollowerFixture(tempDir, null)) {
+            fixture.store.pause(5, null, false);
+            PendingCall<Boolean> incoming = fixture.call(() -> fixture.incoming(rpc, 5));
+            fixture.store.awaitSave();
+            PendingCall<RequestVoteResponse> vote = fixture.call(() -> fixture.vote(5, "candidate-a"));
+            assertWaitingForState(vote, fixture.state);
+
+            fixture.store.resume();
+            assertTrue(incoming.get());
+            assertTrue(vote.get().getVoteGranted());
+            fixture.assertDurableVoteAndRestart(5, "candidate-a", "candidate-b");
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(IncomingRpc.class)
+    void incomingTermSaveCannotRegressConcurrentHigherTermVote(IncomingRpc rpc) throws Exception {
+        try (FollowerFixture fixture = new FollowerFixture(tempDir, null)) {
+            fixture.store.pause(5, null, false);
+            PendingCall<Boolean> incoming = fixture.call(() -> fixture.incoming(rpc, 5));
+            fixture.store.awaitSave();
+            PendingCall<RequestVoteResponse> vote = fixture.call(() -> fixture.vote(6, "candidate-a"));
+            assertWaitingForState(vote, fixture.state);
+
+            fixture.store.resume();
+            assertTrue(incoming.get());
+            assertTrue(vote.get().getVoteGranted());
+            fixture.assertDurableVoteAndRestart(6, "candidate-a", "candidate-b");
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(IncomingRpc.class)
+    void requestQueuedBehindVoteSavePreservesThatVote(IncomingRpc rpc) throws Exception {
+        try (FollowerFixture fixture = new FollowerFixture(tempDir, null)) {
+            fixture.store.pause(5, "candidate-a", false);
+            PendingCall<RequestVoteResponse> vote = fixture.call(() -> fixture.vote(5, "candidate-a"));
+            fixture.store.awaitSave();
+            PendingCall<Boolean> incoming = fixture.call(() -> fixture.incoming(rpc, 5));
+            assertWaitingForState(incoming, fixture.state);
+
+            fixture.store.resume();
+            assertTrue(vote.get().getVoteGranted());
+            assertTrue(incoming.get());
+            fixture.assertDurableVoteAndRestart(5, "candidate-a", "candidate-b");
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(IncomingRpc.class)
+    void failedIncomingTermFsyncPreservesPriorVoteAndRejectsConcurrentSecondVote(IncomingRpc rpc) throws Exception {
+        try (FollowerFixture fixture = new FollowerFixture(tempDir, "candidate-a")) {
+            fixture.store.pause(5, null, true);
+            PendingCall<Boolean> incoming = fixture.call(() -> {
+                if (rpc == IncomingRpc.SNAPSHOT) {
+                    assertThrows(IOException.class, () -> fixture.incoming(rpc, 5));
+                    return false;
+                }
+                return fixture.incoming(rpc, 5);
+            });
+            fixture.store.awaitSave();
+            PendingCall<RequestVoteResponse> vote = fixture.call(() -> fixture.vote(4, "candidate-b"));
+            assertWaitingForState(vote, fixture.state);
+
+            fixture.store.resume();
+            assertFalse(incoming.get());
+            assertFalse(vote.get().getVoteGranted());
+            fixture.assertDurableVoteAndRestart(4, "candidate-a", "candidate-b");
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(IncomingRpc.class)
+    void failedVoteFsyncNeverGrantsVoteWhileIncomingRequestWaits(IncomingRpc rpc) throws Exception {
+        try (FollowerFixture fixture = new FollowerFixture(tempDir, null)) {
+            fixture.store.pause(5, "candidate-a", true);
+            PendingCall<RequestVoteResponse> vote = fixture.call(() -> fixture.vote(5, "candidate-a"));
+            fixture.store.awaitSave();
+            PendingCall<Boolean> incoming = fixture.call(() -> fixture.incoming(rpc, 5));
+            assertWaitingForState(incoming, fixture.state);
+
+            fixture.store.resume();
+            assertFalse(vote.get().getVoteGranted());
+            assertTrue(incoming.get());
+            assertNull(fixture.state.getVotedFor());
+            assertTrue(fixture.vote(5, "candidate-b").getVoteGranted());
+            fixture.assertDurableVoteAndRestart(5, "candidate-b", "candidate-a");
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(IncomingRpc.class)
+    void concurrentIncomingHandlersSerializeTermChecks(IncomingRpc first) throws Exception {
+        try (FollowerFixture fixture = new FollowerFixture(tempDir, null)) {
+            fixture.store.pause(5, null, false);
+            PendingCall<Boolean> incoming = fixture.call(() -> fixture.incoming(first, 5));
+            fixture.store.awaitSave();
+            IncomingRpc second = first == IncomingRpc.APPEND ? IncomingRpc.SNAPSHOT : IncomingRpc.APPEND;
+            PendingCall<Boolean> higher = fixture.call(() -> fixture.incoming(second, 6));
+            assertWaitingForState(higher, fixture.state);
+
+            fixture.store.resume();
+            assertTrue(incoming.get());
+            assertTrue(higher.get());
+            assertTrue(fixture.vote(6, "candidate-a").getVoteGranted());
+            fixture.assertDurableVoteAndRestart(6, "candidate-a", "candidate-b");
+            assertFalse(fixture.incoming(first, 5), "A delayed lower-term request must be rejected");
+            fixture.assertDurableVoteAndRestart(6, "candidate-a", "candidate-b");
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(IncomingRpc.class)
+    void electionQueuedBehindIncomingTermSaveUsesTheNewTerm(IncomingRpc rpc) throws Exception {
+        try (FollowerFixture fixture = new FollowerFixture(tempDir, null)) {
+            fixture.store.pause(5, null, false);
+            PendingCall<Boolean> incoming = fixture.call(() -> fixture.incoming(rpc, 5));
+            fixture.store.awaitSave();
+            PendingCall<Void> election = fixture.call(() -> {
+                fixture.elections.startElection();
+                return null;
+            });
+            assertWaitingForState(election, fixture.state);
+
+            fixture.store.resume();
+            assertTrue(incoming.get());
+            election.get();
+            assertEquals(RaftRole.CANDIDATE, fixture.state.getCurrentRole());
+            fixture.assertDurableVoteAndRestart(6, "follower", "candidate-a");
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(IncomingRpc.class)
+    void incomingRequestQueuedBehindElectionCannotEraseSelfVote(IncomingRpc rpc) throws Exception {
+        try (FollowerFixture fixture = new FollowerFixture(tempDir, null)) {
+            fixture.store.pause(5, "follower", false);
+            PendingCall<Void> election = fixture.call(() -> {
+                fixture.elections.startElection();
+                return null;
+            });
+            fixture.store.awaitSave();
+            PendingCall<Boolean> incoming = fixture.call(() -> fixture.incoming(rpc, 5));
+            assertWaitingForState(incoming, fixture.state);
+
+            fixture.store.resume();
+            election.get();
+            assertTrue(incoming.get());
+            fixture.assertDurableVoteAndRestart(5, "follower", "candidate-a");
+        }
+    }
+
+    private enum IncomingRpc {
+        APPEND,
+        SNAPSHOT
+    }
+
+    /** Observe actual contention on the shared monitor, rather than assuming a sleeping thread ran. */
+    private static void assertWaitingForState(PendingCall<?> call, RaftNodeState state) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!call.future.isDone() && System.nanoTime() < deadline) {
+            ThreadInfo info = ManagementFactory.getThreadMXBean().getThreadInfo(call.thread.threadId());
+            if (info != null
+                    && info.getThreadState() == Thread.State.BLOCKED
+                    && info.getLockInfo() != null
+                    && info.getLockInfo().getIdentityHashCode() == System.identityHashCode(state)) {
+                return;
+            }
+            Thread.sleep(10);
+        }
+        assertTrue(false, "Concurrent operation did not block on the shared Raft state monitor");
+    }
+
+    private record PendingCall<T>(Thread thread, FutureTask<T> future) {
+        T get() throws Exception {
+            return future.get(10, TimeUnit.SECONDS);
+        }
+    }
+
+    /** Pauses before the real store replacement and optionally fails the real file-fsync boundary once. */
+    private static final class PausingStateStore extends RaftPersistentStateStore {
+        private final AtomicBoolean failFsync;
+        private final AtomicBoolean pauseNext = new AtomicBoolean();
+        private final CountDownLatch saveEntered = new CountDownLatch(1);
+        private final CountDownLatch saveReleased = new CountDownLatch(1);
+        private long pausedTerm;
+        private String pausedVote;
+        private boolean failPausedSave;
+
+        PausingStateStore(Path directory, AtomicBoolean failFsync) throws IOException {
+            super(directory, new DurableFileOps() {
+                @Override
+                public void forceFile(Path path) throws IOException {
+                    if (failFsync.getAndSet(false)) {
+                        throw new IOException("injected incoming term/vote file fsync failure");
+                    }
+                    super.forceFile(path);
+                }
+            });
+            this.failFsync = failFsync;
+        }
+
+        void pause(long term, String vote, boolean fail) {
+            pausedTerm = term;
+            pausedVote = vote;
+            failPausedSave = fail;
+            pauseNext.set(true);
+        }
+
+        @Override
+        public void save(long term, String vote) throws IOException {
+            if (term == pausedTerm && Objects.equals(vote, pausedVote) && pauseNext.compareAndSet(true, false)) {
+                saveEntered.countDown();
+                try {
+                    if (!saveReleased.await(10, TimeUnit.SECONDS)) {
+                        throw new IOException("Timed out waiting to release controlled save");
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted at controlled save", e);
+                }
+                failFsync.set(failPausedSave);
+            }
+            super.save(term, vote);
+        }
+
+        void awaitSave() throws InterruptedException {
+            assertTrue(saveEntered.await(10, TimeUnit.SECONDS), "Save boundary was not reached");
+        }
+
+        void resume() {
+            saveReleased.countDown();
+        }
+    }
+
+    private static final class FollowerFixture implements AutoCloseable {
+        private final Path directory;
+        private final FileBasedRaftLog log;
+        private final PausingStateStore store;
+        private final RaftNodeState state;
+        private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        private final List<Thread> calls = new ArrayList<>();
+        private final RaftElectionTimer timer;
+        private final RaftVoteHandler votes;
+        private final RaftAppendEntriesHandler appends;
+        private final RaftInstallSnapshotHandler snapshots;
+        private final RaftElectionManager elections;
+
+        FollowerFixture(Path directory, String initialVote) throws IOException {
+            this.directory = directory;
+            this.store = new PausingStateStore(directory, new AtomicBoolean());
+            store.save(4, initialVote);
+            this.log = new FileBasedRaftLog(directory.resolve("raft.log"));
+            this.state = new RaftNodeState("follower", log, 4, initialVote);
+            RaftConfiguration config = RaftConfiguration.builder()
+                    .nodeId("follower")
+                    .clusterMembers(Map.of("follower", "follower:1", "peer", "peer:2"))
+                    .dataDirectory(directory.toString())
+                    .electionTimeoutMin(Duration.ofHours(1))
+                    .electionTimeoutMax(Duration.ofHours(2))
+                    .build();
+            this.timer = new RaftElectionTimer("follower", config, scheduler, () -> {
+                throw new AssertionError("unexpected election timeout");
+            });
+            this.votes = new RaftVoteHandler("follower", state, store, timer);
+            this.appends = new RaftAppendEntriesHandler("follower", state, store, timer);
+            this.snapshots = new RaftInstallSnapshotHandler(
+                    "follower",
+                    state,
+                    store,
+                    new RaftSnapshotStore(directory.resolve("snapshots")),
+                    new StubRaftStateMachine(),
+                    timer);
+            this.elections = new RaftElectionManager(
+                    "follower", config, state, store, timer, (peer, request) -> new CompletableFuture<>());
+        }
+
+        boolean incoming(IncomingRpc rpc, long term) throws IOException {
+            if (rpc == IncomingRpc.APPEND) {
+                return appends.handleAppendEntries(AppendEntriesRequest.newBuilder()
+                                .setTerm(term)
+                                .setLeaderId("leader")
+                                .build())
+                        .getSuccess();
+            }
+            // An already-applied snapshot still exercises term handling, without unrelated chunk/application work.
+            return snapshots
+                    .handleInstallSnapshot(InstallSnapshotRequest.newBuilder()
+                            .setTerm(term)
+                            .setLeaderId("leader")
+                            .setLastIncludedIndex(0)
+                            .build())
+                    .getSuccess();
+        }
+
+        RequestVoteResponse vote(long term, String candidate) {
+            return votes.handleRequestVote(voteRequest(term, candidate));
+        }
+
+        <T> PendingCall<T> call(Callable<T> operation) {
+            FutureTask<T> future = new FutureTask<>(operation);
+            Thread thread = new Thread(future, "controlled-raft-handler");
+            calls.add(thread);
+            thread.start();
+            return new PendingCall<>(thread, future);
+        }
+
+        void assertDurableVoteAndRestart(long term, String candidate, String rejectedCandidate) throws Exception {
+            assertEquals(term, state.getCurrentTerm());
+            assertEquals(candidate, state.getVotedFor());
+            // Open new store, log, state and handler instances as a restarted follower would.
+            RaftPersistentStateStore restartedStore = new RaftPersistentStateStore(directory.toString());
+            var durable = restartedStore.load();
+            assertEquals(term, durable.getCurrentTerm());
+            assertEquals(candidate, durable.getVotedFor());
+            try (FileBasedRaftLog restartedLog = new FileBasedRaftLog(directory.resolve("raft.log"))) {
+                RaftNodeState restartedState =
+                        new RaftNodeState("follower", restartedLog, durable.getCurrentTerm(), durable.getVotedFor());
+                RaftVoteHandler restartedVotes = new RaftVoteHandler("follower", restartedState, restartedStore, timer);
+                assertFalse(restartedVotes
+                        .handleRequestVote(voteRequest(term, rejectedCandidate))
+                        .getVoteGranted());
+                assertTrue(restartedVotes
+                        .handleRequestVote(voteRequest(term, candidate))
+                        .getVoteGranted());
+            }
+        }
+
+        private static RequestVoteRequest voteRequest(long term, String candidate) {
+            return RequestVoteRequest.newBuilder()
+                    .setTerm(term)
+                    .setCandidateId(candidate)
+                    .build();
+        }
+
+        @Override
+        public void close() throws Exception {
+            store.resume();
+            for (Thread call : calls) {
+                call.join(TimeUnit.SECONDS.toMillis(10));
+                assertFalse(call.isAlive(), "Controlled handler thread did not finish");
+            }
+            timer.stop();
+            scheduler.shutdownNow();
+            assertTrue(scheduler.awaitTermination(10, TimeUnit.SECONDS));
+            log.close();
         }
     }
 

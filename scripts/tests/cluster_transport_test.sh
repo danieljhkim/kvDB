@@ -42,9 +42,12 @@ case "${method##*/}" in
   RegisterNode|InitShards) echo '{"success": true}' ;;
   Put)
     sed -n 's/.*"value":"\([^"]*\)".*/\1/p' <<< "$data" > "$STUB_VALUE_FILE"
-    echo '{"version": "1"}'
+    echo '{"status": {"code": "OK"}, "version": "1"}'
     ;;
-  Get) echo "{\"kv\": {\"value\": \"$(cat "$STUB_VALUE_FILE")\", \"version\": \"1\"}}" ;;
+  Get)
+    key="$(sed -n 's/.*"key":"\([^"]*\)".*/\1/p' <<< "$data")"
+    echo "{\"status\": {\"code\": \"OK\"}, \"kv\": {\"key\": \"$key\", \"value\": \"$(cat "$STUB_VALUE_FILE")\", \"version\": \"1\"}}"
+    ;;
   *) echo "stub grpcurl: unexpected method $method" >&2; exit 1 ;;
 esac
 STUB

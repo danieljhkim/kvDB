@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.danieljhkim.kvdb.kvclustercoordinator.converter.RaftCommandConverter;
@@ -21,6 +22,8 @@ import com.danieljhkim.kvdb.proto.raft.AppendEntriesResponse;
 import com.danieljhkim.kvdb.proto.raft.InstallSnapshotRequest;
 import com.danieljhkim.kvdb.proto.raft.InstallSnapshotResponse;
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -31,9 +34,16 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.function.UnaryOperator;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -121,6 +131,112 @@ class RaftNodeCommitIntegrationTest {
                     .equals(List.of("storage-1", "storage-2"))));
         } finally {
             network.nodes.values().forEach(RaftNode::stop);
+        }
+    }
+
+    @Test
+    void concurrentSubmissionsReceiveDistinctConsecutiveIndexes() throws Exception {
+        AppendGate gate = new AppendGate();
+        PersistentCluster cluster = createPersistentCluster(members(), gate::wrap);
+        startAndElect(cluster, "n1");
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+
+        try {
+            RaftNode leader = cluster.network.nodes.get("n1");
+            gate.armNextAppend();
+            AtomicReference<Thread> secondThread = new AtomicReference<>();
+
+            CompletableFuture<CompletableFuture<Void>> first = CompletableFuture.supplyAsync(
+                    () -> leader.submitCommand(new RaftCommand.RegisterNode("storage-1", "storage-1:9000", "zone-a")),
+                    executor);
+            assertTrue(gate.entered.await(5, TimeUnit.SECONDS), "First submission never reached the log append");
+
+            CompletableFuture<CompletableFuture<Void>> second = CompletableFuture.supplyAsync(
+                    () -> {
+                        secondThread.set(Thread.currentThread());
+                        return leader.submitCommand(
+                                new RaftCommand.RegisterNode("storage-2", "storage-2:9000", "zone-b"));
+                    },
+                    executor);
+
+            // The second submission must queue behind the in-flight allocation instead of reading the same
+            // last index and appending concurrently.
+            await(() -> secondThread.get() != null && secondThread.get().getState() == Thread.State.BLOCKED);
+            assertEquals(1, gate.appends.get(), "Second submission must not append while the first allocation is open");
+
+            gate.release.countDown();
+            first.get(5, TimeUnit.SECONDS).get(5, TimeUnit.SECONDS);
+            second.get(5, TimeUnit.SECONDS).get(5, TimeUnit.SECONDS);
+
+            RaftLog leaderLog = leader.getState().getLog();
+            assertEquals(2, leaderLog.lastIndex());
+            RaftLogEntry entry1 = leaderLog.getEntry(1).orElseThrow();
+            RaftLogEntry entry2 = leaderLog.getEntry(2).orElseThrow();
+            assertEquals(leader.getCurrentTerm(), entry1.term());
+            assertEquals(leader.getCurrentTerm(), entry2.term());
+            assertEquals(2, leader.getState().getCommitIndex());
+            assertEquals(2, leader.getState().getLastApplied());
+            assertEquals(
+                    2, cluster.stateMachines.get("n1").getSnapshot().getNodes().size());
+        } finally {
+            gate.release.countDown();
+            executor.shutdownNow();
+            cluster.stop();
+        }
+    }
+
+    @Test
+    void roleTransitionDuringSubmissionKeepsTermAndLogConsistentWithoutHoldingLockAwaitingQuorum() throws Exception {
+        AppendGate gate = new AppendGate();
+        PersistentCluster cluster = createPersistentCluster(members(), gate::wrap);
+        startAndElect(cluster, "n1");
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+
+        try {
+            RaftNode leader = cluster.network.nodes.get("n1");
+            long leaderTerm = leader.getCurrentTerm();
+            // No quorum is reachable, so the accepted submission stays pending in the replication wait.
+            cluster.network.block("n1", "n2");
+            cluster.network.block("n1", "n3");
+            gate.armNextAppend();
+            AtomicReference<Thread> stepDownThread = new AtomicReference<>();
+
+            CompletableFuture<CompletableFuture<Void>> inFlight = CompletableFuture.supplyAsync(
+                    () -> leader.submitCommand(new RaftCommand.RegisterNode("storage-1", "storage-1:9000", "zone-a")),
+                    executor);
+            assertTrue(gate.entered.await(5, TimeUnit.SECONDS), "Submission never reached the log append");
+
+            CompletableFuture<Void> stepDown = CompletableFuture.runAsync(
+                    () -> {
+                        stepDownThread.set(Thread.currentThread());
+                        leader.getState().becomeFollower(leaderTerm + 1, "n2");
+                    },
+                    executor);
+            // The role transition must wait for the open allocation rather than interleave with it.
+            await(() -> stepDownThread.get() != null && stepDownThread.get().getState() == Thread.State.BLOCKED);
+            assertTrue(leader.isLeader());
+            assertFalse(stepDown.isDone());
+
+            gate.release.countDown();
+            CompletableFuture<Void> accepted = inFlight.get(5, TimeUnit.SECONDS);
+            // Completing proves the state monitor is not held while the accepted entry awaits quorum.
+            stepDown.get(5, TimeUnit.SECONDS);
+            assertFalse(accepted.isDone() && !accepted.isCompletedExceptionally(), "Entry must not commit");
+
+            ExecutionException rejected = assertThrows(ExecutionException.class, () -> leader.submitCommand(
+                            new RaftCommand.RegisterNode("storage-2", "storage-2:9000", "zone-b"))
+                    .get(5, TimeUnit.SECONDS));
+            assertTrue(rejected.getCause() instanceof IllegalStateException);
+
+            RaftLog leaderLog = leader.getState().getLog();
+            assertEquals(1, leaderLog.lastIndex(), "A rejected submission must not leave a log entry");
+            assertEquals(leaderTerm, leaderLog.getEntry(1).orElseThrow().term());
+            assertEquals(leaderTerm + 1, leader.getCurrentTerm());
+            assertFalse(leader.isLeader());
+        } finally {
+            gate.release.countDown();
+            executor.shutdownNow();
+            cluster.stop();
         }
     }
 
@@ -484,16 +600,23 @@ class RaftNodeCommitIntegrationTest {
     }
 
     private PersistentCluster createPersistentCluster(Map<String, String> members) throws IOException {
+        return createPersistentCluster(members, UnaryOperator.identity());
+    }
+
+    /** Creates a cluster whose n1 log is wrapped by {@code n1LogWrapper}; other nodes use the plain durable log. */
+    private PersistentCluster createPersistentCluster(Map<String, String> members, UnaryOperator<RaftLog> n1LogWrapper)
+            throws IOException {
         ControlledNetwork network = new ControlledNetwork();
         Map<String, StubRaftStateMachine> stateMachines = new ConcurrentHashMap<>();
         for (String nodeId : members.keySet()) {
             Path dataDirectory = tempDir.resolve(nodeId);
             StubRaftStateMachine stateMachine = new StubRaftStateMachine();
             stateMachines.put(nodeId, stateMachine);
+            RaftLog raftLog = new FileBasedRaftLog(dataDirectory.resolve("log"));
             RaftNode node = new RaftNode(
                     nodeId,
                     configuration(nodeId, members, dataDirectory),
-                    new FileBasedRaftLog(dataDirectory.resolve("log")),
+                    nodeId.equals("n1") ? n1LogWrapper.apply(raftLog) : raftLog,
                     new RaftPersistentStateStore(dataDirectory.toString()),
                     stateMachine,
                     (peer, request) -> CompletableFuture.failedFuture(new AssertionError("unexpected vote RPC")),
@@ -552,6 +675,37 @@ class RaftNodeCommitIntegrationTest {
             Thread.sleep(10);
         }
         assertTrue(condition.getAsBoolean(), "Condition was not satisfied before timeout");
+    }
+
+    /** Holds one armed append inside the production log so a test can interleave other threads with it. */
+    private static final class AppendGate {
+
+        final CountDownLatch entered = new CountDownLatch(1);
+        final CountDownLatch release = new CountDownLatch(1);
+        final AtomicInteger appends = new AtomicInteger();
+        private final AtomicBoolean armed = new AtomicBoolean();
+
+        void armNextAppend() {
+            armed.set(true);
+        }
+
+        RaftLog wrap(RaftLog delegate) {
+            return (RaftLog) Proxy.newProxyInstance(
+                    RaftLog.class.getClassLoader(), new Class<?>[] {RaftLog.class}, (proxy, method, args) -> {
+                        if (method.getName().equals("append")) {
+                            appends.incrementAndGet();
+                            if (armed.compareAndSet(true, false)) {
+                                entered.countDown();
+                                release.await(10, TimeUnit.SECONDS);
+                            }
+                        }
+                        try {
+                            return method.invoke(delegate, args);
+                        } catch (InvocationTargetException e) {
+                            throw e.getCause();
+                        }
+                    });
+        }
     }
 
     private record Link(String from, String to) {}

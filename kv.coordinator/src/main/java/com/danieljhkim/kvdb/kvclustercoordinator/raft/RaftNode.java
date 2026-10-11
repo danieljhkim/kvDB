@@ -289,23 +289,28 @@ public class RaftNode {
      */
     public CompletableFuture<Void> submitCommand(RaftCommand command) {
         if (!state.isLeader()) {
-            return CompletableFuture.failedFuture(
-                    new IllegalStateException("Not the leader. Current leader: " + state.getCurrentLeader()));
+            return notLeaderFailure();
         }
         if (!stateMachineApplier.isRunning()) {
             return CompletableFuture.failedFuture(new IllegalStateException("State machine applier is unavailable"));
         }
 
+        long index;
         try {
-            // Append to local log
-            long index = state.getLog().lastIndex() + 1;
-            long term = state.getCurrentTerm();
-            var entry = com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLogEntry.create(
-                    index, term, command);
-            state.getLog().append(entry);
-
-            log.debug("[{}] Appended command to log at index {} term {}", nodeId, index, term);
-
+            // Leadership, term, index allocation and the durable append form one atomic step. The state monitor
+            // also serializes role/term transitions, so the entry is stamped with the term in which this node was
+            // verified to be leader. Replication and application are awaited only after the monitor is released.
+            synchronized (state) {
+                if (!state.isLeader()) {
+                    return notLeaderFailure();
+                }
+                index = state.getLog().lastIndex() + 1;
+                long term = state.getCurrentTerm();
+                var entry = com.danieljhkim.kvdb.kvclustercoordinator.raft.persistence.RaftLogEntry.create(
+                        index, term, command);
+                state.getLog().append(entry);
+                log.debug("[{}] Appended command to log at index {} term {}", nodeId, index, term);
+            }
             // Replicate to followers
             return replicationManager.replicateToAll().thenCompose(ignored -> {
                 // After replication, do not acknowledge the command until application succeeds.
@@ -323,6 +328,11 @@ public class RaftNode {
             log.error("[{}] Failed to append command to log", nodeId, e);
             return CompletableFuture.failedFuture(e);
         }
+    }
+
+    private CompletableFuture<Void> notLeaderFailure() {
+        return CompletableFuture.failedFuture(
+                new IllegalStateException("Not the leader. Current leader: " + state.getCurrentLeader()));
     }
 
     /**

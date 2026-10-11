@@ -38,15 +38,18 @@ public class RaftInstallSnapshotHandler {
 
     public InstallSnapshotResponse handleInstallSnapshot(InstallSnapshotRequest request) throws IOException {
         synchronized (state.getApplicationLock()) {
-            if (request.getTerm() < state.getCurrentTerm()) {
-                return response(false, 0);
+            // Use the same term/vote boundary as RequestVote, elections, and AppendEntries.
+            synchronized (state) {
+                if (request.getTerm() < state.getCurrentTerm()) {
+                    return response(false, 0);
+                }
+                if (request.getTerm() > state.getCurrentTerm()) {
+                    persistentStore.save(request.getTerm(), null);
+                    state.updateTerm(request.getTerm());
+                }
+                state.transitionToFollower(request.getLeaderId());
+                electionTimer.reset();
             }
-            if (request.getTerm() > state.getCurrentTerm()) {
-                persistentStore.save(request.getTerm(), null);
-                state.updateTerm(request.getTerm());
-            }
-            state.transitionToFollower(request.getLeaderId());
-            electionTimer.reset();
 
             if (request.getLastIncludedIndex() <= state.getLastApplied()) {
                 // A retry or delayed older snapshot cannot replace newer applied state.

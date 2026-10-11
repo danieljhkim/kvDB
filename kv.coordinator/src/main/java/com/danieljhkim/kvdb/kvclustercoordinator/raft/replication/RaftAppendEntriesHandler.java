@@ -53,7 +53,6 @@ public class RaftAppendEntriesHandler {
      */
     public AppendEntriesResponse handleAppendEntries(AppendEntriesRequest request) {
         long requestTerm = request.getTerm();
-        long currentTerm = state.getCurrentTerm();
         String leaderId = request.getLeaderId();
 
         log.debug(
@@ -66,30 +65,18 @@ public class RaftAppendEntriesHandler {
                 request.getEntriesCount(),
                 request.getLeaderCommit());
 
-        // 1. Reply false if term < currentTerm (§5.1)
-        if (requestTerm < currentTerm) {
-            log.debug(
-                    "[{}] Rejecting AppendEntries from {} due to stale term (request={}, current={})",
-                    nodeId,
-                    leaderId,
-                    requestTerm,
-                    currentTerm);
-            return AppendEntriesResponse.newBuilder()
-                    .setTerm(state.getCurrentTerm())
-                    .setSuccess(false)
-                    .setFollowerId(nodeId)
-                    .build();
-        }
-
-        // Update term if necessary and step down to follower
-        if (requestTerm > currentTerm) {
-            log.info("[{}] Discovered higher term {} from leader {}, updating term", nodeId, requestTerm, leaderId);
-
-            // Persist FIRST, then update memory for crash safety
-            try {
-                persistentStore.save(requestTerm, null);
-            } catch (IOException e) {
-                log.error("[{}] Failed to persist term update, rejecting AppendEntries", nodeId, e);
+        // Serialize the term check, durable replacement, and memory transition with votes and elections.
+        // Locking the store alone cannot prevent a stale term check from clearing a newly granted vote.
+        synchronized (state) {
+            long currentTerm = state.getCurrentTerm();
+            // 1. Reply false if term < currentTerm (§5.1)
+            if (requestTerm < currentTerm) {
+                log.debug(
+                        "[{}] Rejecting AppendEntries from {} due to stale term (request={}, current={})",
+                        nodeId,
+                        leaderId,
+                        requestTerm,
+                        currentTerm);
                 return AppendEntriesResponse.newBuilder()
                         .setTerm(state.getCurrentTerm())
                         .setSuccess(false)
@@ -97,12 +84,29 @@ public class RaftAppendEntriesHandler {
                         .build();
             }
 
-            state.updateTerm(requestTerm);
-        }
+            // Update term if necessary and step down to follower
+            if (requestTerm > currentTerm) {
+                log.info("[{}] Discovered higher term {} from leader {}, updating term", nodeId, requestTerm, leaderId);
 
-        // Recognize leader and reset election timer
-        state.transitionToFollower(leaderId);
-        electionTimer.reset();
+                // Persist FIRST, then update memory for crash safety
+                try {
+                    persistentStore.save(requestTerm, null);
+                } catch (IOException e) {
+                    log.error("[{}] Failed to persist term update, rejecting AppendEntries", nodeId, e);
+                    return AppendEntriesResponse.newBuilder()
+                            .setTerm(state.getCurrentTerm())
+                            .setSuccess(false)
+                            .setFollowerId(nodeId)
+                            .build();
+                }
+
+                state.updateTerm(requestTerm);
+            }
+
+            // Recognize leader and reset election timer
+            state.transitionToFollower(leaderId);
+            electionTimer.reset();
+        }
 
         RaftLog raftLog = state.getLog();
 

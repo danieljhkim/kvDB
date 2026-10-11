@@ -11,6 +11,8 @@ import java.nio.file.Path;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class VersionedShardMutationTest {
 
@@ -208,6 +210,110 @@ class VersionedShardMutationTest {
         assertEquals("two", follower.get("b"));
         leader.shutdown();
         follower.shutdown();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void newerPrepareReclaimsAbortedOwnerAndFencesDelayedMessagesAcrossRestart(boolean restartBeforeReplacement) {
+        String name = "aborted-prepare";
+        ShardKVStore store = newStore(name);
+        ReplicatedMutation aborted =
+                store.prepareNewMutation("aborted", 3, MutationKind.SET, "orphan", "hidden", "old-leader");
+        assertTrue(store.abortMutation(aborted).success());
+        if (restartBeforeReplacement) {
+            store.shutdown();
+            store = newStore(name);
+        }
+        ReplicatedMutation replacement = aborted.toBuilder()
+                .setRequestId("replacement")
+                .setEpoch(4)
+                .setKey(ByteString.copyFromUtf8("successor"))
+                .setValue(ByteString.copyFromUtf8("visible"))
+                .setOriginNodeId("new-leader")
+                .build();
+        assertFalse(store.prepareMutation(replacement.toBuilder().setEpoch(3).build())
+                .success());
+        assertFalse(store.prepareMutation(replacement.toBuilder().setEpoch(2).build())
+                .success());
+        assertFalse(store.commitMutation(aborted).success());
+        assertTrue(store.prepareMutation(replacement).success());
+        assertFalse(store.prepareMutation(aborted).success());
+        assertFalse(store.commitMutation(aborted).success());
+        assertTrue(store.abortMutation(aborted).success());
+        store.shutdown();
+
+        // The replacement's PREPARE, even without a COMMIT, must retain ownership and fence the old request.
+        store = newStore(name);
+        assertFalse(store.prepareMutation(aborted).success());
+        assertFalse(store.commitMutation(aborted).success());
+        assertTrue(store.prepareMutation(replacement).success());
+        assertTrue(store.commitMutation(replacement).success());
+        store.shutdown();
+
+        store = newStore(name);
+        assertEquals("(nil)", store.get("orphan"));
+        assertEquals("visible", store.get("successor"));
+        assertEquals(List.of(replacement), store.committedMutations());
+        assertFalse(store.prepareMutation(aborted).success());
+        assertFalse(store.commitMutation(aborted).success());
+        assertCommittedOwnerCannotBeReplaced(store, replacement);
+        store.shutdown();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void committedTransferReclaimsAbortedOwnerAcrossRestart(boolean restartBeforeReplacement) {
+        // The RPC's current epoch authorizes transfer; retained committed payloads can have older epochs.
+        for (long committedEpoch : List.of(2L, 3L, 4L)) {
+            for (boolean superseded : List.of(false, true)) {
+                String name = "aborted-transfer-" + committedEpoch + "-" + superseded;
+                ShardKVStore store = newStore(name);
+                ReplicatedMutation aborted =
+                        store.prepareNewMutation("aborted", 3, MutationKind.SET, "orphan", "hidden", "old-leader");
+                assertTrue(store.abortMutation(aborted).success());
+                if (restartBeforeReplacement) {
+                    store.shutdown();
+                    store = newStore(name);
+                }
+                ReplicatedMutation committed = aborted.toBuilder()
+                        .setRequestId("committed")
+                        .setEpoch(committedEpoch)
+                        .setKey(ByteString.copyFromUtf8("successor"))
+                        .setValue(ByteString.copyFromUtf8("visible"))
+                        .build();
+                ShardKVStore.TransferEntry entry = new ShardKVStore.TransferEntry(committed, superseded);
+                assertTrue(store.applyTransferEntry(entry).success());
+                assertTrue(store.applyTransferEntry(entry).success());
+                assertFalse(store.prepareMutation(aborted).success());
+                assertFalse(store.commitMutation(aborted).success());
+                assertTrue(store.abortMutation(aborted).success());
+                store.shutdown();
+
+                store = newStore(name);
+                assertTrue(store.isCommitted("committed"));
+                assertEquals(1, store.committedVersion());
+                assertEquals(List.of(entry), store.committedHistoryAfter(0, 10));
+                assertEquals("(nil)", store.get("orphan"));
+                assertEquals(superseded ? "(nil)" : "visible", store.get("successor"));
+                assertFalse(store.prepareMutation(aborted).success());
+                assertFalse(store.commitMutation(aborted).success());
+                assertCommittedOwnerCannotBeReplaced(store, committed);
+                store.shutdown();
+            }
+        }
+    }
+
+    private void assertCommittedOwnerCannotBeReplaced(ShardKVStore store, ReplicatedMutation owner) {
+        ReplicatedMutation conflict = owner.toBuilder()
+                .setRequestId("conflict")
+                .setEpoch(5)
+                .setValue(ByteString.copyFromUtf8("conflicting"))
+                .build();
+        assertFalse(store.prepareMutation(conflict).success());
+        assertFalse(store.commitMutation(conflict).success());
+        assertFalse(store.repairMutation(conflict).success());
+        assertFalse(store.recordSupersededMutation(conflict).success());
+        assertFalse(store.abortMutation(owner).success());
     }
 
     private void commit(ShardKVStore store, String requestId, MutationKind kind, String key, String value) {

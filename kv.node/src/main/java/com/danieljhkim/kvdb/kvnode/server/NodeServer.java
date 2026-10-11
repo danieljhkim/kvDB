@@ -19,6 +19,7 @@ import com.danieljhkim.kvdb.kvcommon.observability.ServiceLifecycle;
 import com.danieljhkim.kvdb.kvnode.client.ReplicaWriteClient;
 import com.danieljhkim.kvdb.kvnode.service.KVServiceImpl;
 import com.danieljhkim.kvdb.kvnode.storage.ShardStoreRegistry;
+import com.danieljhkim.kvdb.kvnode.storage.WriteHistoryPolicy;
 import io.grpc.Server;
 import io.grpc.ServerInterceptors;
 import io.grpc.ServerServiceDefinition;
@@ -74,8 +75,13 @@ public class NodeServer {
         long replicationTimeoutMs = replicationConfig != null ? replicationConfig.getTimeoutMs() : 500;
         KvRequestLimits requestLimits = new KvRequestLimits(appConfig.getLimits());
 
-        this.shardStores =
-                new ShardStoreRegistry(baseDir, snapshotFileName, walFileName, flushInterval, enableAutoFlush);
+        WriteHistoryPolicy historyPolicy = new WriteHistoryPolicy(
+                persistenceConfig.getWriteHistoryMinRetentionMs(),
+                persistenceConfig.getWriteHistoryMaxEntries(),
+                persistenceConfig.getWriteHistoryMaxBytes());
+
+        this.shardStores = new ShardStoreRegistry(
+                baseDir, snapshotFileName, walFileName, flushInterval, enableAutoFlush, historyPolicy);
         this.replicaWriteClient = new ReplicaWriteClient(Duration.ofMillis(replicationTimeoutMs));
 
         this.watchShardMapClient = new WatchShardMapClient(shardMapCache, coordinatorClientManager);

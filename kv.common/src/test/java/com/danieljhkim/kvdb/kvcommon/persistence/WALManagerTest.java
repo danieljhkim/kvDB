@@ -188,6 +188,51 @@ class WALManagerTest {
     }
 
     @Test
+    void rewriteAtomicallyReplacesRecordsAndAcceptsLaterAppends() {
+        Path wal = tempDir.resolve("rewrite.wal");
+        WALManager manager = new WALManager(wal.toString());
+        manager.log("SET", "old-1", "dropped");
+        manager.log("SET", "old-2", "dropped");
+
+        manager.rewrite(List.of(
+                new WALManager.WalRecord("SET", new byte[] {0, 1}, new byte[] {(byte) 0xff}),
+                new WALManager.WalRecord("DEL", "gone".getBytes(), null)));
+        manager.log("SET", "appended", "kept");
+        manager.close();
+
+        List<WALManager.WalRecord> records = new WALManager(wal.toString()).replayRecords();
+        assertEquals(
+                List.of("SET", "DEL", "SET"),
+                records.stream().map(WALManager.WalRecord::operation).toList());
+        assertArrayEquals(new byte[] {0, 1}, records.get(0).key());
+        assertArrayEquals(new byte[] {(byte) 0xff}, records.get(0).value());
+        assertEquals(null, records.get(1).value());
+        assertArrayEquals("appended".getBytes(), records.get(2).key());
+    }
+
+    @Test
+    void interruptedRewriteLeavesThePreviousWalIntactAndAppendable() throws IOException {
+        Path wal = tempDir.resolve("rewrite-interrupted.wal");
+        WALManager manager = new WALManager(wal.toString(), point -> {
+            if (point == WALManager.FaultPoint.BEFORE_ROTATE_MOVE) {
+                throw new IOException("rename interrupted");
+            }
+        });
+        manager.log("SET", "key", "value");
+        byte[] before = Files.readAllBytes(wal);
+
+        assertThrows(
+                UncheckedIOException.class,
+                () -> manager.rewrite(List.of(new WALManager.WalRecord("SET", "other".getBytes(), null))));
+        assertArrayEquals(before, Files.readAllBytes(wal));
+        manager.log("SET", "after", "value");
+        assertEquals(
+                List.of("key", "after"),
+                new WALManager(wal.toString())
+                        .replay().stream().map(op -> op[1]).toList());
+    }
+
+    @Test
     void rotationDirectorySyncFailurePropagates() {
         Path wal = tempDir.resolve("rotate-sync.wal");
         WALManager manager = new WALManager(wal.toString(), point -> {
@@ -198,6 +243,8 @@ class WALManagerTest {
         manager.log("SET", "key", "value");
 
         assertThrows(UncheckedIOException.class, manager::clear);
+        // The rename is not known to be durable, so later appends must not be acknowledged.
+        assertThrows(UncheckedIOException.class, () -> manager.log("SET", "after", "value"));
     }
 
     private static List<Integer> findRecordOffsets(byte[] contents) {

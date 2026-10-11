@@ -23,16 +23,28 @@ public class ShardStoreRegistry {
     private final String walFileName;
     private final int flushInterval;
     private final boolean enableAutoFlush;
+    private final WriteHistoryPolicy historyPolicy;
 
     private final ConcurrentMap<String, ShardKVStore> stores = new ConcurrentHashMap<>();
 
     public ShardStoreRegistry(
             String baseDir, String snapshotFileName, String walFileName, int flushInterval, boolean enableAutoFlush) {
+        this(baseDir, snapshotFileName, walFileName, flushInterval, enableAutoFlush, WriteHistoryPolicy.DEFAULT);
+    }
+
+    public ShardStoreRegistry(
+            String baseDir,
+            String snapshotFileName,
+            String walFileName,
+            int flushInterval,
+            boolean enableAutoFlush,
+            WriteHistoryPolicy historyPolicy) {
         this.baseDir = Paths.get(Objects.requireNonNull(baseDir, "baseDir"));
         this.snapshotFileName = Objects.requireNonNull(snapshotFileName, "snapshotFileName");
         this.walFileName = Objects.requireNonNull(walFileName, "walFileName");
         this.flushInterval = flushInterval;
         this.enableAutoFlush = enableAutoFlush;
+        this.historyPolicy = Objects.requireNonNull(historyPolicy, "historyPolicy");
     }
 
     public ShardKVStore getOrCreate(String shardId) {
@@ -54,7 +66,7 @@ public class ShardStoreRegistry {
         Path shardDir = baseDir.resolve(shardId);
         String snapshotPath = shardDir.resolve(snapshotFileName).toString();
         String walPath = shardDir.resolve(walFileName).toString();
-        return new ShardKVStore(shardId, snapshotPath, walPath, flushInterval, enableAutoFlush);
+        return new ShardKVStore(shardId, snapshotPath, walPath, flushInterval, enableAutoFlush, historyPolicy);
     }
 
     public void shutdown() {

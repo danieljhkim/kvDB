@@ -5,6 +5,7 @@ import com.danieljhkim.kvdb.kvadmin.api.dto.NodeDto;
 import com.danieljhkim.kvdb.kvadmin.api.dto.ShardDto;
 import com.danieljhkim.kvdb.kvadmin.api.dto.ShardMapSnapshotDto;
 import com.danieljhkim.kvdb.kvadmin.client.CoordinatorReadClient;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import lombok.RequiredArgsConstructor;
@@ -30,8 +31,9 @@ public class ClusterAdminService {
             throw new IllegalStateException("Shard map not available: cannot generate cluster summary");
         }
 
-        List<NodeDto> nodes = nodeAdminService.listNodes();
-        List<ShardDto> shards = shardAdminService.listShards();
+        // Keep membership and counts consistent with the captured map version, including on cache hits.
+        List<NodeDto> nodes = new ArrayList<>(shardMap.getNodes().values());
+        List<ShardDto> shards = new ArrayList<>(shardMap.getShards().values());
 
         long aliveNodes =
                 nodes.stream().filter(n -> "ALIVE".equals(n.getStatus())).count();

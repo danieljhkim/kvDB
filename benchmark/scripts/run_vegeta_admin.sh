@@ -101,7 +101,12 @@ bootstrap_cluster() {
   echo
 } | tee "${OUT_FILE}"
 
-if [[ "${BOOTSTRAP,,}" == "true" ]]; then
+bootstrap_enabled=false
+case "${BOOTSTRAP}" in
+  [Tt][Rr][Uu][Ee]) bootstrap_enabled=true ;;
+esac
+
+if [[ "${bootstrap_enabled}" == "true" ]]; then
   bootstrap_cluster | tee -a "${OUT_FILE}"
   echo | tee -a "${OUT_FILE}"
 fi

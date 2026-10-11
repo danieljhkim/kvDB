@@ -117,6 +117,13 @@ public class RaftStateMachineImpl implements RaftStateMachine {
     }
 
     @Override
+    public void registerWatch(Consumer<ShardMapSnapshot> registration) {
+        synchronized (writeLock) {
+            registration.accept(snapshotRef.get());
+        }
+    }
+
+    @Override
     public byte[] takeSnapshot() {
         synchronized (writeLock) {
             return ProtoConverter.toProto(snapshotRef.get()).toByteArray();

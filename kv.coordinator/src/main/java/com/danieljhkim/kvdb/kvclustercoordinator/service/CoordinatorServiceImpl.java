@@ -71,10 +71,9 @@ public class CoordinatorServiceImpl extends CoordinatorGrpc.CoordinatorImplBase 
             StreamObserver<com.danieljhkim.kvdb.proto.coordinator.ShardMapDelta> responseObserver) {
         requireLeader();
         long fromVersion = request.getFromVersion();
-        ShardMapSnapshot snapshot = raftStateMachine.getSnapshot();
-
-        // Register watcher (will send initial state if newer)
-        watcherManager.registerWatcher(responseObserver, fromVersion, snapshot);
+        // Capture, activate and send initial state under the same lock used to publish mutations.
+        raftStateMachine.registerWatch(
+                snapshot -> watcherManager.registerWatcher(responseObserver, fromVersion, snapshot));
         logger.info("WatchShardMap: registered watcher fromVersion={}", fromVersion);
 
         // Note: Stream stays open. Client disconnect handled by gRPC.

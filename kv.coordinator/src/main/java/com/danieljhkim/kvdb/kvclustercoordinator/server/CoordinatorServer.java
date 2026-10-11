@@ -78,9 +78,10 @@ public class CoordinatorServer {
         // Initialize watcher manager
         this.watcherManager = new WatcherManager();
 
-        // Initialize Raft state machine with watcher
-        this.raftStateMachine = new RaftStateMachineImpl();
-        this.raftStateMachine.addWatcher(watcherManager);
+        // Initialize Raft state machine with watcher. The node is constructed next and applies through this machine.
+        RaftStateMachineImpl stateMachine = new RaftStateMachineImpl();
+        this.raftStateMachine = stateMachine;
+        stateMachine.addWatcher(watcherManager);
 
         // Initialize gRPC client for peer communication
         Map<String, String> peers = raftConfig.getPeers();
@@ -97,6 +98,8 @@ public class CoordinatorServer {
                 raftGrpcClient::sendAppendEntries,
                 raftGrpcClient::sendInstallSnapshot,
                 snapshotStore);
+        // NodeHealthChecker gates probes on the state machine. Bind the live role after the node exists.
+        stateMachine.bindLeadership(this.raftNode::isLeader);
 
         // When stepping down from leader, close all watcher connections
         // so clients reconnect to the new leader

@@ -10,6 +10,7 @@ import com.kvdb.proto.kvstore.PingRequest;
 import io.grpc.ManagedChannel;
 import io.grpc.StatusRuntimeException;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -41,6 +42,15 @@ public class NodeHealthChecker {
             RaftStateMachine raftStateMachine, Function<RaftCommand, CompletableFuture<Void>> commandSubmitter) {
         this.raftStateMachine = raftStateMachine;
         this.commandSubmitter = commandSubmitter;
+    }
+
+    /**
+     * Caches one probe stub for {@code address}. Tests inject a successful Ping here, which is the health-check
+     * transport seam. Production probes still create stubs lazily in {@link #getOrCreateStub}, and only after the
+     * leader gate.
+     */
+    void installProbeStub(String address, KVServiceGrpc.KVServiceBlockingStub stub) {
+        stubs.put(Objects.requireNonNull(address, "address"), Objects.requireNonNull(stub, "stub"));
     }
 
     /**

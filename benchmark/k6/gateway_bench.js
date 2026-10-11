@@ -3,6 +3,7 @@ import { check, sleep } from "k6";
 import { Rate } from "k6/metrics";
 import encoding from "k6/encoding";
 import { buildGetPayload, validateBenchmarkOptions } from "./read_options.js";
+import { buildConnectParams, buildInvokeParams, buildRequestContext, resolveClientAuth } from "./auth_options.js";
 
 /**
  * k6 gRPC benchmark for kvdb.gateway.KvGateway (Get/Put/Delete)
@@ -14,6 +15,13 @@ import { buildGetPayload, validateBenchmarkOptions } from "./read_options.js";
  *   TARGET=localhost:7000 PROTO_DIR=./kv.proto/src/main/proto k6 run gateway_bench.js
  *   WRITE_PCT=30 DELETE_PCT=5 KEYSPACE=20000 VALUE_BYTES=512 k6 run gateway_bench.js
  *   PRELOAD=true PRELOAD_KEYS=5000 k6 run gateway_bench.js
+ *
+ * Authentication (default is mTLS; there is no implicit plaintext fallback):
+ *   KVDB_CLIENT_TLS_TRUST_BUNDLE=ca.pem KVDB_CLIENT_TLS_CERT_CHAIN=client.crt \
+ *     KVDB_CLIENT_TLS_PRIVATE_KEY=client.key k6 run gateway_bench.js
+ *   KVDB_GRPC_SECURITY_MODE=development-plaintext KVDB_ENV=local k6 run gateway_bench.js
+ * KVDB_CLIENT_TENANT_ID / KVDB_CLIENT_PRINCIPAL (development default: dev / k6) are sent as the
+ * development identity header and as the request ctx; in mTLS they must match the certificate SAN.
  */
 
 // --------------------
@@ -42,6 +50,9 @@ const REQUIRE_IDEMPOTENCY = (__ENV.REQUIRE_IDEMPOTENCY || "true").toLowerCase() 
 
 // Reject unsupported overrides in init, before k6 starts setup or VUs.
 validateBenchmarkOptions(CONSISTENCY, DURABILITY);
+
+// Resolve transport authentication in init (open() is init-only); throws before any VU starts.
+const AUTH = resolveClientAuth(__ENV, { tenant: "dev", principal: "k6" }, open);
 
 // Custom failure metric (k6 versions differ on built-in gRPC failure metric availability)
 const grpc_failures = new Rate("grpc_failures");
@@ -135,12 +146,7 @@ function nowMs() {
 }
 
 function requestContext() {
-  return {
-    request_id: `req-${__VU}-${__ITER}-${nowMs()}`,
-    tenant_id: "dev",
-    principal: "k6",
-    traceparent: "",
-  };
+  return buildRequestContext(AUTH, `req-${__VU}-${__ITER}-${nowMs()}`);
 }
 
 function writeOptions() {
@@ -164,7 +170,7 @@ client.load([PROTO_DIR], PROTO_FILE);
 
 function connectOnce() {
   if (connected) return;
-  client.connect(TARGET, { plaintext: true });
+  client.connect(TARGET, buildConnectParams(AUTH));
   connected = true;
 }
 
@@ -182,11 +188,11 @@ export function setup() {
   for (let i = 0; i < PRELOAD_KEYS; i++) {
     const key = toBytes(`k-${i}`); // deterministic seed keys
     const res = client.invoke(`${SERVICE}/Put`, {
-      ctx: { request_id: `preload-${i}`, tenant_id: "dev", principal: "k6", traceparent: "" },
+      ctx: buildRequestContext(AUTH, `preload-${i}`),
       key: key,
       value: value,
       options: writeOptions(),
-    }, { timeout: DEADLINE_MS });
+    }, buildInvokeParams(AUTH, DEADLINE_MS));
 
     if (res && res.status === grpc.StatusOK && normalizeStatusCode(res.message?.status?.code) === StatusCode.OK) ok++;
   }
@@ -213,7 +219,7 @@ export default function () {
       key: toBytes(ks),
       value: makeValueBytes(VALUE_BYTES),
       options: writeOptions(),
-    }, { timeout: DEADLINE_MS });
+    }, buildInvokeParams(AUTH, DEADLINE_MS));
 
     if (debugOnce) console.log(`PUT ${statusMessage(res)}`);
 
@@ -245,7 +251,7 @@ export default function () {
       ctx: requestContext(),
       key: toBytes(ks),
       options: writeOptions(),
-    }, { timeout: DEADLINE_MS });
+    }, buildInvokeParams(AUTH, DEADLINE_MS));
 
     if (debugOnce) console.log(`DELETE ${statusMessage(res)}`);
 
@@ -278,7 +284,7 @@ export default function () {
       requestContext(), // strongly recommended for reads per proto comment
       toBytes(ks),
       CONSISTENCY,
-    ), { timeout: DEADLINE_MS });
+    ), buildInvokeParams(AUTH, DEADLINE_MS));
 
     if (debugOnce) console.log(`GET ${statusMessage(res)}`);
 

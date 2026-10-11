@@ -15,6 +15,7 @@ import { buildConnectParams, buildInvokeParams, buildRequestContext, resolveClie
  *   TARGET=localhost:7000 PROTO_DIR=./kv.proto/src/main/proto k6 run gateway_bench.js
  *   WRITE_PCT=30 DELETE_PCT=5 KEYSPACE=20000 VALUE_BYTES=512 k6 run gateway_bench.js
  *   PRELOAD=true PRELOAD_KEYS=5000 k6 run gateway_bench.js
+ *   WRITE_IF_VERSION_EQUALS=3 k6 run gateway_bench.js   # CAS workload: every Put and Delete expects version 3
  *
  * Authentication (default is mTLS; there is no implicit plaintext fallback):
  *   KVDB_CLIENT_TLS_TRUST_BUNDLE=ca.pem KVDB_CLIENT_TLS_CERT_CHAIN=client.crt \
@@ -47,6 +48,9 @@ const SLEEP_MS = Number(__ENV.SLEEP_MS || 10);
 const CONSISTENCY = (__ENV.CONSISTENCY || "STRONG").toUpperCase(); // STRONG | EVENTUAL
 const DURABILITY = (__ENV.DURABILITY || "WAL_SYNC").toUpperCase(); // WAL_SYNC | QUORUM_SYNC (WAL_ASYNC is unsupported)
 const REQUIRE_IDEMPOTENCY = (__ENV.REQUIRE_IDEMPOTENCY || "true").toLowerCase() === "true";
+// Optional CAS workload. Unset means unconditional writes; the gateway treats an absent condition
+// differently from an expected version of 0, so an explicit 0 is still sent.
+const WRITE_IF_VERSION_EQUALS = parseWriteIfVersionEquals(__ENV.WRITE_IF_VERSION_EQUALS);
 
 // Reject unsupported overrides in init, before k6 starts setup or VUs.
 validateBenchmarkOptions(CONSISTENCY, DURABILITY);
@@ -145,18 +149,30 @@ function nowMs() {
   return Date.now();
 }
 
+function parseWriteIfVersionEquals(raw) {
+  if (raw === undefined || raw === "") return undefined;
+  const text = String(raw).trim();
+  const version = Number(text);
+  if (!/^\d+$/.test(text) || !Number.isSafeInteger(version)) {
+    throw new Error(`WRITE_IF_VERSION_EQUALS must be a non-negative integer (got "${raw}")`);
+  }
+  return version;
+}
+
 function requestContext() {
   return buildRequestContext(AUTH, `req-${__VU}-${__ITER}-${nowMs()}`);
 }
 
 function writeOptions() {
-  return {
+  const options = {
     durability: DURABILITY, // e.g. "WAL_SYNC" | "QUORUM_SYNC"
     require_idempotency: REQUIRE_IDEMPOTENCY,
     ttl_ms: 0,
-    if_version_equals: 0,
     if_not_exists: false,
   };
+  // Presence is significant: set the condition only when a CAS workload asks for it.
+  if (WRITE_IF_VERSION_EQUALS !== undefined) options.if_version_equals = WRITE_IF_VERSION_EQUALS;
+  return options;
 }
 
 // --------------------

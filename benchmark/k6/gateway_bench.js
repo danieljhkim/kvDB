@@ -2,6 +2,7 @@ import grpc from "k6/net/grpc";
 import { check, sleep } from "k6";
 import { Rate } from "k6/metrics";
 import encoding from "k6/encoding";
+import { buildGetPayload, validateBenchmarkOptions } from "./read_options.js";
 
 /**
  * k6 gRPC benchmark for kvdb.gateway.KvGateway (Get/Put/Delete)
@@ -36,8 +37,11 @@ const SLEEP_MS = Number(__ENV.SLEEP_MS || 10);
 
 // Consistency / durability knobs (defaults are reasonable)
 const CONSISTENCY = (__ENV.CONSISTENCY || "STRONG").toUpperCase(); // STRONG | EVENTUAL
-const DURABILITY = (__ENV.DURABILITY || "WAL_SYNC").toUpperCase(); // WAL_SYNC | QUORUM_SYNC | WAL_ASYNC
+const DURABILITY = (__ENV.DURABILITY || "WAL_SYNC").toUpperCase(); // WAL_SYNC | QUORUM_SYNC (WAL_ASYNC is unsupported)
 const REQUIRE_IDEMPOTENCY = (__ENV.REQUIRE_IDEMPOTENCY || "true").toLowerCase() === "true";
+
+// Reject unsupported overrides in init, before k6 starts setup or VUs.
+validateBenchmarkOptions(CONSISTENCY, DURABILITY);
 
 // Custom failure metric (k6 versions differ on built-in gRPC failure metric availability)
 const grpc_failures = new Rate("grpc_failures");
@@ -139,17 +143,9 @@ function requestContext() {
   };
 }
 
-function readOptions() {
-  return {
-    consistency: CONSISTENCY, // e.g. "STRONG" | "EVENTUAL"
-    read_mode: "READ_YOUR_WRITES",
-    max_staleness_ms: 0,
-  };
-}
-
 function writeOptions() {
   return {
-    durability: DURABILITY, // e.g. "WAL_SYNC" | "QUORUM_SYNC" | "WAL_ASYNC"
+    durability: DURABILITY, // e.g. "WAL_SYNC" | "QUORUM_SYNC"
     require_idempotency: REQUIRE_IDEMPOTENCY,
     ttl_ms: 0,
     if_version_equals: 0,
@@ -278,12 +274,11 @@ export default function () {
     grpc_failures.add(!delOk);
 
   } else {
-    const res = client.invoke(`${SERVICE}/Get`, {
-      ctx: requestContext(), // strongly recommended for reads per proto comment
-      key: toBytes(ks),
-      options: readOptions(),
-      head_only: false,
-    }, { timeout: DEADLINE_MS });
+    const res = client.invoke(`${SERVICE}/Get`, buildGetPayload(
+      requestContext(), // strongly recommended for reads per proto comment
+      toBytes(ks),
+      CONSISTENCY,
+    ), { timeout: DEADLINE_MS });
 
     if (debugOnce) console.log(`GET ${statusMessage(res)}`);
 
